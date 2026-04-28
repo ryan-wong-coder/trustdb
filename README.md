@@ -28,6 +28,7 @@ License: AGPL-3.0-only. See [LICENSE](LICENSE).
 - Proofstore backends for local file storage and Pebble; the production profile uses Pebble.
 - Paginated server-side record and root APIs with cursor/range-oriented access paths.
 - Portable `.tdbackup` create, verify, and resumable restore flow.
+- Public Go SDK for claim signing, server calls, proof export, and local verification.
 - Desktop client built with Wails + Vue that supports onboarding, local identity, server settings, file attestation, record management, proof refresh, local verification, and `.sproof` export.
 - Desktop local record storage backed by Pebble with indexes for list/search/filter paths.
 
@@ -205,6 +206,36 @@ cd clients/desktop
 go test ./...
 cd frontend
 npm run build
+```
+
+## Go SDK
+
+The public Go SDK lives in `sdk` and is imported as:
+
+```go
+import "github.com/ryan-wong-coder/trustdb/sdk"
+```
+
+Current SDK capabilities:
+
+- build and sign file claims with Ed25519;
+- submit signed claims to `POST /v1/claims`;
+- query records, proof bundles, STHs, GlobalLogProof, and STH anchor state;
+- export the recommended `.sproof` single-file proof;
+- verify `.sproof` and split proof artifacts locally.
+
+Minimal example:
+
+```go
+client, err := sdk.NewClient("http://127.0.0.1:8080")
+if err != nil {
+    return err
+}
+proof, err := client.ExportSingleProof(ctx, recordID)
+if err != nil {
+    return err
+}
+return sdk.WriteSingleProofFile("example.sproof", proof)
 ```
 
 ## Development Checks
