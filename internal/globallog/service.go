@@ -579,21 +579,6 @@ func (s *Service) subtreeRoot(ctx context.Context, start, width uint64) ([]byte,
 	return merkle.HashNode(left, right)
 }
 
-func (s *Service) leafHashes(ctx context.Context, treeSize uint64) ([][]byte, error) {
-	hashes := make([][]byte, treeSize)
-	for i := uint64(0); i < treeSize; i++ {
-		leaf, ok, err := s.store.GetGlobalLeaf(ctx, i)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			return nil, trusterr.New(trusterr.CodeNotFound, "requested STH is beyond global log size")
-		}
-		hashes[i] = append([]byte(nil), leaf.LeafHash...)
-	}
-	return hashes, nil
-}
-
 func rootFromFrontier(frontier [][]byte) ([]byte, error) {
 	var root []byte
 	for level := 0; level < len(frontier); level++ {

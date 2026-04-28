@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -19,6 +20,42 @@ func TestStoreLoadMissingConfigUsesDefaults(t *testing.T) {
 	cfg := store.getSettings()
 	if cfg.ServerURL != "http://127.0.0.1:8080" {
 		t.Fatalf("ServerURL = %q, want default", cfg.ServerURL)
+	}
+}
+
+func TestWailsRecordDTOsDoNotExposeTimeTime(t *testing.T) {
+	t.Parallel()
+
+	timeType := reflect.TypeOf(time.Time{})
+	for _, typ := range []reflect.Type{
+		reflect.TypeOf(LocalRecord{}),
+		reflect.TypeOf(RecordPage{}),
+		reflect.TypeOf(SubmitResult{}),
+	} {
+		assertNoTimeTimeFields(t, typ, timeType)
+	}
+}
+
+func assertNoTimeTimeFields(t *testing.T, typ, timeType reflect.Type) {
+	t.Helper()
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if typ == timeType {
+		t.Fatalf("%s exposes time.Time to Wails bindings", typ)
+	}
+	if typ.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		ft := field.Type
+		for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Slice {
+			ft = ft.Elem()
+		}
+		if ft == timeType {
+			t.Fatalf("%s.%s exposes time.Time to Wails bindings", typ, field.Name)
+		}
 	}
 }
 
