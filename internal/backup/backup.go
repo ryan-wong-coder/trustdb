@@ -621,47 +621,6 @@ func writeBytesTracked(tw *tar.Writer, manifest *Manifest, ordinal *int64, name,
 	return nil
 }
 
-func readArchive(path string, visit func(name string, data []byte) error) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return trusterr.Wrap(trusterr.CodeInternal, "open backup file", err)
-	}
-	defer f.Close()
-	var in io.Reader = f
-	if strings.HasSuffix(strings.ToLower(path), ".gz") || strings.HasSuffix(strings.ToLower(path), ".tdbackup") {
-		gz, err := gzip.NewReader(f)
-		if err == nil {
-			defer gz.Close()
-			in = gz
-		} else {
-			if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
-				return seekErr
-			}
-			in = f
-		}
-	}
-	tr := tar.NewReader(in)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "read backup archive", err)
-		}
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
-		data, err := io.ReadAll(io.LimitReader(tr, 512<<20))
-		if err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "read backup entry", err)
-		}
-		if err := visit(header.Name, data); err != nil {
-			return err
-		}
-	}
-}
-
 type archiveEntry struct {
 	Name     string
 	Size     int64
@@ -858,49 +817,6 @@ func writeRestoreCheckpoint(path string, cp RestoreCheckpoint) error {
 		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-func validateEntry(name string, data []byte) error {
-	switch {
-	case name == "manifest.json" || name == "summary.json":
-		var v Manifest
-		return json.Unmarshal(data, &v)
-	case strings.HasPrefix(name, "manifests/"):
-		var v model.BatchManifest
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "bundles/"):
-		var v model.ProofBundle
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "roots/"):
-		var v model.BatchRoot
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "global/leaves/"):
-		var v model.GlobalLogLeaf
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "global/nodes/"):
-		var v model.GlobalLogNode
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case name == "global/state.tdgstate":
-		var v model.GlobalLogState
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "global/sth/"):
-		var v model.SignedTreeHead
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "global/tiles/"):
-		var v model.GlobalLogTile
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "anchors/sth-outbox/"):
-		var v model.STHAnchorOutboxItem
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case strings.HasPrefix(name, "anchors/sth-result/"):
-		var v model.STHAnchorResult
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	case name == "checkpoint/wal.tdcheckpoint":
-		var v model.WALCheckpoint
-		return cborx.UnmarshalLimit(data, &v, 128<<20)
-	default:
-		return nil
-	}
 }
 
 func safeName(value string) string {

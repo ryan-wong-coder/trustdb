@@ -11,6 +11,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
 func newTestService(t testing.TB) (*Service, proofstore.LocalStore) {
@@ -140,7 +141,7 @@ func TestConsistencyProofMatchesSmallTreeReference(t *testing.T) {
 			t.Fatalf("AppendBatchRoot(%d): %v", i, err)
 		}
 	}
-	leaves, err := svc.leafHashes(ctx, 9)
+	leaves, err := leafHashesForReferenceTest(ctx, svc.store, 9)
 	if err != nil {
 		t.Fatalf("leafHashes: %v", err)
 	}
@@ -162,6 +163,21 @@ func TestConsistencyProofMatchesSmallTreeReference(t *testing.T) {
 			}
 		}
 	}
+}
+
+func leafHashesForReferenceTest(ctx context.Context, store Store, treeSize uint64) ([][]byte, error) {
+	hashes := make([][]byte, treeSize)
+	for i := uint64(0); i < treeSize; i++ {
+		leaf, ok, err := store.GetGlobalLeaf(ctx, i)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, trusterr.New(trusterr.CodeNotFound, "requested STH is beyond global log size")
+		}
+		hashes[i] = append([]byte(nil), leaf.LeafHash...)
+	}
+	return hashes, nil
 }
 
 func TestConsistencyProofUsesIndexedNodesInsteadOfFullLeafScan(t *testing.T) {

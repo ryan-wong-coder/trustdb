@@ -64,9 +64,10 @@ type Options struct {
 	OnCheckpointAdvanced func(context.Context, model.WALCheckpoint)
 	// OnBatchCommitted fires after a batch is fully persisted (manifest
 	// committed, bundles + root written, checkpoint advanced) with the
-	// BatchRoot that was just stored. The serve command uses this hook to
-	// append the batch root to the global log and enqueue the resulting
-	// STH for L5 anchoring. The hook must not block on slow IO for the same
+	// BatchRoot that was just stored. The serve command uses this hook only
+	// to persist a durable global-log outbox event and trigger the separate
+	// outbox worker; global append and L5 anchoring must remain outside the
+	// batch goroutine. The hook must not block on slow IO for the same
 	// reason as OnCheckpointAdvanced.
 	OnBatchCommitted func(context.Context, model.BatchRoot)
 }
@@ -439,10 +440,10 @@ func (s *Service) RecoverManifest(ctx context.Context, manifest model.BatchManif
 	return nil
 }
 
-// fireOnBatchCommitted runs the commit hook in a panic-safe wrapper so
-// a buggy global-log append cannot crash the batch worker. Running
-// synchronously (same caveat as OnCheckpointAdvanced) is intentional:
-// the hook owes the caller one bounded post-commit side effect.
+// fireOnBatchCommitted runs the commit hook in a panic-safe wrapper so a buggy
+// observer cannot crash the batch worker. It is intentionally synchronous only
+// for bounded local side effects such as durable outbox enqueue; slow global
+// append, external notary calls, or network IO belong in a separate worker.
 func (s *Service) fireOnBatchCommitted(ctx context.Context, root model.BatchRoot) {
 	if s.opts.OnBatchCommitted == nil {
 		return

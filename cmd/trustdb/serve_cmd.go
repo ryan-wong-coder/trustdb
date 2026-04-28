@@ -887,9 +887,8 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	}
 	// In directory mode we can skip entire segments that a committed
 	// checkpoint already covers. Legacy single-file WALs still go through
-	// the record-level skip below; loadWALRecords ignores minSegmentID for
-	// them. Legacy single-file WALs still go through the record-level skip
-	// below. Reading the checkpoint before the WAL also means a crash while
+	// the record-level skip below because they cannot skip by segment.
+	// Reading the checkpoint before the WAL also means a crash while
 	// appending a new segment cannot trick us into scanning deleted files.
 	var minSegmentID uint64
 	if hasCheckpoint {
