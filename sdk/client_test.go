@@ -1,0 +1,201 @@
+package sdk
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/ryan-wong-coder/trustdb/internal/cborx"
+	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
+)
+
+func TestClientSubmitSignedClaim(t *testing.T) {
+	t.Parallel()
+
+	signed := SignedClaim{
+		SchemaVersion: model.SchemaSignedClaim,
+		Claim: model.ClientClaim{
+			SchemaVersion:  model.SchemaClientClaim,
+			TenantID:       "tenant-1",
+			ClientID:       "client-1",
+			KeyID:          "key-1",
+			IdempotencyKey: "idem-1",
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/claims" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/cbor" {
+			t.Fatalf("Content-Type = %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "trustdb-go-sdk" {
+			t.Fatalf("User-Agent = %q", got)
+		}
+		var decoded SignedClaim
+		if err := cborx.DecodeReaderLimit(r.Body, &decoded, 1<<20); err != nil {
+			t.Fatalf("DecodeReaderLimit: %v", err)
+		}
+		if decoded.Claim.IdempotencyKey != "idem-1" {
+			t.Fatalf("decoded claim = %+v", decoded.Claim)
+		}
+		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
+			RecordID:      "tr1record",
+			Status:        "accepted",
+			ProofLevel:    ProofLevelL2,
+			BatchEnqueued: true,
+			ServerRecord: ServerRecord{
+				SchemaVersion: model.SchemaServerRecord,
+				RecordID:      "tr1record",
+			},
+			AcceptedReceipt: AcceptedReceipt{
+				SchemaVersion: model.SchemaAcceptedReceipt,
+				RecordID:      "tr1record",
+				Status:        "accepted",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	result, err := client.SubmitSignedClaim(context.Background(), signed)
+	if err != nil {
+		t.Fatalf("SubmitSignedClaim: %v", err)
+	}
+	if result.RecordID != "tr1record" || result.ProofLevel != ProofLevelL2 || !result.BatchEnqueued {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestClientListRecordsEncodesQuery(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/records" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		query := r.URL.Query()
+		if query.Get("limit") != "25" ||
+			query.Get("direction") != "asc" ||
+			query.Get("batch_id") != "batch-1" ||
+			query.Get("q") != "hello" {
+			t.Fatalf("query = %s", r.URL.RawQuery)
+		}
+		writeJSONForTest(t, w, http.StatusOK, recordsEnvelope{
+			Records: []RecordIndex{{
+				SchemaVersion: model.SchemaRecordIndex,
+				RecordID:      "tr1record",
+				BatchID:       "batch-1",
+			}},
+			Limit:      25,
+			Direction:  "asc",
+			NextCursor: "next",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	page, err := client.ListRecords(context.Background(), ListRecordsOptions{
+		Limit:     25,
+		Direction: RecordListDirectionAsc,
+		BatchID:   "batch-1",
+		Query:     "hello",
+	})
+	if err != nil {
+		t.Fatalf("ListRecords: %v", err)
+	}
+	if len(page.Records) != 1 || page.NextCursor != "next" {
+		t.Fatalf("page = %+v", page)
+	}
+}
+
+func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/proofs/tr1record":
+			writeJSONForTest(t, w, http.StatusOK, proofEnvelope{
+				RecordID:   "tr1record",
+				ProofLevel: ProofLevelL3,
+				ProofBundle: ProofBundle{
+					SchemaVersion: model.SchemaProofBundle,
+					RecordID:      "tr1record",
+					CommittedReceipt: CommittedReceipt{
+						BatchID: "batch-1",
+					},
+				},
+			})
+		case r.URL.Path == "/v1/global-log/inclusion/batch-1":
+			writeJSONForTest(t, w, http.StatusNotFound, map[string]string{
+				"code":    string(trusterr.CodeNotFound),
+				"message": "global proof not found",
+			})
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	proof, err := client.ExportSingleProof(context.Background(), "tr1record")
+	if err != nil {
+		t.Fatalf("ExportSingleProof: %v", err)
+	}
+	if proof.RecordID != "tr1record" || proof.ProofLevel != ProofLevelL3 || proof.GlobalProof != nil {
+		t.Fatalf("proof = %+v", proof)
+	}
+}
+
+func TestClientErrorIsDiagnosable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSONForTest(t, w, http.StatusConflict, map[string]string{
+			"code":    string(trusterr.CodeAlreadyExists),
+			"message": "duplicate claim",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.GetProofBundle(context.Background(), "tr1record")
+	if err == nil {
+		t.Fatal("GetProofBundle error = nil, want conflict")
+	}
+	var sdkErr *Error
+	if !errors.As(err, &sdkErr) {
+		t.Fatalf("error type = %T, want *sdk.Error", err)
+	}
+	if sdkErr.StatusCode != http.StatusConflict ||
+		sdkErr.Code != string(trusterr.CodeAlreadyExists) ||
+		!strings.Contains(sdkErr.Error(), "duplicate claim") {
+		t.Fatalf("sdk error = %+v", sdkErr)
+	}
+}
+
+func writeJSONForTest(t *testing.T, w http.ResponseWriter, status int, v any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+}
