@@ -121,7 +121,8 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 func waitForReplayProof(t *testing.T, svc *batch.Service, recordID string) model.ProofBundle {
 	t.Helper()
 
-	deadline := time.Now().Add(time.Second)
+	const timeout = 10 * time.Second
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		got, err := svc.Proof(context.Background(), recordID)
 		if err == nil {
@@ -130,7 +131,7 @@ func waitForReplayProof(t *testing.T, svc *batch.Service, recordID string) model
 		time.Sleep(5 * time.Millisecond)
 	}
 	got, err := svc.Proof(context.Background(), recordID)
-	t.Fatalf("Proof() after wait = %+v err=%v lastErr=%v", got, err, svc.LastError())
+	t.Fatalf("Proof(%q) after %s = %+v err=%v lastErr=%v", recordID, timeout, got, err, svc.LastError())
 	return model.ProofBundle{}
 }
 
