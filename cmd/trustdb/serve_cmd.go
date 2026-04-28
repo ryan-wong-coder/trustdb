@@ -1,0 +1,1012 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"path/filepath"
+
+	"github.com/ryan-wong-coder/trustdb/internal/anchor"
+	"github.com/ryan-wong-coder/trustdb/internal/app"
+	"github.com/ryan-wong-coder/trustdb/internal/batch"
+	"github.com/ryan-wong-coder/trustdb/internal/globallog"
+	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
+	"github.com/ryan-wong-coder/trustdb/internal/ingest"
+	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/observability"
+	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
+	"github.com/ryan-wong-coder/trustdb/internal/wal"
+	"github.com/spf13/cobra"
+)
+
+func newServeCommand(rt *runtimeConfig) *cobra.Command {
+	var listen, serverKeyPath, walPath, proofDir, clientPubPath, registryPath, registryPubPath string
+	var queueSize, workers, batchQueueSize, batchMaxRecords int
+	var walMaxSegmentBytes int64
+	var walKeepSegments int
+	var walFsyncMode string
+	var readTimeoutText, writeTimeoutText, shutdownTimeoutText, batchMaxDelayText string
+	var walGroupCommitIntervalText string
+	var metastoreKind, metastorePath string
+	var anchorSinkKind, anchorPath string
+	var anchorOtsCalendars []string
+	var anchorOtsMinAccepted int
+	var anchorOtsTimeoutText string
+	var anchorOtsUpgradeEnabled bool
+	var anchorOtsUpgradeIntervalText string
+	var anchorOtsUpgradeBatchSize int
+	var anchorOtsUpgradeTimeoutText string
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Run a local TrustDB HTTP ingest server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			listen = stringOrConfig(cmd, rt, "listen", listen, "server.listen")
+			serverKeyPath = stringOrConfig(cmd, rt, "server-private-key", serverKeyPath, "keys.server_private")
+			walPath = stringOrConfig(cmd, rt, "wal", walPath, "wal")
+			proofDir = stringOrConfig(cmd, rt, "proof-dir", proofDir, "proof_dir")
+			metastoreKind = stringOrConfig(cmd, rt, "metastore", metastoreKind, "metastore")
+			metastorePath = stringOrConfig(cmd, rt, "metastore-path", metastorePath, "metastore_path")
+			anchorSinkKind = stringOrConfig(cmd, rt, "anchor-sink", anchorSinkKind, "anchor.sink")
+			anchorPath = stringOrConfig(cmd, rt, "anchor-path", anchorPath, "anchor.path")
+			// OTS sink options: calendars live as a list in viper
+			// ("anchor.ots.calendars"), other scalars via the usual
+			// stringOrConfig / intValue helpers so env override and
+			// YAML config stay consistent with the rest of the flags.
+			if cmd.Flags().Changed("anchor-ots-calendars") {
+				anchorOtsCalendars, _ = cmd.Flags().GetStringSlice("anchor-ots-calendars")
+			} else if vs := rt.viper.GetStringSlice("anchor.ots.calendars"); len(vs) > 0 {
+				anchorOtsCalendars = vs
+			}
+			if cmd.Flags().Changed("anchor-ots-min-accepted") {
+				anchorOtsMinAccepted, _ = cmd.Flags().GetInt("anchor-ots-min-accepted")
+			} else {
+				anchorOtsMinAccepted = rt.viper.GetInt("anchor.ots.min_accepted")
+			}
+			anchorOtsTimeoutText = stringOrLiteral(cmd, "anchor-ots-timeout", anchorOtsTimeoutText, rt.viper.GetString("anchor.ots.timeout"))
+			// OTS upgrader: default enabled (true) so flipping
+			// --anchor-sink=ots gives operators automatic
+			// pending→attested progression without a second flag.
+			// Operators who want to manage upgrades manually can
+			// pass --anchor-ots-upgrade-enabled=false or set
+			// anchor.ots.upgrade.enabled=false in the config file.
+			if cmd.Flags().Changed("anchor-ots-upgrade-enabled") {
+				anchorOtsUpgradeEnabled, _ = cmd.Flags().GetBool("anchor-ots-upgrade-enabled")
+			} else if rt.viper.IsSet("anchor.ots.upgrade.enabled") {
+				anchorOtsUpgradeEnabled = rt.viper.GetBool("anchor.ots.upgrade.enabled")
+			} else {
+				anchorOtsUpgradeEnabled = true
+			}
+			anchorOtsUpgradeIntervalText = stringOrLiteral(cmd, "anchor-ots-upgrade-interval", anchorOtsUpgradeIntervalText, rt.viper.GetString("anchor.ots.upgrade.interval"))
+			if cmd.Flags().Changed("anchor-ots-upgrade-batch-size") {
+				anchorOtsUpgradeBatchSize, _ = cmd.Flags().GetInt("anchor-ots-upgrade-batch-size")
+			} else {
+				anchorOtsUpgradeBatchSize = rt.viper.GetInt("anchor.ots.upgrade.batch_size")
+			}
+			anchorOtsUpgradeTimeoutText = stringOrLiteral(cmd, "anchor-ots-upgrade-timeout", anchorOtsUpgradeTimeoutText, rt.viper.GetString("anchor.ots.upgrade.timeout"))
+			clientPubPath = stringOrConfig(cmd, rt, "client-public-key", clientPubPath, "keys.client_public")
+			registryPath = stringOrConfig(cmd, rt, "key-registry", registryPath, "key_registry")
+			registryPubPath = stringOrConfig(cmd, rt, "registry-public-key", registryPubPath, "keys.registry_public")
+			if cmd.Flags().Changed("queue-size") {
+				queueSize, _ = cmd.Flags().GetInt("queue-size")
+			} else {
+				queueSize = rt.cfg.Server.QueueSize
+			}
+			if cmd.Flags().Changed("workers") {
+				workers, _ = cmd.Flags().GetInt("workers")
+			} else {
+				workers = rt.cfg.Server.Workers
+			}
+			if cmd.Flags().Changed("batch-queue-size") {
+				batchQueueSize, _ = cmd.Flags().GetInt("batch-queue-size")
+			} else {
+				batchQueueSize = rt.cfg.Batch.QueueSize
+			}
+			if cmd.Flags().Changed("batch-max-records") {
+				batchMaxRecords, _ = cmd.Flags().GetInt("batch-max-records")
+			} else {
+				batchMaxRecords = rt.cfg.Batch.MaxRecords
+			}
+			readTimeoutText = stringOrLiteral(cmd, "read-timeout", readTimeoutText, rt.cfg.Server.ReadTimeout)
+			writeTimeoutText = stringOrLiteral(cmd, "write-timeout", writeTimeoutText, rt.cfg.Server.WriteTimeout)
+			shutdownTimeoutText = stringOrLiteral(cmd, "shutdown-timeout", shutdownTimeoutText, rt.cfg.Server.ShutdownTimeout)
+			batchMaxDelayText = stringOrLiteral(cmd, "batch-max-delay", batchMaxDelayText, rt.cfg.Batch.MaxDelay)
+			if serverKeyPath == "" {
+				return usageError("serve requires server-private-key")
+			}
+			if clientPubPath == "" && registryPath == "" {
+				return usageError("serve requires either client-public-key or key-registry")
+			}
+			readTimeout, err := time.ParseDuration(readTimeoutText)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse read-timeout", err)
+			}
+			writeTimeout, err := time.ParseDuration(writeTimeoutText)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse write-timeout", err)
+			}
+			shutdownTimeout, err := time.ParseDuration(shutdownTimeoutText)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse shutdown-timeout", err)
+			}
+			batchMaxDelay, err := time.ParseDuration(batchMaxDelayText)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse batch-max-delay", err)
+			}
+			serverPriv, err := readPrivateKey(serverKeyPath)
+			if err != nil {
+				return err
+			}
+			clientPub, clientKeys, err := resolveClientKeys(clientPubPath, registryPath, registryPubPath, cmd.Flags().Changed("key-registry"))
+			if err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("wal-max-segment-bytes") {
+				walMaxSegmentBytes, _ = cmd.Flags().GetInt64("wal-max-segment-bytes")
+			}
+			if cmd.Flags().Changed("wal-keep-segments") {
+				walKeepSegments, _ = cmd.Flags().GetInt("wal-keep-segments")
+			}
+			walFsyncMode = stringOrLiteral(cmd, "wal-fsync-mode", walFsyncMode, rt.viper.GetString("wal.fsync_mode"))
+			if strings.TrimSpace(walFsyncMode) == "" {
+				walFsyncMode = wal.FsyncGroup
+			}
+			switch strings.ToLower(strings.TrimSpace(walFsyncMode)) {
+			case wal.FsyncStrict, wal.FsyncGroup, wal.FsyncBatch:
+			default:
+				return trusterr.New(trusterr.CodeInvalidArgument, "wal fsync mode must be strict, group, or batch")
+			}
+			walGroupCommitIntervalText = stringOrLiteral(cmd, "wal-group-commit-interval", walGroupCommitIntervalText, rt.viper.GetString("wal.group_commit_interval"))
+			if strings.TrimSpace(walGroupCommitIntervalText) == "" {
+				walGroupCommitIntervalText = "10ms"
+			}
+			walGroupCommitInterval, err := time.ParseDuration(walGroupCommitIntervalText)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse wal-group-commit-interval", err)
+			}
+			reg, metrics := observability.NewRegistry()
+			walOpts := wal.Options{
+				MaxSegmentBytes:     walMaxSegmentBytes,
+				FsyncMode:           walFsyncMode,
+				GroupCommitInterval: walGroupCommitInterval,
+				OnRotate: func(_, to uint64) {
+					metrics.WALActiveSegmentID.Set(float64(to))
+					// The count gauge is refreshed on rotate rather than
+					// read live so prometheus scrapes remain cheap; a
+					// fresh segment becoming active implies +1 file.
+					if err := refreshWALSegmentsTotal(metrics, walPath); err != nil {
+						rt.logger.Warn().Err(err).Str("wal", walPath).Msg("wal segment metric refresh failed")
+					}
+				},
+			}
+			writer, walMode, err := openWALWriterWithOptions(walPath, walOpts)
+			if err != nil {
+				return err
+			}
+			defer writer.Close()
+			rt.logger.Info().
+				Str("wal", walPath).
+				Str("mode", walMode).
+				Str("fsync_mode", walFsyncMode).
+				Dur("group_commit_interval", walGroupCommitInterval).
+				Int64("max_segment_bytes", walMaxSegmentBytes).
+				Int("keep_segments", walKeepSegments).
+				Msg("wal opened")
+			// Seed the startup values of the segment gauges so dashboards
+			// see the true on-disk count and active segment immediately,
+			// not after the first rotate/prune.
+			metrics.WALActiveSegmentID.Set(float64(writer.ActiveSegmentID()))
+			if walMode == "directory" {
+				if err := refreshWALSegmentsTotal(metrics, walPath); err != nil {
+					rt.logger.Warn().Err(err).Str("wal", walPath).Msg("wal segment metric refresh failed")
+				}
+			} else {
+				metrics.WALSegmentsTotal.Set(1)
+			}
+
+			idempotency := app.NewIdempotencyIndex()
+			engine := app.LocalEngine{
+				ServerID:         stringValue(cmd, rt, "server-id", "server_id"),
+				ServerKeyID:      stringValue(cmd, rt, "server-key-id", "server_key_id"),
+				ClientPublicKey:  clientPub,
+				ClientKeys:       clientKeys,
+				ServerPrivateKey: serverPriv,
+				WAL:              writer,
+				Idempotency:      idempotency,
+			}
+			ingestSvc := ingest.New(engine, ingest.Options{QueueSize: queueSize, Workers: workers}, metrics)
+			defer ingestSvc.Shutdown(context.Background())
+			// Pick the proof store backend from the CLI/config, defaulting
+			// to the file backend rooted at --proof-dir so existing
+			// deployments continue to work unchanged. When --metastore
+			// names a pebble backend without an explicit path we fall
+			// back to the proof_dir/pebble sub-directory so the Pebble
+			// WAL/manifests do not accidentally collide with the file
+			// backend's files living in the same directory.
+			metaPath := metastorePath
+			if metaPath == "" {
+				metaPath = proofDir
+			}
+			metaKind := metastoreKind
+			if metaKind == "" {
+				metaKind = string(proofstore.BackendPebble)
+			}
+			if metaKind == string(proofstore.BackendPebble) && metastorePath == "" {
+				metaPath = proofDir + "/pebble"
+			}
+			if metaKind == string(proofstore.BackendFile) {
+				rt.logger.Warn().Msg("file proofstore is intended for development/small datasets; use --metastore=pebble for production-scale attestations")
+			}
+			proofStore, err := proofstore.Open(proofstore.Config{
+				Kind: proofstore.Backend(metaKind),
+				Path: metaPath,
+			})
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if cerr := proofStore.Close(); cerr != nil {
+					rt.logger.Warn().Err(cerr).Msg("proofstore close failed")
+				}
+			}()
+			batchOpts := batch.Options{
+				QueueSize:  batchQueueSize,
+				MaxRecords: batchMaxRecords,
+				MaxDelay:   batchMaxDelay,
+				InitialSeq: restoreBatchSeq(context.Background(), rt, proofStore),
+			}
+			// Only wire automatic prune on directory-mode WALs: single-file
+			// deployments have no notion of "older segments to delete" so
+			// firing PruneSegmentsBefore against them is both pointless
+			// and confusing in the logs.
+			if walMode == "directory" {
+				batchOpts.OnCheckpointAdvanced = newPruneHook(rt, walPath, walKeepSegments, metrics)
+			}
+			// Build the anchor sink + worker before constructing the batch
+			// service so the OnBatchCommitted hook can close over a live
+			// service handle. "off" (or empty) disables L5 entirely; the
+			// file/noop sinks run the full outbox pipeline so tests and
+			// on-prem deployments exercise the same code paths as real
+			// external notaries.
+			anchorSvc, anchorAPI, anchorShutdown, err := buildAnchorService(rt, proofStore, metrics, anchorSinkKind, anchorPath, proofDir, otsSinkParams{
+				Calendars:   anchorOtsCalendars,
+				MinAccepted: anchorOtsMinAccepted,
+				TimeoutText: anchorOtsTimeoutText,
+			})
+			if err != nil {
+				return err
+			}
+			defer anchorShutdown()
+			globalSvc, err := globallog.New(globallog.Options{
+				Store:      proofStore,
+				LogID:      rt.cfg.Server.ID,
+				KeyID:      rt.cfg.Server.KeyID,
+				PrivateKey: serverPriv,
+			})
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInternal, "build global log service", err)
+			}
+			globalOutbox := globallog.NewOutboxWorker(globallog.OutboxConfig{
+				Store:  proofStore,
+				Global: globalSvc,
+				OnSTH: func(ctx context.Context, sth model.SignedTreeHead) {
+					if anchorSvc != nil {
+						enqueueSTHAnchor(ctx, rt, proofStore, anchorSvc, sth)
+					}
+				},
+				Logger: rt.logger,
+			})
+			defer globalOutbox.Stop()
+			batchOpts.OnBatchCommitted = newGlobalLogEnqueueHook(rt, proofStore, globalOutbox)
+			batchSvc := batch.New(engine, proofStore, batchOpts, metrics)
+			defer batchSvc.Shutdown(context.Background())
+			recovered, replayed, skipped, err := replayWALAccepted(context.Background(), walPath, engine, batchSvc, proofStore, metrics)
+			if err != nil {
+				return err
+			}
+			rt.logger.Info().
+				Int("recovered_batches", recovered).
+				Int("replayed", replayed).
+				Int("skipped", skipped).
+				Msg("wal replay complete")
+			if n, err := backfillGlobalLogOutbox(context.Background(), proofStore); err != nil {
+				rt.logger.Warn().Err(err).Msg("global log outbox backfill failed")
+			} else if n > 0 {
+				rt.logger.Info().Int("backfilled", n).Msg("global log outbox backfill complete")
+			}
+			globalOutbox.Start(context.Background())
+			globalOutbox.Trigger()
+			if anchorSvc != nil {
+				// Start *after* backfill so the worker sees the freshly
+				// enqueued items on its first tick.
+				anchorSvc.Start(context.Background())
+			}
+			// OTS upgrader: only meaningful when the anchor sink is
+			// the OpenTimestamps one. Enabled by default; the
+			// background worker will keep walking published OTS
+			// STHAnchorResults until every accepted calendar reaches
+			// terminal Bitcoin attestation. Stop it on shutdown
+			// before the proofstore so a sweep cannot race the
+			// store close.
+			otsUpgrader, err := buildOtsUpgrader(rt, proofStore, metrics, anchorSinkKind, otsUpgraderParams{
+				Enabled:      anchorOtsUpgradeEnabled,
+				IntervalText: anchorOtsUpgradeIntervalText,
+				BatchSize:    anchorOtsUpgradeBatchSize,
+				TimeoutText:  anchorOtsUpgradeTimeoutText,
+			})
+			if err != nil {
+				return err
+			}
+			if otsUpgrader != nil {
+				otsUpgrader.Start(context.Background())
+				defer otsUpgrader.Stop()
+			}
+			var handler http.Handler
+			if anchorAPI != nil {
+				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, observability.Handler(reg), batchSvc, globalSvc, anchorAPI)
+			} else {
+				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, observability.Handler(reg), batchSvc, globalSvc, nil)
+			}
+			server := &http.Server{
+				Addr:         listen,
+				Handler:      handler,
+				ReadTimeout:  readTimeout,
+				WriteTimeout: writeTimeout,
+			}
+
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			errCh := make(chan error, 1)
+			go func() {
+				rt.logger.Info().Str("listen", listen).Msg("starting trustdb server")
+				errCh <- server.ListenAndServe()
+			}()
+
+			select {
+			case <-ctx.Done():
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+				defer cancel()
+				if err := server.Shutdown(shutdownCtx); err != nil {
+					return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "http server shutdown", err)
+				}
+				if err := ingestSvc.Shutdown(shutdownCtx); err != nil {
+					return err
+				}
+				if err := batchSvc.Shutdown(shutdownCtx); err != nil {
+					return err
+				}
+				rt.logger.Info().Msg("trustdb server stopped")
+				return nil
+			case err := <-errCh:
+				if errors.Is(err, http.ErrServerClosed) {
+					return nil
+				}
+				return err
+			}
+		},
+	}
+	addServerFlags(cmd)
+	cmd.Flags().StringVar(&listen, "listen", "", "listen address")
+	cmd.Flags().StringVar(&serverKeyPath, "server-private-key", "", "server private key")
+	cmd.Flags().StringVar(&walPath, "wal", "", "wal path")
+	cmd.Flags().StringVar(&proofDir, "proof-dir", "", "proof bundle and root directory")
+	cmd.Flags().StringVar(&clientPubPath, "client-public-key", "", "client public key")
+	cmd.Flags().StringVar(&registryPath, "key-registry", "", "key registry path")
+	cmd.Flags().StringVar(&registryPubPath, "registry-public-key", "", "registry public key")
+	cmd.Flags().IntVar(&queueSize, "queue-size", 0, "bounded ingest queue size")
+	cmd.Flags().IntVar(&workers, "workers", 0, "ingest worker count")
+	cmd.Flags().IntVar(&batchQueueSize, "batch-queue-size", 0, "bounded batch queue size")
+	cmd.Flags().IntVar(&batchMaxRecords, "batch-max-records", 0, "records per batch before commit")
+	cmd.Flags().StringVar(&readTimeoutText, "read-timeout", "", "http read timeout")
+	cmd.Flags().StringVar(&writeTimeoutText, "write-timeout", "", "http write timeout")
+	cmd.Flags().StringVar(&shutdownTimeoutText, "shutdown-timeout", "", "graceful shutdown timeout")
+	cmd.Flags().StringVar(&batchMaxDelayText, "batch-max-delay", "", "maximum delay before committing a partial batch")
+	cmd.Flags().Int64Var(&walMaxSegmentBytes, "wal-max-segment-bytes", 0, "rotate WAL directory segments above this byte count (0 disables rotation; only honored in directory mode)")
+	cmd.Flags().IntVar(&walKeepSegments, "wal-keep-segments", 0, "after checkpoint advance, keep this many segments older than the checkpoint-covered segment (directory mode; 0 = only retain the active segment + checkpoint-covered one)")
+	cmd.Flags().StringVar(&walFsyncMode, "wal-fsync-mode", "", "WAL fsync mode: strict, group (production default), or batch")
+	cmd.Flags().StringVar(&walGroupCommitIntervalText, "wal-group-commit-interval", "", "WAL group fsync interval when --wal-fsync-mode=group (default 10ms)")
+	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default) or pebble")
+	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path (defaults to --proof-dir; for pebble, a subdirectory is created under --proof-dir unless set)")
+	cmd.Flags().StringVar(&anchorSinkKind, "anchor-sink", "", "external anchor sink: off (default; no L5 proofs), file, noop, or ots (OpenTimestamps)")
+	cmd.Flags().StringVar(&anchorPath, "anchor-path", "", "file anchor sink output path (JSONL). Defaults to <proof-dir>/anchors.jsonl when --anchor-sink=file and this flag is empty")
+	cmd.Flags().StringSliceVar(&anchorOtsCalendars, "anchor-ots-calendars", nil, "comma-separated OpenTimestamps calendar URLs. When empty a built-in public pool is used (only honored when --anchor-sink=ots)")
+	cmd.Flags().IntVar(&anchorOtsMinAccepted, "anchor-ots-min-accepted", 0, "minimum number of OTS calendars that must accept a submission for success (0 = require majority)")
+	cmd.Flags().StringVar(&anchorOtsTimeoutText, "anchor-ots-timeout", "", "per-calendar request timeout for the OpenTimestamps sink (default 20s)")
+	cmd.Flags().BoolVar(&anchorOtsUpgradeEnabled, "anchor-ots-upgrade-enabled", true, "run a background worker that upgrades pending OTS proofs to Bitcoin-attested ones (default true; only meaningful with --anchor-sink=ots)")
+	cmd.Flags().StringVar(&anchorOtsUpgradeIntervalText, "anchor-ots-upgrade-interval", "", "interval between OTS upgrade sweeps (default 1h; values <5m are usually wasteful against the public calendar pool)")
+	cmd.Flags().IntVar(&anchorOtsUpgradeBatchSize, "anchor-ots-upgrade-batch-size", 0, "max number of OTS STHAnchorResults processed per upgrade sweep (default 64)")
+	cmd.Flags().StringVar(&anchorOtsUpgradeTimeoutText, "anchor-ots-upgrade-timeout", "", "per-calendar GET timeout for the OTS upgrader (default 30s)")
+	return cmd
+}
+
+// otsSinkParams carries the OpenTimestamps-specific options through
+// buildAnchorService without bloating its signature for deployments
+// that don't use the OTS sink. All fields are optional and validated
+// only when --anchor-sink=ots.
+type otsSinkParams struct {
+	Calendars   []string
+	MinAccepted int
+	TimeoutText string
+}
+
+// buildAnchorService wires the configured Sink and returns both the
+// worker Service and a read-only API suitable for the HTTP layer. The
+// shutdown closure is always non-nil so `defer anchorShutdown()` is
+// safe even when anchoring is off. Legal sink kinds: "" / "off" (L5
+// disabled), "file", "noop".
+func buildAnchorService(rt *runtimeConfig, store proofstore.Store, metrics *observability.Metrics, sinkKind, anchorPath, proofDir string, ots otsSinkParams) (*anchor.Service, httpapi.AnchorService, func(), error) {
+	kind := strings.ToLower(strings.TrimSpace(sinkKind))
+	switch kind {
+	case "", "off", "disabled", "none":
+		return nil, nil, func() {}, nil
+	}
+	var sink anchor.Sink
+	switch kind {
+	case "file":
+		path := anchorPath
+		if path == "" {
+			if proofDir == "" {
+				return nil, nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "--anchor-sink=file requires --anchor-path or --proof-dir")
+			}
+			path = filepath.Join(proofDir, "anchors.jsonl")
+		}
+		fs, err := anchor.NewFileSink(path)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		rt.logger.Info().Str("sink", fs.Name()).Str("path", path).Msg("anchor sink enabled")
+		sink = fs
+	case "noop":
+		rt.logger.Info().Str("sink", anchor.NoopSinkName).Msg("anchor sink enabled (noop)")
+		sink = anchor.NewNoopSink()
+	case "ots", "opentimestamps":
+		os, err := newOtsSinkFromParams(ots)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		rt.logger.Info().
+			Str("sink", os.Name()).
+			Strs("calendars", os.Calendars()).
+			Msg("anchor sink enabled (opentimestamps)")
+		sink = os
+	default:
+		return nil, nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown anchor sink: "+sinkKind)
+	}
+	svc, err := anchor.NewService(anchor.Config{
+		Sink:    sink,
+		Store:   store,
+		Metrics: metrics,
+		Logger:  rt.logger,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	api := anchor.NewAPI(store)
+	return svc, api, func() {
+		svc.Stop()
+	}, nil
+}
+
+// newOtsSinkFromParams constructs an OpenTimestamps sink from
+// user-facing flag values. Durations go through parseDurationText so
+// yaml strings ("20s") and flag literals share the same error
+// surface. An empty Calendars slice is explicitly allowed; the sink
+// falls back to anchor.DefaultOtsCalendars in that case. A negative
+// MinAccepted is rejected up-front so we don't silently degrade the
+// quorum policy.
+func newOtsSinkFromParams(p otsSinkParams) (*anchor.OtsSink, error) {
+	if p.MinAccepted < 0 {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "--anchor-ots-min-accepted must be >= 0")
+	}
+	var timeout time.Duration
+	if text := strings.TrimSpace(p.TimeoutText); text != "" {
+		d, err := time.ParseDuration(text)
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "parse --anchor-ots-timeout", err)
+		}
+		timeout = d
+	}
+	return anchor.NewOtsSink(anchor.OtsSinkOptions{
+		Calendars:   p.Calendars,
+		MinAccepted: p.MinAccepted,
+		Timeout:     timeout,
+	})
+}
+
+// otsUpgraderParams collects the user-facing knobs for the OpenTimestamps
+// upgrader. Kept separate from otsSinkParams because the sink and the
+// upgrader have independent lifecycles: an operator may want to disable
+// the periodic sweep (e.g. running a dedicated cron) while still using
+// the sink, and vice versa is a no-op.
+type otsUpgraderParams struct {
+	Enabled      bool
+	IntervalText string
+	BatchSize    int
+	TimeoutText  string
+}
+
+// buildOtsUpgrader returns nil (with no error) when the upgrader is
+// not applicable: any sink other than "ots", or operator-disabled via
+// --anchor-ots-upgrade-enabled=false. Returning nil keeps the caller
+// site simple (`if upgrader != nil { upgrader.Start(...) }`) and
+// avoids fabricating a degenerate worker that walks an empty
+// sink-name partition every interval.
+func buildOtsUpgrader(rt *runtimeConfig, store proofstore.Store, metrics *observability.Metrics, sinkKind string, p otsUpgraderParams) (*anchor.OtsUpgrader, error) {
+	kind := strings.ToLower(strings.TrimSpace(sinkKind))
+	if kind != "ots" && kind != "opentimestamps" {
+		return nil, nil
+	}
+	if !p.Enabled {
+		rt.logger.Info().Msg("anchor: OTS upgrader disabled by --anchor-ots-upgrade-enabled=false")
+		return nil, nil
+	}
+
+	var interval time.Duration
+	if text := strings.TrimSpace(p.IntervalText); text != "" {
+		d, err := time.ParseDuration(text)
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "parse --anchor-ots-upgrade-interval", err)
+		}
+		if d <= 0 {
+			return nil, trusterr.New(trusterr.CodeInvalidArgument, "--anchor-ots-upgrade-interval must be > 0")
+		}
+		interval = d
+	}
+	if p.BatchSize < 0 {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "--anchor-ots-upgrade-batch-size must be >= 0")
+	}
+	var timeout time.Duration
+	if text := strings.TrimSpace(p.TimeoutText); text != "" {
+		d, err := time.ParseDuration(text)
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "parse --anchor-ots-upgrade-timeout", err)
+		}
+		if d <= 0 {
+			return nil, trusterr.New(trusterr.CodeInvalidArgument, "--anchor-ots-upgrade-timeout must be > 0")
+		}
+		timeout = d
+	}
+	upgrader, err := anchor.NewOtsUpgrader(anchor.UpgraderConfig{
+		Store:        store,
+		Metrics:      metrics,
+		Logger:       rt.logger,
+		PollInterval: interval,
+		BatchSize:    p.BatchSize,
+		HTTPOptions:  anchor.OtsUpgradeOptions{Timeout: timeout},
+	})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInternal, "build ots upgrader", err)
+	}
+	rt.logger.Info().
+		Dur("interval", interval).
+		Int("batch_size", p.BatchSize).
+		Dur("per_calendar_timeout", timeout).
+		Msg("anchor: OTS upgrader enabled")
+	return upgrader, nil
+}
+
+// newGlobalLogEnqueueHook persists a durable append event for every committed
+// batch root. The slower global-log append and STH anchor enqueue happen in a
+// separate worker so batch commit never waits on transparency-log IO.
+func newGlobalLogEnqueueHook(rt *runtimeConfig, store proofstore.Store, worker *globallog.OutboxWorker) func(context.Context, model.BatchRoot) {
+	return func(ctx context.Context, root model.BatchRoot) {
+		item := model.GlobalLogOutboxItem{
+			SchemaVersion: model.SchemaGlobalLogOutbox,
+			BatchID:       root.BatchID,
+			BatchRoot:     root,
+			Status:        model.AnchorStatePending,
+		}
+		if err := store.EnqueueGlobalLog(ctx, item); err != nil {
+			if trusterr.CodeOf(err) == trusterr.CodeAlreadyExists {
+				return
+			}
+			rt.logger.Warn().Err(err).Str("batch_id", root.BatchID).Msg("global log outbox enqueue failed")
+			return
+		}
+		if worker != nil {
+			worker.Trigger()
+		}
+	}
+}
+
+func enqueueSTHAnchor(ctx context.Context, rt *runtimeConfig, store proofstore.Store, svc *anchor.Service, sth model.SignedTreeHead) {
+	item := model.STHAnchorOutboxItem{
+		SchemaVersion: model.SchemaSTHAnchorOutbox,
+		TreeSize:      sth.TreeSize,
+		Status:        model.AnchorStatePending,
+		STH:           sth,
+	}
+	if err := store.EnqueueSTHAnchor(ctx, item); err != nil {
+		if trusterr.CodeOf(err) == trusterr.CodeAlreadyExists {
+			return
+		}
+		rt.logger.Warn().Err(err).Uint64("tree_size", sth.TreeSize).Msg("sth anchor enqueue failed")
+		return
+	}
+	svc.Trigger()
+}
+
+func backfillGlobalLogOutbox(ctx context.Context, store proofstore.Store) (int, error) {
+	var enqueued int
+	var cursor int64
+	const pageSize = 1024
+	for {
+		roots, err := store.ListRootsAfter(ctx, cursor, pageSize)
+		if err != nil {
+			return enqueued, err
+		}
+		if len(roots) == 0 {
+			return enqueued, nil
+		}
+		for _, root := range roots {
+			cursor = root.ClosedAtUnixN
+			if _, ok, err := store.GetGlobalLeafByBatchID(ctx, root.BatchID); err != nil {
+				return enqueued, err
+			} else if ok {
+				continue
+			}
+			if _, ok, err := store.GetGlobalLogOutboxItem(ctx, root.BatchID); err != nil {
+				return enqueued, err
+			} else if ok {
+				continue
+			}
+			item := model.GlobalLogOutboxItem{
+				SchemaVersion: model.SchemaGlobalLogOutbox,
+				BatchID:       root.BatchID,
+				BatchRoot:     root,
+				Status:        model.AnchorStatePending,
+			}
+			if err := store.EnqueueGlobalLog(ctx, item); err != nil {
+				if trusterr.CodeOf(err) == trusterr.CodeAlreadyExists {
+					continue
+				}
+				return enqueued, err
+			}
+			enqueued++
+		}
+	}
+}
+
+// restoreBatchSeq seeds the batch worker's in-memory seq counter
+// from the latest persisted BatchRoot, so the "-NNNNNN" suffix on
+// batch_id keeps moving forward across server restarts instead of
+// resetting to -000001 every time. A fresh deployment (no roots
+// yet) and unparsable historical IDs both fall through to 0, which
+// is the legacy behaviour. We never fail startup over this — at
+// worst we get a duplicated suffix on the first batch, which is
+// what we have today, so any error here is strictly an upgrade.
+func restoreBatchSeq(ctx context.Context, rt *runtimeConfig, store proofstore.Store) uint64 {
+	if store == nil {
+		return 0
+	}
+	root, err := store.LatestRoot(ctx)
+	if err != nil {
+		if code := trusterr.CodeOf(err); code != trusterr.CodeNotFound {
+			rt.logger.Warn().Err(err).Msg("restore batch seq: latest root lookup failed; starting from 0")
+		}
+		return 0
+	}
+	seq, ok := batch.ParseBatchSeq(root.BatchID)
+	if !ok {
+		rt.logger.Warn().Str("batch_id", root.BatchID).Msg("restore batch seq: unparsable batch_id; starting from 0")
+		return 0
+	}
+	rt.logger.Info().Str("batch_id", root.BatchID).Uint64("restored_seq", seq).Msg("batch seq restored from latest root")
+	return seq
+}
+
+// newPruneHook returns a batch.Service OnCheckpointAdvanced callback that
+// deletes WAL segments the committed checkpoint has already covered, with a
+// `keepSegments` safety buffer so operators can retain a local audit window.
+// The hook updates the segments gauge + bytes-pruned counter so dashboards
+// can verify pruning is actually happening. Errors are logged only — they
+// never propagate back into the batch pipeline because correctness of the
+// committed batch does not depend on prune succeeding.
+func newPruneHook(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics) func(context.Context, model.WALCheckpoint) {
+	refreshSegments := func() {
+		if err := refreshWALSegmentsTotal(metrics, walDir); err != nil {
+			rt.logger.Warn().Err(err).Str("wal", walDir).Msg("wal segment metric refresh failed")
+		}
+	}
+	return func(_ context.Context, cp model.WALCheckpoint) {
+		if cp.SegmentID <= 1 {
+			refreshSegments()
+			return
+		}
+		cutoff := cp.SegmentID
+		if keepSegments > 0 {
+			if uint64(keepSegments) >= cp.SegmentID {
+				refreshSegments()
+				return
+			}
+			cutoff = cp.SegmentID - uint64(keepSegments)
+		}
+		removed, bytesRemoved, err := wal.PruneSegmentsBefore(walDir, cutoff)
+		if err != nil {
+			rt.logger.Warn().
+				Err(err).
+				Uint64("cutoff", cutoff).
+				Str("wal", walDir).
+				Msg("wal segment prune failed")
+			return
+		}
+		// Refresh even when removed == 0. The last event before a scrape
+		// might have been a rotate, and an idempotent prune should still
+		// converge the gauge to the actual on-disk segment count.
+		refreshSegments()
+		if removed > 0 {
+			if metrics != nil {
+				metrics.WALBytesPrunedTotal.Add(float64(bytesRemoved))
+			}
+			rt.logger.Info().
+				Int("segments_removed", removed).
+				Int64("bytes_removed", bytesRemoved).
+				Uint64("cutoff_segment_id", cutoff).
+				Msg("wal segments pruned")
+		}
+	}
+}
+
+func refreshWALSegmentsTotal(metrics *observability.Metrics, walDir string) error {
+	if metrics == nil {
+		return nil
+	}
+	segs, err := wal.ListSegments(walDir)
+	if err != nil {
+		return err
+	}
+	metrics.WALSegmentsTotal.Set(float64(len(segs)))
+	return nil
+}
+
+// openWALWriter is the rotate-hook-free variant used by tests and existing
+// callers that only care about mode selection. It forwards to the options
+// form with just MaxSegmentBytes populated.
+func openWALWriter(walPath string, maxSegmentBytes int64) (*wal.Writer, string, error) {
+	return openWALWriterWithOptions(walPath, wal.Options{MaxSegmentBytes: maxSegmentBytes})
+}
+
+// openWALWriterWithOptions opens a wal.Writer in either single-file (legacy)
+// or directory (segment-rotating) mode, picking the mode based on what is
+// already on disk and falling back to a filename heuristic for fresh
+// locations. The returned walMode string is "file" or "directory" and is
+// emitted in the startup log so operators can confirm which layout the
+// process adopted. opts.OnRotate and opts.MaxSegmentBytes are only meaningful
+// in directory mode; they are silently ignored for single-file WALs (which
+// never rotate).
+func openWALWriterWithOptions(walPath string, opts wal.Options) (*wal.Writer, string, error) {
+	if walPath == "" {
+		return nil, "", trusterr.New(trusterr.CodeInvalidArgument, "wal path is required")
+	}
+	info, err := os.Stat(walPath)
+	switch {
+	case err == nil && info.IsDir():
+		w, oerr := wal.OpenDirWriter(walPath, opts)
+		return w, "directory", oerr
+	case err == nil:
+		// Existing regular file: keep legacy single-file semantics even
+		// if the operator set --wal-max-segment-bytes (it has no effect
+		// here; they must migrate to a directory to enable rotation).
+		w, oerr := wal.OpenWriter(walPath, 1)
+		return w, "file", oerr
+	case errors.Is(err, os.ErrNotExist):
+		// Heuristic for fresh paths: a path ending in .wal is treated
+		// as a single file for backwards compatibility with existing
+		// configs and e2e fixtures; anything else (directory-looking
+		// names like "./wal" or "trustdb-wal") becomes a directory.
+		if strings.HasSuffix(strings.ToLower(walPath), ".wal") {
+			w, oerr := wal.OpenWriter(walPath, 1)
+			return w, "file", oerr
+		}
+		w, oerr := wal.OpenDirWriter(walPath, opts)
+		return w, "directory", oerr
+	default:
+		return nil, "", trusterr.Wrap(trusterr.CodeInternal, "stat wal path", err)
+	}
+}
+
+func scanWALRecords(walPath string, minSegmentID uint64, visit func(wal.Record) error) error {
+	info, err := os.Stat(walPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		return wal.ScanDirFrom(walPath, minSegmentID, visit)
+	}
+	return wal.Scan(walPath, visit)
+}
+
+type preparedReplay struct {
+	manifest model.BatchManifest
+	items    []batch.Accepted
+	index    map[string]int
+	seen     map[string]struct{}
+	count    int
+}
+
+func newPreparedReplay(manifest model.BatchManifest) *preparedReplay {
+	p := &preparedReplay{
+		manifest: manifest,
+		items:    make([]batch.Accepted, len(manifest.RecordIDs)),
+		index:    make(map[string]int, len(manifest.RecordIDs)),
+		seen:     make(map[string]struct{}, len(manifest.RecordIDs)),
+	}
+	for i, rid := range manifest.RecordIDs {
+		p.index[rid] = i
+	}
+	return p
+}
+
+func (p *preparedReplay) add(item batch.Accepted) {
+	rid := item.Record.RecordID
+	if _, ok := p.seen[rid]; ok {
+		return
+	}
+	i, ok := p.index[rid]
+	if !ok {
+		return
+	}
+	p.items[i] = item
+	p.seen[rid] = struct{}{}
+	p.count++
+}
+
+func (p *preparedReplay) missingRecordID() string {
+	for _, rid := range p.manifest.RecordIDs {
+		if _, ok := p.seen[rid]; !ok {
+			return rid
+		}
+	}
+	return ""
+}
+
+// replayWALAccepted brings the local proof store back to a consistent state
+// after a restart:
+//  1. Rebuild every accepted record from the WAL so each record_id maps to a
+//     deterministic Signed/Record/Accepted triple. The WAL checkpoint (if
+//     present) lets us skip expensive ReplayAccepted work for records that
+//     are already covered by a committed batch.
+//  2. Finish any manifest that was prepared but never marked committed, which
+//     may involve re-writing bundles and the batch root so a crash between
+//     those steps converges to the same final artifacts.
+//  3. Enqueue records that are not yet covered by any committed manifest into
+//     the live batch service so they can be included in a fresh batch.
+func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngine, batchSvc *batch.Service, store proofstore.Store, metrics *observability.Metrics) (int, int, int, error) {
+	checkpoint, hasCheckpoint, err := store.GetCheckpoint(ctx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	// In directory mode we can skip entire segments that a committed
+	// checkpoint already covers. Legacy single-file WALs still go through
+	// the record-level skip below; loadWALRecords ignores minSegmentID for
+	// them. Legacy single-file WALs still go through the record-level skip
+	// below. Reading the checkpoint before the WAL also means a crash while
+	// appending a new segment cannot trick us into scanning deleted files.
+	var minSegmentID uint64
+	if hasCheckpoint {
+		minSegmentID = checkpoint.SegmentID
+	}
+	if metrics != nil && hasCheckpoint {
+		// Seed the gauge before replay so operators can see the checkpoint
+		// position even if no new batches commit after startup.
+		metrics.WALCheckpointLastSequence.Set(float64(checkpoint.LastSequence))
+	}
+
+	preparedByRecordID := make(map[string]*preparedReplay)
+	var preparedManifests []*preparedReplay
+	var recovered int
+	for afterBatchID := ""; ; {
+		manifests, err := store.ListManifestsAfter(ctx, afterBatchID, 1024)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		if len(manifests) == 0 {
+			break
+		}
+		for _, manifest := range manifests {
+			if manifest.State == model.BatchStateCommitted {
+				continue
+			}
+			if manifest.State != model.BatchStatePrepared {
+				return recovered, 0, 0, trusterr.New(trusterr.CodeFailedPrecondition, "unknown batch manifest state: "+manifest.State)
+			}
+			// A prepared manifest whose WAL range is entirely below the
+			// checkpoint is stale: a later committed manifest already
+			// superseded it and advanced the checkpoint past it. Treat it as
+			// committed so we don't attempt to RecoverManifest with items we
+			// purposefully skipped above.
+			if hasCheckpoint && manifest.WALRange.To.Sequence > 0 && manifest.WALRange.To.Sequence <= checkpoint.LastSequence {
+				continue
+			}
+			prepared := newPreparedReplay(manifest)
+			for _, rid := range manifest.RecordIDs {
+				if _, exists := preparedByRecordID[rid]; exists {
+					return recovered, 0, 0, trusterr.New(trusterr.CodeFailedPrecondition, "record "+rid+" appears in more than one prepared manifest")
+				}
+				preparedByRecordID[rid] = prepared
+			}
+			preparedManifests = append(preparedManifests, prepared)
+		}
+		afterBatchID = manifests[len(manifests)-1].BatchID
+	}
+
+	var replayed int
+	var skipped int
+	if err := scanWALRecords(walPath, minSegmentID, func(record wal.Record) error {
+		// Records at or below the checkpoint are guaranteed to be covered
+		// by a committed manifest, so ReplayAccepted (CBOR decode + receipt
+		// re-signing) and idempotency-index population can both be skipped.
+		// The idempotency entries for those records are also safely lost:
+		// any future submit that collides with them will hit the committed
+		// batch path via the proof store instead of producing duplicates.
+		if hasCheckpoint && record.Position.Sequence <= checkpoint.LastSequence {
+			skipped++
+			return nil
+		}
+		item, err := engine.ReplayAccepted(record)
+		if err != nil {
+			return err
+		}
+		accepted := batch.Accepted{Signed: item.Signed, Record: item.Record, Accepted: item.Accepted}
+		if engine.Idempotency != nil {
+			key := app.IdempotencyKey(item.Signed.Claim.TenantID, item.Signed.Claim.ClientID, item.Signed.Claim.IdempotencyKey)
+			engine.Idempotency.Remembered(key, item.Record, item.Accepted, item.Record.ClaimHash)
+		}
+		if prepared := preparedByRecordID[item.Record.RecordID]; prepared != nil {
+			prepared.add(accepted)
+			return nil
+		}
+		if _, ok, err := store.GetRecordIndex(ctx, item.Record.RecordID); err != nil {
+			return err
+		} else if ok {
+			skipped++
+			return nil
+		}
+		if err := batchSvc.EnqueueRecovered(ctx, accepted); err != nil {
+			return err
+		}
+		replayed++
+		return nil
+	}); err != nil {
+		return recovered, replayed, skipped, err
+	}
+
+	for _, prepared := range preparedManifests {
+		if prepared.count != len(prepared.manifest.RecordIDs) {
+			return recovered, replayed, skipped, trusterr.New(trusterr.CodeFailedPrecondition, "prepared manifest "+prepared.manifest.BatchID+" references missing record "+prepared.missingRecordID())
+		}
+		if err := batchSvc.RecoverManifest(ctx, prepared.manifest, prepared.items); err != nil {
+			return recovered, replayed, skipped, err
+		}
+		skipped += len(prepared.manifest.RecordIDs)
+		recovered++
+	}
+	if metrics != nil {
+		if skipped > 0 {
+			metrics.WALReplayRecords.WithLabelValues("skipped").Add(float64(skipped))
+		}
+		if replayed > 0 {
+			metrics.WALReplayRecords.WithLabelValues("replayed").Add(float64(replayed))
+		}
+		if recovered > 0 {
+			metrics.WALReplayRecords.WithLabelValues("recovered").Add(float64(recovered))
+		}
+	}
+	return recovered, replayed, skipped, nil
+}
+
+func stringOrLiteral(cmd *cobra.Command, flagName, flagValue, fallback string) string {
+	if cmd.Flags().Changed(flagName) {
+		return flagValue
+	}
+	return fallback
+}

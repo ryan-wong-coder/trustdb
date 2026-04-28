@@ -1,0 +1,187 @@
+package proofstore
+
+import (
+	"bytes"
+	"context"
+	"testing"
+
+	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
+)
+
+func TestLocalStoreBundleRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	bundle := model.ProofBundle{
+		SchemaVersion: model.SchemaProofBundle,
+		RecordID:      "tr1proof",
+	}
+	if err := store.PutBundle(context.Background(), bundle); err != nil {
+		t.Fatalf("PutBundle() error = %v", err)
+	}
+	got, err := store.GetBundle(context.Background(), bundle.RecordID)
+	if err != nil {
+		t.Fatalf("GetBundle() error = %v", err)
+	}
+	if got.RecordID != bundle.RecordID || got.SchemaVersion != model.SchemaProofBundle {
+		t.Fatalf("GetBundle() = %+v", got)
+	}
+}
+
+func TestLocalStoreRootRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	roots := []model.BatchRoot{
+		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-a", BatchRoot: bytes.Repeat([]byte{1}, 32), TreeSize: 1, ClosedAtUnixN: 100},
+		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-b", BatchRoot: bytes.Repeat([]byte{2}, 32), TreeSize: 2, ClosedAtUnixN: 200},
+	}
+	for _, root := range roots {
+		if err := store.PutRoot(context.Background(), root); err != nil {
+			t.Fatalf("PutRoot() error = %v", err)
+		}
+	}
+	listed, err := store.ListRoots(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListRoots() error = %v", err)
+	}
+	if len(listed) != 2 || listed[0].BatchID != "batch-b" || listed[1].BatchID != "batch-a" {
+		t.Fatalf("ListRoots() = %+v", listed)
+	}
+	latest, err := store.LatestRoot(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRoot() error = %v", err)
+	}
+	if latest.BatchID != "batch-b" {
+		t.Fatalf("LatestRoot() = %+v", latest)
+	}
+}
+
+func TestLocalStoreMissingBundle(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	_, err := store.GetBundle(context.Background(), "missing")
+	if trusterr.CodeOf(err) != trusterr.CodeNotFound {
+		t.Fatalf("GetBundle() code = %s err=%v", trusterr.CodeOf(err), err)
+	}
+}
+
+func TestLocalStoreManifestRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	prepared := model.BatchManifest{
+		SchemaVersion:   model.SchemaBatchManifest,
+		BatchID:         "batch-a",
+		State:           model.BatchStatePrepared,
+		TreeAlg:         model.DefaultMerkleTreeAlg,
+		TreeSize:        2,
+		BatchRoot:       bytes.Repeat([]byte{9}, 32),
+		RecordIDs:       []string{"rec-1", "rec-2"},
+		WALRange:        model.WALRange{From: model.WALPosition{SegmentID: 1, Sequence: 1}, To: model.WALPosition{SegmentID: 1, Sequence: 2}},
+		ClosedAtUnixN:   123,
+		PreparedAtUnixN: 123,
+	}
+	if err := store.PutManifest(context.Background(), prepared); err != nil {
+		t.Fatalf("PutManifest() error = %v", err)
+	}
+	got, err := store.GetManifest(context.Background(), prepared.BatchID)
+	if err != nil {
+		t.Fatalf("GetManifest() error = %v", err)
+	}
+	if got.State != model.BatchStatePrepared || got.TreeSize != 2 || len(got.RecordIDs) != 2 {
+		t.Fatalf("GetManifest() = %+v", got)
+	}
+	committed := prepared
+	committed.State = model.BatchStateCommitted
+	committed.CommittedAtUnixN = 200
+	if err := store.PutManifest(context.Background(), committed); err != nil {
+		t.Fatalf("PutManifest(committed) error = %v", err)
+	}
+	list, err := store.ListManifests(context.Background())
+	if err != nil {
+		t.Fatalf("ListManifests() error = %v", err)
+	}
+	if len(list) != 1 || list[0].State != model.BatchStateCommitted {
+		t.Fatalf("ListManifests() = %+v", list)
+	}
+}
+
+func TestLocalStoreMissingManifest(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	_, err := store.GetManifest(context.Background(), "missing")
+	if trusterr.CodeOf(err) != trusterr.CodeNotFound {
+		t.Fatalf("GetManifest() code = %s err=%v", trusterr.CodeOf(err), err)
+	}
+}
+
+func TestLocalStoreRejectsInvalidManifestState(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	err := store.PutManifest(context.Background(), model.BatchManifest{BatchID: "b", State: "pending"})
+	if trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
+		t.Fatalf("PutManifest() code = %s err=%v", trusterr.CodeOf(err), err)
+	}
+}
+
+func TestLocalStoreCheckpointRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	cp := model.WALCheckpoint{
+		SegmentID:    1,
+		LastSequence: 42,
+		LastOffset:   4096,
+		BatchID:      "batch-a",
+	}
+	if err := store.PutCheckpoint(context.Background(), cp); err != nil {
+		t.Fatalf("PutCheckpoint() error = %v", err)
+	}
+	got, found, err := store.GetCheckpoint(context.Background())
+	if err != nil {
+		t.Fatalf("GetCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("GetCheckpoint() found = false after put")
+	}
+	if got.SchemaVersion != model.SchemaWALCheckpoint {
+		t.Fatalf("GetCheckpoint() SchemaVersion = %q, want %q", got.SchemaVersion, model.SchemaWALCheckpoint)
+	}
+	if got.LastSequence != 42 || got.LastOffset != 4096 || got.SegmentID != 1 || got.BatchID != "batch-a" {
+		t.Fatalf("GetCheckpoint() = %+v", got)
+	}
+	if got.RecordedAtUnixN == 0 {
+		t.Fatalf("GetCheckpoint() RecordedAtUnixN = 0, want auto-filled")
+	}
+
+	// Overwriting with a newer checkpoint must be observable.
+	newer := model.WALCheckpoint{SegmentID: 1, LastSequence: 100, LastOffset: 8192, BatchID: "batch-b"}
+	if err := store.PutCheckpoint(context.Background(), newer); err != nil {
+		t.Fatalf("PutCheckpoint(newer) error = %v", err)
+	}
+	got2, _, err := store.GetCheckpoint(context.Background())
+	if err != nil {
+		t.Fatalf("GetCheckpoint() second error = %v", err)
+	}
+	if got2.LastSequence != 100 || got2.BatchID != "batch-b" {
+		t.Fatalf("GetCheckpoint() after overwrite = %+v", got2)
+	}
+}
+
+func TestLocalStoreMissingCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	_, found, err := store.GetCheckpoint(context.Background())
+	if err != nil {
+		t.Fatalf("GetCheckpoint() error = %v, want nil for missing checkpoint", err)
+	}
+	if found {
+		t.Fatalf("GetCheckpoint() found = true for empty store")
+	}
+}

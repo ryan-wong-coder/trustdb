@@ -1,0 +1,92 @@
+# TrustDB single-node production profile.
+#
+# Operational intent:
+# - Pebble proofstore is the production backend.
+# - WAL uses directory segments plus group fsync.
+# - L4 global log is always enabled in current serve path.
+# - L5 anchors publish STH/global roots only.
+
+paths:
+  data_dir: "/var/lib/trustdb"
+  key_registry: "/etc/trustdb/keys/clients.tdkeys"
+  wal: "/var/lib/trustdb/wal"
+  object_dir: "/var/lib/trustdb/objects"
+  proof_dir: "/var/lib/trustdb/proofs"
+
+metastore: "pebble"
+metastore_path: "/var/lib/trustdb/pebble"
+
+wal:
+  fsync_mode: "group"
+  group_commit_interval: "10ms"
+
+identity:
+  tenant: "default"
+  client: ""
+  key_id: ""
+
+server:
+  listen: "0.0.0.0:8080"
+  id: "trustdb-prod-1"
+  key_id: "server-key"
+  queue_size: 65536
+  workers: 8
+  read_timeout: "10s"
+  write_timeout: "30s"
+  shutdown_timeout: "30s"
+
+registry:
+  key_id: "registry-key"
+
+batch:
+  queue_size: 65536
+  max_records: 8192
+  max_delay: "200ms"
+
+global_log:
+  enabled: true
+
+anchor:
+  scope: "global"
+  max_delay: "5m"
+  sink: "ots"
+  path: "/var/lib/trustdb/anchors/sth-anchors.jsonl"
+  ots:
+    calendars: []
+    min_accepted: 0
+    timeout: "20s"
+    upgrade:
+      enabled: true
+      interval: "1h"
+      batch_size: 128
+      timeout: "30s"
+
+history:
+  tile_size: 256
+  hot_window_leaves: 65536
+
+backup:
+  compression: "gzip"
+
+log:
+  level: "info"
+  format: "json"
+  output: "both"
+  file:
+    path: "/var/log/trustdb/trustdb.log"
+    max_size_mb: 256
+    max_backups: 16
+    max_age_days: 30
+    compress: true
+  async:
+    enabled: true
+    buffer_size: 8192
+    drop_on_full: false
+
+keys:
+  client_private: ""
+  client_public: ""
+  server_private: "/etc/trustdb/keys/server.key"
+  server_public: "/etc/trustdb/keys/server.pub"
+  registry_private: ""
+  registry_public: "/etc/trustdb/keys/registry.pub"

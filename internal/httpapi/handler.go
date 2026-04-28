@@ -1,0 +1,666 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ryan-wong-coder/trustdb/internal/cborx"
+	"github.com/ryan-wong-coder/trustdb/internal/ingest"
+	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/observability"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
+)
+
+const maxClaimBytes = 1 << 20
+
+type Handler struct {
+	Ingest  *ingest.Service
+	Batch   BatchService
+	Global  GlobalLogService
+	Anchors AnchorService
+	Metrics http.Handler
+}
+
+type BatchService interface {
+	Enqueue(context.Context, model.SignedClaim, model.ServerRecord, model.AcceptedReceipt) error
+	Proof(context.Context, string) (model.ProofBundle, error)
+	RecordIndex(context.Context, string) (model.RecordIndex, bool, error)
+	Records(context.Context, model.RecordListOptions) ([]model.RecordIndex, error)
+	Roots(context.Context, int) ([]model.BatchRoot, error)
+	RootsAfter(context.Context, int64, int) ([]model.BatchRoot, error)
+	LatestRoot(context.Context) (model.BatchRoot, error)
+}
+
+// AnchorService is the tiny surface the HTTP layer needs to expose
+// L5 proof data. Keeping it minimal (two reads) avoids coupling the
+// public API to the outbox bookkeeping helpers used by the worker.
+type AnchorService interface {
+	AnchorResult(context.Context, uint64) (model.STHAnchorResult, bool, error)
+	AnchorStatus(context.Context, uint64) (model.STHAnchorOutboxItem, bool, error)
+}
+
+type GlobalLogService interface {
+	LatestSTH(context.Context) (model.SignedTreeHead, bool, error)
+	STH(context.Context, uint64) (model.SignedTreeHead, bool, error)
+	InclusionProof(context.Context, string, uint64) (model.GlobalLogProof, error)
+	ConsistencyProof(context.Context, uint64, uint64) (model.GlobalConsistencyProof, error)
+}
+
+type healthResponse struct {
+	OK bool `json:"ok"`
+}
+
+type submitClaimResponse struct {
+	RecordID        string                `json:"record_id"`
+	Status          string                `json:"status"`
+	ProofLevel      string                `json:"proof_level"`
+	Idempotent      bool                  `json:"idempotent"`
+	BatchEnqueued   bool                  `json:"batch_enqueued"`
+	BatchError      string                `json:"batch_error,omitempty"`
+	ServerRecord    model.ServerRecord    `json:"server_record"`
+	AcceptedReceipt model.AcceptedReceipt `json:"accepted_receipt"`
+}
+
+type proofResponse struct {
+	RecordID    string            `json:"record_id"`
+	ProofLevel  string            `json:"proof_level"`
+	ProofBundle model.ProofBundle `json:"proof_bundle"`
+}
+
+type rootsResponse struct {
+	Roots      []model.BatchRoot `json:"roots"`
+	Limit      int               `json:"limit"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+}
+
+type recordsResponse struct {
+	Records    []model.RecordIndex `json:"records"`
+	Limit      int                 `json:"limit"`
+	Direction  string              `json:"direction"`
+	NextCursor string              `json:"next_cursor,omitempty"`
+}
+
+type anchorResponse struct {
+	TreeSize   uint64                     `json:"tree_size"`
+	Status     string                     `json:"status"`
+	ProofLevel string                     `json:"proof_level"`
+	Result     *model.STHAnchorResult     `json:"result,omitempty"`
+	Outbox     *model.STHAnchorOutboxItem `json:"outbox,omitempty"`
+}
+
+type errorResponse struct {
+	Code    trusterr.Code `json:"code"`
+	Message string        `json:"message"`
+}
+
+func New(ingestSvc *ingest.Service, metrics http.Handler, batchSvc ...BatchService) http.Handler {
+	h := Handler{Ingest: ingestSvc, Metrics: metrics}
+	if len(batchSvc) > 0 {
+		h.Batch = batchSvc[0]
+	}
+	return buildMux(h)
+}
+
+// NewWithAnchors is the richer constructor used by serve when the L5
+// anchor service is wired up. It is kept separate from New so existing
+// callers (tests, CLIs, backwards-compatible fixtures) do not need to
+// learn about the anchor API when they don't need it.
+func NewWithAnchors(ingestSvc *ingest.Service, metrics http.Handler, batchSvc BatchService, anchorSvc AnchorService) http.Handler {
+	return buildMux(Handler{
+		Ingest:  ingestSvc,
+		Batch:   batchSvc,
+		Anchors: anchorSvc,
+		Metrics: metrics,
+	})
+}
+
+func NewWithGlobalAndAnchors(
+	ingestSvc *ingest.Service,
+	metrics http.Handler,
+	batchSvc BatchService,
+	globalSvc GlobalLogService,
+	anchorSvc AnchorService,
+) http.Handler {
+	return buildMux(Handler{
+		Ingest:  ingestSvc,
+		Batch:   batchSvc,
+		Global:  globalSvc,
+		Anchors: anchorSvc,
+		Metrics: metrics,
+	})
+}
+
+func buildMux(h Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", h.health)
+	mux.HandleFunc("POST /v1/claims", h.submitClaim)
+	mux.HandleFunc("GET /v1/records", h.listRecords)
+	mux.HandleFunc("GET /v1/records/{record_id}", h.getRecordIndex)
+	mux.HandleFunc("GET /v1/proofs/{record_id}", h.getProof)
+	mux.HandleFunc("GET /v1/roots", h.listRoots)
+	mux.HandleFunc("GET /v1/roots/latest", h.latestRoot)
+	if h.Global != nil {
+		mux.HandleFunc("GET /v1/sth/latest", h.latestSTH)
+		mux.HandleFunc("GET /v1/sth/{tree_size}", h.getSTH)
+		mux.HandleFunc("GET /v1/global-log/inclusion/{batch_id}", h.getGlobalInclusion)
+		mux.HandleFunc("GET /v1/global-log/consistency", h.getGlobalConsistency)
+	}
+	if h.Anchors != nil {
+		mux.HandleFunc("GET /v1/anchors/sth/{tree_size}", h.getAnchor)
+	}
+	if h.Metrics != nil {
+		mux.Handle("GET /metrics", h.Metrics)
+	}
+	return mux
+}
+
+func (h Handler) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, healthResponse{OK: true})
+}
+
+func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
+	if h.Ingest == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "ingest service is not configured"))
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxClaimBytes))
+	if err != nil {
+		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "read claim body", err))
+		return
+	}
+	var signed model.SignedClaim
+	if err := cborx.UnmarshalLimit(body, &signed, maxClaimBytes); err != nil {
+		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "decode signed claim", err))
+		return
+	}
+	record, accepted, idempotent, err := h.Ingest.Submit(r.Context(), signed)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// Idempotent replays must not re-enqueue into the batch pipeline, both to
+	// avoid duplicate leaves inside a single batch and to keep the L3 proof
+	// for the original submission stable across retries.
+	batchEnqueued := false
+	batchErr := ""
+	if h.Batch != nil && !idempotent {
+		if err := h.Batch.Enqueue(context.WithoutCancel(r.Context()), signed, record, accepted); err != nil {
+			batchErr = err.Error()
+		} else {
+			batchEnqueued = true
+		}
+	}
+	status := http.StatusAccepted
+	if idempotent {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, submitClaimResponse{
+		RecordID:        record.RecordID,
+		Status:          accepted.Status,
+		ProofLevel:      "L2",
+		Idempotent:      idempotent,
+		BatchEnqueued:   batchEnqueued,
+		BatchError:      batchErr,
+		ServerRecord:    record,
+		AcceptedReceipt: accepted,
+	})
+}
+
+func (h Handler) getProof(w http.ResponseWriter, r *http.Request) {
+	if h.Batch == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
+		return
+	}
+	recordID := r.PathValue("record_id")
+	bundle, err := h.Batch.Proof(r.Context(), recordID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, proofResponse{
+		RecordID:    bundle.RecordID,
+		ProofLevel:  "L3",
+		ProofBundle: bundle,
+	})
+}
+
+func (h Handler) getRecordIndex(w http.ResponseWriter, r *http.Request) {
+	if h.Batch == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
+		return
+	}
+	idx, ok, err := h.Batch.RecordIndex(r.Context(), r.PathValue("record_id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !ok {
+		writeError(w, trusterr.New(trusterr.CodeNotFound, "record index not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, idx)
+}
+
+func (h Handler) listRecords(w http.ResponseWriter, r *http.Request) {
+	if h.Batch == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
+		return
+	}
+	opts, err := parseRecordListOptions(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	records, err := h.Batch.Records(r.Context(), opts)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	next := ""
+	if len(records) == opts.Limit {
+		next = encodeRecordCursor(records[len(records)-1])
+	}
+	writeJSON(w, http.StatusOK, recordsResponse{
+		Records:    records,
+		Limit:      opts.Limit,
+		Direction:  opts.Direction,
+		NextCursor: next,
+	})
+}
+
+func (h Handler) listRoots(w http.ResponseWriter, r *http.Request) {
+	if h.Batch == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
+		return
+	}
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			writeError(w, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000"))
+			return
+		}
+		limit = parsed
+	}
+	after := int64(0)
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeError(w, trusterr.New(trusterr.CodeInvalidArgument, "after must be a non-negative unix nano cursor"))
+			return
+		}
+		after = parsed
+	}
+	var (
+		roots []model.BatchRoot
+		err   error
+	)
+	if after > 0 {
+		roots, err = h.Batch.RootsAfter(r.Context(), after, limit)
+	} else {
+		roots, err = h.Batch.Roots(r.Context(), limit)
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	next := ""
+	if after > 0 && len(roots) == limit {
+		next = strconv.FormatInt(roots[len(roots)-1].ClosedAtUnixN, 10)
+	}
+	writeJSON(w, http.StatusOK, rootsResponse{Roots: roots, Limit: limit, NextCursor: next})
+}
+
+func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			return model.RecordListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000")
+		}
+		limit = parsed
+	}
+	direction := r.URL.Query().Get("direction")
+	switch direction {
+	case "":
+		direction = model.RecordListDirectionDesc
+	case model.RecordListDirectionAsc, model.RecordListDirectionDesc:
+	default:
+		return model.RecordListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "direction must be asc or desc")
+	}
+	opts := model.RecordListOptions{
+		Limit:     limit,
+		Direction: direction,
+		BatchID:   r.URL.Query().Get("batch_id"),
+		TenantID:  r.URL.Query().Get("tenant_id"),
+		ClientID:  r.URL.Query().Get("client_id"),
+		Query:     strings.TrimSpace(r.URL.Query().Get("q")),
+	}
+	if opts.BatchID == "" && strings.HasPrefix(strings.ToLower(opts.Query), "batch-") {
+		opts.BatchID = opts.Query
+		opts.Query = ""
+	}
+	hashRaw := firstQueryValue(r, "content_hash", "sha256")
+	if hashRaw == "" && looksLikeHexSHA256(opts.Query) {
+		hashRaw = opts.Query
+		opts.Query = ""
+	}
+	if hashRaw != "" {
+		hash, err := parseSHA256Hex(hashRaw)
+		if err != nil {
+			return model.RecordListOptions{}, err
+		}
+		opts.ContentHash = hash
+	}
+	if opts.Query != "" && model.RecordStorageQueryToken(opts.Query) == "" {
+		return model.RecordListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "q must contain at least two letters or digits")
+	}
+	from, err := parseRecordTimeQuery(r, "received_from", "created_from", "from")
+	if err != nil {
+		return model.RecordListOptions{}, err
+	}
+	to, err := parseRecordTimeQuery(r, "received_to", "created_to", "to")
+	if err != nil {
+		return model.RecordListOptions{}, err
+	}
+	if from > 0 && to > 0 && from > to {
+		return model.RecordListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "received_from must be <= received_to")
+	}
+	opts.ReceivedFromUnixN = from
+	opts.ReceivedToUnixN = to
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		cursor, err := decodeRecordCursor(raw)
+		if err != nil {
+			return model.RecordListOptions{}, err
+		}
+		opts.AfterReceivedAtUnixN = cursor.ReceivedAtUnixN
+		opts.AfterRecordID = cursor.RecordID
+	}
+	return opts, nil
+}
+
+func firstQueryValue(r *http.Request, names ...string) string {
+	for _, name := range names {
+		if raw := strings.TrimSpace(r.URL.Query().Get(name)); raw != "" {
+			return raw
+		}
+	}
+	return ""
+}
+
+func looksLikeHexSHA256(raw string) bool {
+	raw = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "sha256:")
+	if len(raw) != 64 {
+		return false
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' && r < 'a' || r > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseSHA256Hex(raw string) ([]byte, error) {
+	raw = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "sha256:")
+	if len(raw) != 64 {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "content_hash must be a 64-character sha256 hex string")
+	}
+	hash, err := hex.DecodeString(raw)
+	if err != nil || len(hash) != 32 {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "content_hash must be a valid sha256 hex string")
+	}
+	return hash, nil
+}
+
+func parseRecordTimeQuery(r *http.Request, names ...string) (int64, error) {
+	raw := firstQueryValue(r, names...)
+	if raw == "" {
+		return 0, nil
+	}
+	if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if parsed < 0 {
+			return 0, trusterr.New(trusterr.CodeInvalidArgument, names[0]+" must be non-negative")
+		}
+		return parsed, nil
+	}
+	ts, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return 0, trusterr.New(trusterr.CodeInvalidArgument, names[0]+" must be unix nano or RFC3339 timestamp")
+	}
+	return ts.UTC().UnixNano(), nil
+}
+
+type recordCursor struct {
+	ReceivedAtUnixN int64  `json:"t"`
+	RecordID        string `json:"r"`
+}
+
+func encodeRecordCursor(idx model.RecordIndex) string {
+	data, err := json.Marshal(recordCursor{ReceivedAtUnixN: idx.ReceivedAtUnixN, RecordID: idx.RecordID})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeRecordCursor(raw string) (recordCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return recordCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	var cursor recordCursor
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.RecordID == "" {
+		return recordCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	return cursor, nil
+}
+
+func (h Handler) latestSTH(w http.ResponseWriter, r *http.Request) {
+	if h.Global == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+		return
+	}
+	sth, ok, err := h.Global.LatestSTH(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !ok {
+		writeError(w, trusterr.New(trusterr.CodeNotFound, "signed tree head not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, sth)
+}
+
+func (h Handler) getSTH(w http.ResponseWriter, r *http.Request) {
+	if h.Global == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+		return
+	}
+	treeSize, err := parseTreeSize(r.PathValue("tree_size"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	sth, ok, err := h.Global.STH(r.Context(), treeSize)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !ok {
+		writeError(w, trusterr.New(trusterr.CodeNotFound, "signed tree head not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, sth)
+}
+
+func (h Handler) getGlobalInclusion(w http.ResponseWriter, r *http.Request) {
+	if h.Global == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+		return
+	}
+	treeSize := uint64(0)
+	if raw := r.URL.Query().Get("tree_size"); raw != "" {
+		parsed, err := parseTreeSize(raw)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		treeSize = parsed
+	}
+	proof, err := h.Global.InclusionProof(r.Context(), r.PathValue("batch_id"), treeSize)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, proof)
+}
+
+func (h Handler) getGlobalConsistency(w http.ResponseWriter, r *http.Request) {
+	if h.Global == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+		return
+	}
+	from, err := parseTreeSize(r.URL.Query().Get("from"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	to, err := parseTreeSize(r.URL.Query().Get("to"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	proof, err := h.Global.ConsistencyProof(r.Context(), from, to)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, proof)
+}
+
+// getAnchor exposes L5 anchor state for a committed batch. The shape
+// of the response reflects the three possible worlds a client may see:
+//
+//   - outbox entry missing → anchor_unknown (batch exists but no
+//     anchoring was attempted, e.g. sink=noop in a prior run).
+//   - outbox entry present, still pending/failed → status field
+//     surfaces the lifecycle and the outbox object gives attempts /
+//     last_error for debugging.
+//   - outbox entry present + published → result carries the external
+//     anchor_id and proof bytes the verifier can present.
+func (h Handler) getAnchor(w http.ResponseWriter, r *http.Request) {
+	if h.Anchors == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "anchor service is not configured"))
+		return
+	}
+	treeSize, err := parseTreeSize(r.PathValue("tree_size"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	item, itemOK, err := h.Anchors.AnchorStatus(r.Context(), treeSize)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result, resultOK, err := h.Anchors.AnchorResult(r.Context(), treeSize)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !itemOK && !resultOK {
+		writeError(w, trusterr.New(trusterr.CodeNotFound, "anchor not found for STH"))
+		return
+	}
+	resp := anchorResponse{TreeSize: treeSize, ProofLevel: "L5"}
+	switch {
+	case resultOK:
+		resp.Status = model.AnchorStatePublished
+		r := result
+		resp.Result = &r
+	case itemOK:
+		resp.Status = item.Status
+	default:
+		resp.Status = "unknown"
+	}
+	if itemOK {
+		it := item
+		resp.Outbox = &it
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h Handler) latestRoot(w http.ResponseWriter, r *http.Request) {
+	if h.Batch == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
+		return
+	}
+	root, err := h.Batch.LatestRoot(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, root)
+}
+
+func parseTreeSize(raw string) (uint64, error) {
+	if raw == "" {
+		return 0, trusterr.New(trusterr.CodeInvalidArgument, "tree_size is required")
+	}
+	treeSize, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || treeSize == 0 {
+		return 0, trusterr.New(trusterr.CodeInvalidArgument, "tree_size must be a positive integer")
+	}
+	return treeSize, nil
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	code := trusterr.CodeOf(err)
+	status := httpStatus(code)
+	writeJSON(w, status, errorResponse{Code: code, Message: err.Error()})
+}
+
+func httpStatus(code trusterr.Code) int {
+	switch code {
+	case trusterr.CodeInvalidArgument:
+		return http.StatusBadRequest
+	case trusterr.CodeAlreadyExists:
+		return http.StatusConflict
+	case trusterr.CodeFailedPrecondition:
+		return http.StatusPreconditionFailed
+	case trusterr.CodeNotFound:
+		return http.StatusNotFound
+	case trusterr.CodeResourceExhausted:
+		return http.StatusTooManyRequests
+	case trusterr.CodeDeadlineExceeded:
+		return http.StatusGatewayTimeout
+	case trusterr.CodeDataLoss:
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil && !errors.Is(err, http.ErrHandlerTimeout) {
+		_, _ = fmt.Fprintf(w, `{"code":"INTERNAL","message":"encode response: %v"}`+"\n", err)
+	}
+}
+
+func MetricsHandler() (http.Handler, *observability.Metrics) {
+	reg, metrics := observability.NewRegistry()
+	return observability.Handler(reg), metrics
+}

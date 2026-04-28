@@ -1,0 +1,89 @@
+# TrustDB local development / demo profile.
+#
+# This profile favors inspectability over scale. It intentionally uses the
+# file proofstore and a noop anchor sink. Do not use it for high-volume data.
+
+paths:
+  data_dir: ".trustdb-dev"
+  key_registry: ".trustdb-dev/keys.tdkeys"
+  wal: ".trustdb-dev/wal"
+  object_dir: ".trustdb-dev/objects"
+  proof_dir: ".trustdb-dev/proofs"
+
+metastore: "file"
+metastore_path: ".trustdb-dev/proofs"
+
+wal:
+  fsync_mode: "group"
+  group_commit_interval: "10ms"
+
+identity:
+  tenant: "default"
+  client: ""
+  key_id: ""
+
+server:
+  listen: "127.0.0.1:8080"
+  id: "trustdb-dev"
+  key_id: "server-key"
+  queue_size: 1024
+  workers: 4
+  read_timeout: "10s"
+  write_timeout: "10s"
+  shutdown_timeout: "10s"
+
+registry:
+  key_id: "registry-key"
+
+batch:
+  queue_size: 1024
+  max_records: 1024
+  max_delay: "500ms"
+
+global_log:
+  enabled: true
+
+anchor:
+  scope: "global"
+  max_delay: "5m"
+  sink: "noop"
+  path: ".trustdb-dev/anchors/sth-anchors.jsonl"
+  ots:
+    calendars: []
+    min_accepted: 0
+    timeout: ""
+    upgrade:
+      enabled: true
+      interval: ""
+      batch_size: 0
+      timeout: ""
+
+history:
+  tile_size: 256
+  hot_window_leaves: 65536
+
+backup:
+  compression: "gzip"
+
+log:
+  level: "debug"
+  format: "console"
+  output: "stderr"
+  file:
+    path: ".trustdb-dev/logs/trustdb.log"
+    max_size_mb: 64
+    max_backups: 4
+    max_age_days: 7
+    compress: true
+  async:
+    enabled: false
+    buffer_size: 4096
+    drop_on_full: false
+
+keys:
+  client_private: ""
+  client_public: ".trustdb-dev/client.pub"
+  server_private: ".trustdb-dev/server.key"
+  server_public: ".trustdb-dev/server.pub"
+  registry_private: ""
+  registry_public: ""

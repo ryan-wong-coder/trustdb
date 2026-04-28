@@ -1,0 +1,193 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestStoreLoadMissingConfigUsesDefaults(t *testing.T) {
+	t.Parallel()
+
+	store, err := newStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("newStore missing config: %v", err)
+	}
+	defer store.close()
+	cfg := store.getSettings()
+	if cfg.ServerURL != "http://127.0.0.1:8080" {
+		t.Fatalf("ServerURL = %q, want default", cfg.ServerURL)
+	}
+}
+
+func TestStoreLoadAcceptsUTF8BOM(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{
+		"settings": {
+			"server_url": "http://127.0.0.1:8081",
+			"server_public_key_b64": "scLtBGCbub07etjZBg5VSAjung1pO1UZLtXHwILIdEM",
+			"default_media_type": "application/octet-stream",
+			"default_event_type": "file.snapshot",
+			"theme": "auto"
+		},
+		"records": []
+	}`)...)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	store, err := newStore(path)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	defer store.close()
+	cfg := store.getSettings()
+	if cfg.ServerURL != "http://127.0.0.1:8081" {
+		t.Fatalf("ServerURL = %q, want 8081", cfg.ServerURL)
+	}
+}
+
+func TestStoreLoadCorruptConfigQuarantinesAndUsesDefaults(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	store, err := newStore(path)
+	if err != nil {
+		t.Fatalf("newStore corrupt config: %v", err)
+	}
+	defer store.close()
+	cfg := store.getSettings()
+	if cfg.ServerURL != "http://127.0.0.1:8080" {
+		t.Fatalf("ServerURL = %q, want default", cfg.ServerURL)
+	}
+	backups, err := filepath.Glob(path + ".bad-*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("backup count = %d, want 1", len(backups))
+	}
+}
+
+func TestStoreRecordsUsePebblePaginationAndPersistence(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := newStore(path)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	for _, rec := range []LocalRecord{
+		testLocalRecord("rec-1", 100, "L3", "notes.txt"),
+		testLocalRecord("rec-2", 200, "L4", "payload-2.txt"),
+		testLocalRecord("rec-3", 300, "L5", "screenshot-final.png"),
+	} {
+		if err := store.upsertRecord(rec); err != nil {
+			t.Fatalf("upsert %s: %v", rec.RecordID, err)
+		}
+	}
+	first := store.listRecordsPage(RecordPageOptions{Limit: 2})
+	if len(first.Items) != 2 || first.Items[0].RecordID != "rec-3" || first.Items[1].RecordID != "rec-2" || first.NextCursor == "" {
+		t.Fatalf("first page = %+v", first)
+	}
+	next := store.listRecordsPage(RecordPageOptions{Limit: 2, Offset: 2, Cursor: first.NextCursor})
+	if len(next.Items) != 1 || next.Items[0].RecordID != "rec-1" || next.HasMore {
+		t.Fatalf("next page = %+v", next)
+	}
+	search := store.listRecordsPage(RecordPageOptions{Limit: 10, Query: "shot-final"})
+	if len(search.Items) != 1 || search.Items[0].RecordID != "rec-3" {
+		t.Fatalf("search page = %+v", search)
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := newStore(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.close()
+	got, ok := reopened.getRecord("rec-2")
+	if !ok || got.FileName != "payload-2.txt" {
+		t.Fatalf("reopened record ok=%v got=%+v", ok, got)
+	}
+}
+
+func TestStoreMigratesLegacyRecordsJSONLIntoPebble(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := configFile{
+		Settings: defaultSettings(),
+		Records:  []LocalRecord{testLocalRecord("rec-old", 100, "L3", "old.txt")},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	legacyEvents := []recordEvent{
+		{Op: "upsert", RecordID: "rec-new", Record: testLocalRecord("rec-new", 200, "L5", "legacy-payload.txt")},
+		{Op: "delete", RecordID: "rec-old"},
+	}
+	f, err := os.Create(path + ".records.jsonl")
+	if err != nil {
+		t.Fatalf("create legacy log: %v", err)
+	}
+	enc := json.NewEncoder(f)
+	for _, ev := range legacyEvents {
+		if err := enc.Encode(ev); err != nil {
+			_ = f.Close()
+			t.Fatalf("write legacy event: %v", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close legacy log: %v", err)
+	}
+
+	store, err := newStore(path)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	defer store.close()
+	if _, ok := store.getRecord("rec-old"); ok {
+		t.Fatalf("deleted legacy record was migrated")
+	}
+	got, ok := store.getRecord("rec-new")
+	if !ok || got.FileName != "legacy-payload.txt" {
+		t.Fatalf("migrated record ok=%v got=%+v", ok, got)
+	}
+	page := store.listRecordsPage(RecordPageOptions{Limit: 10, Query: "legacy-payload"})
+	if len(page.Items) != 1 || page.Items[0].RecordID != "rec-new" {
+		t.Fatalf("legacy search page = %+v", page)
+	}
+}
+
+func testLocalRecord(recordID string, unixNano int64, level, name string) LocalRecord {
+	rec := LocalRecord{
+		RecordID:       recordID,
+		FilePath:       "C:/tmp/" + name,
+		FileName:       name,
+		ContentHashHex: "0202020202020202020202020202020202020202020202020202020202020202",
+		ContentLength:  42,
+		ProofLevel:     level,
+		BatchID:        "batch-1",
+		TenantID:       "tenant-a",
+		ClientID:       "client-a",
+		EventType:      "file.snapshot",
+	}
+	setLocalRecordSubmittedAt(&rec, time.Unix(0, unixNano).UTC())
+	return rec
+}

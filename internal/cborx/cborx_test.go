@@ -1,0 +1,61 @@
+package cborx
+
+import (
+	"bytes"
+	"testing"
+)
+
+type sample struct {
+	A string `cbor:"a"`
+	B int    `cbor:"b"`
+}
+
+func TestMarshalDeterministic(t *testing.T) {
+	t.Parallel()
+
+	v := sample{A: "x", B: 7}
+	first, err := Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	second, err := Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal() second error = %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("Marshal() not deterministic:\nfirst=%x\nsecond=%x", first, second)
+	}
+}
+
+func TestUnmarshalRejectsDuplicateMapKeys(t *testing.T) {
+	t.Parallel()
+
+	dup := []byte{0xa2, 0x61, 0x61, 0x01, 0x61, 0x61, 0x02}
+	var got map[string]int
+	if err := Unmarshal(dup, &got); err == nil {
+		t.Fatal("Unmarshal() error = nil, want duplicate map key error")
+	}
+}
+
+func TestUnmarshalRejectsIndefiniteLength(t *testing.T) {
+	t.Parallel()
+
+	indefiniteText := []byte{0x7f, 0x61, 0x61, 0xff}
+	var got string
+	if err := Unmarshal(indefiniteText, &got); err == nil {
+		t.Fatal("Unmarshal() error = nil, want indefinite length error")
+	}
+}
+
+func TestUnmarshalLimit(t *testing.T) {
+	t.Parallel()
+
+	data, err := Marshal(sample{A: "x", B: 7})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var got sample
+	if err := UnmarshalLimit(data, &got, len(data)-1); err == nil {
+		t.Fatal("UnmarshalLimit() error = nil, want size error")
+	}
+}

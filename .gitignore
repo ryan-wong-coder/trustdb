@@ -1,0 +1,57 @@
+# Local runtime data
+.trustdb/
+.trustdb-dev/
+.localtest/
+.localdeploy/
+*.records.jsonl
+*.records.pebble/
+*.restore-checkpoint.json
+
+# Build outputs
+bin/
+build/
+dist/
+out/
+release/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.prof
+coverage.out
+coverage.html
+
+# Frontend dependencies and caches
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.vite/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.bad-*
+.DS_Store
+Thumbs.db
+
+# IDE/editor local state
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets and generated local keys
+*.key
+*.pub
+*.tdkeys
+*.pem
+.env
+.env.*
+
+# Local design/operations drafts
+doc/
+docs/
