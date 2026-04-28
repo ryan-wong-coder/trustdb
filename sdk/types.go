@@ -84,6 +84,14 @@ type RecordPage struct {
 	NextCursor string
 }
 
+type HealthStatus struct {
+	OK         bool
+	ServerURL  string
+	RTTMillis  int64
+	Error      string
+	StatusCode int
+}
+
 type AnchorStatus struct {
 	TreeSize uint64
 	Status   string

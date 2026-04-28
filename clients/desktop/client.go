@@ -1,101 +1,31 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
+	"github.com/ryan-wong-coder/trustdb/sdk"
 )
 
-// httpTimeout bounds each request against the server. Submit + proof
-// queries are small (<1MB) so a short timeout gives a clear failure
-// mode when the server is down or unreachable.
-const httpTimeout = 15 * time.Second
-
 type httpClient struct {
-	base  string
-	inner *http.Client
+	sdk *sdk.Client
 }
 
 func newHTTPClient(base string) (*httpClient, error) {
-	trimmed := strings.TrimSpace(base)
-	if trimmed == "" {
-		return nil, fmt.Errorf("server url is empty")
-	}
-	u, err := url.Parse(trimmed)
+	client, err := sdk.NewClient(base)
 	if err != nil {
-		return nil, fmt.Errorf("parse server url: %w", err)
+		return nil, err
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("server url must include scheme and host: %s", trimmed)
-	}
-	return &httpClient{base: strings.TrimRight(trimmed, "/"), inner: &http.Client{Timeout: httpTimeout}}, nil
+	return &httpClient{sdk: client}, nil
 }
 
-func (c *httpClient) url(p string, parts ...string) string {
-	// Manual assembly is safer than a single url.Parse here because
-	// record ids contain characters (e.g. lower-case base32) that we
-	// want percent-encoded while the static prefix stays untouched.
-	out := c.base + p
-	for _, part := range parts {
-		out += url.PathEscape(part)
-	}
-	return out
-}
-
-type ServerError struct {
-	StatusCode int
-	Code       string `json:"code"`
-	Message    string `json:"message"`
-}
-
-func (e *ServerError) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("%s: %s", e.Code, e.Message)
-	}
-	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
-}
-
-// decodeError tries to parse the server's structured error envelope
-// (trusterr.Code + message) and falls back to the raw body if the
-// response isn't JSON, so the UI always surfaces *something*
-// actionable instead of a blank "request failed".
-func decodeError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
-	var se ServerError
-	if err := json.Unmarshal(body, &se); err == nil && (se.Code != "" || se.Message != "") {
-		se.StatusCode = resp.StatusCode
-		return &se
-	}
-	return &ServerError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(string(body))}
-}
-
-func (c *httpClient) getJSON(ctx context.Context, endpoint string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.inner.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return decodeError(resp)
-	}
-	return json.NewDecoder(resp.Body).Decode(dst)
-}
+type ServerError = sdk.Error
 
 type HealthStatus struct {
 	OK         bool   `json:"ok"`
@@ -106,92 +36,30 @@ type HealthStatus struct {
 }
 
 func (c *httpClient) health(ctx context.Context) HealthStatus {
-	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/healthz", nil)
-	if err != nil {
-		return HealthStatus{ServerURL: c.base, Error: err.Error()}
+	status := c.sdk.CheckHealth(ctx)
+	return HealthStatus{
+		OK:         status.OK,
+		ServerURL:  status.ServerURL,
+		RTTMillis:  status.RTTMillis,
+		Error:      status.Error,
+		StatusCode: status.StatusCode,
 	}
-	resp, err := c.inner.Do(req)
-	rtt := time.Since(start).Milliseconds()
-	if err != nil {
-		return HealthStatus{ServerURL: c.base, Error: err.Error(), RTTMillis: rtt}
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return HealthStatus{ServerURL: c.base, Error: "unhealthy", StatusCode: resp.StatusCode, RTTMillis: rtt}
-	}
-	return HealthStatus{OK: true, ServerURL: c.base, RTTMillis: rtt}
 }
 
-// submitClaimResult mirrors the server's submitClaimResponse so the
-// UI can inspect batch_enqueued / idempotent flags without making a
-// second call.
-type submitClaimResult struct {
-	RecordID        string                `json:"record_id"`
-	Status          string                `json:"status"`
-	ProofLevel      string                `json:"proof_level"`
-	Idempotent      bool                  `json:"idempotent"`
-	BatchEnqueued   bool                  `json:"batch_enqueued"`
-	BatchError      string                `json:"batch_error,omitempty"`
-	ServerRecord    model.ServerRecord    `json:"server_record"`
-	AcceptedReceipt model.AcceptedReceipt `json:"accepted_receipt"`
-}
+// submitClaimResult mirrors the server's submit response so the UI can inspect
+// batch_enqueued / idempotent flags without making a second call.
+type submitClaimResult = sdk.SubmitResult
 
-func (c *httpClient) submitClaimCBOR(ctx context.Context, body []byte) (submitClaimResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/claims", bytes.NewReader(body))
-	if err != nil {
-		return submitClaimResult{}, err
-	}
-	req.Header.Set("Content-Type", "application/cbor")
-	resp, err := c.inner.Do(req)
-	if err != nil {
-		return submitClaimResult{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
-		return submitClaimResult{}, decodeError(resp)
-	}
-	var out submitClaimResult
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return submitClaimResult{}, fmt.Errorf("decode submit response: %w", err)
-	}
-	return out, nil
-}
-
-type proofEnvelope struct {
-	RecordID    string            `json:"record_id"`
-	ProofLevel  string            `json:"proof_level"`
-	ProofBundle model.ProofBundle `json:"proof_bundle"`
-}
-
-type recordsEnvelope struct {
-	Records    []model.RecordIndex `json:"records"`
-	Limit      int                 `json:"limit"`
-	Direction  string              `json:"direction"`
-	NextCursor string              `json:"next_cursor,omitempty"`
+func (c *httpClient) submitSignedClaim(ctx context.Context, signed model.SignedClaim) (submitClaimResult, error) {
+	return c.sdk.SubmitSignedClaim(ctx, signed)
 }
 
 func (c *httpClient) getProof(ctx context.Context, recordID string) (model.ProofBundle, error) {
-	endpoint := c.url("/v1/proofs/", recordID)
-	var env proofEnvelope
-	if err := c.getJSON(ctx, endpoint, &env); err != nil {
-		return model.ProofBundle{}, err
-	}
-	if env.ProofBundle.RecordID == "" {
-		return model.ProofBundle{}, fmt.Errorf("server returned empty proof bundle")
-	}
-	return env.ProofBundle, nil
+	return c.sdk.GetProofBundle(ctx, recordID)
 }
 
 func (c *httpClient) getRecordIndex(ctx context.Context, recordID string) (model.RecordIndex, error) {
-	var idx model.RecordIndex
-	if err := c.getJSON(ctx, c.url("/v1/records/", recordID), &idx); err != nil {
-		return model.RecordIndex{}, err
-	}
-	if idx.RecordID == "" {
-		return model.RecordIndex{}, fmt.Errorf("server returned empty record index")
-	}
-	return idx, nil
+	return c.sdk.GetRecord(ctx, recordID)
 }
 
 func (c *httpClient) listRecordIndexes(ctx context.Context, opts RecordPageOptions) (RecordPage, error) {
@@ -204,7 +72,7 @@ func (c *httpClient) listRecordIndexes(ctx context.Context, opts RecordPageOptio
 	}
 	direction := strings.TrimSpace(opts.Direction)
 	if direction == "" {
-		direction = "desc"
+		direction = sdk.RecordListDirectionDesc
 	}
 
 	query := strings.TrimSpace(opts.Query)
@@ -238,38 +106,25 @@ func (c *httpClient) listRecordIndexes(ctx context.Context, opts RecordPageOptio
 		}
 	}
 
-	values := url.Values{}
-	values.Set("limit", strconv.Itoa(limit))
-	values.Set("direction", direction)
-	if opts.Cursor != "" {
-		values.Set("cursor", opts.Cursor)
-	}
-	if opts.BatchID != "" {
-		values.Set("batch_id", opts.BatchID)
-	}
-	if opts.TenantID != "" {
-		values.Set("tenant_id", opts.TenantID)
-	}
-	if opts.ClientID != "" {
-		values.Set("client_id", opts.ClientID)
-	}
-	if contentHash != "" {
-		values.Set("content_hash", contentHash)
-	}
-	if query != "" {
-		values.Set("q", query)
-	}
-	endpoint := c.base + "/v1/records?" + values.Encode()
-	var env recordsEnvelope
-	if err := c.getJSON(ctx, endpoint, &env); err != nil {
+	page, err := c.sdk.ListRecords(ctx, sdk.ListRecordsOptions{
+		Limit:          limit,
+		Direction:      direction,
+		Cursor:         opts.Cursor,
+		BatchID:        opts.BatchID,
+		TenantID:       opts.TenantID,
+		ClientID:       opts.ClientID,
+		Query:          query,
+		ContentHashHex: contentHash,
+	})
+	if err != nil {
 		return RecordPage{}, err
 	}
-	items := make([]LocalRecord, 0, len(env.Records))
-	for _, idx := range env.Records {
+	items := make([]LocalRecord, 0, len(page.Records))
+	for _, idx := range page.Records {
 		items = append(items, localRecordFromIndex(idx))
 	}
 	total := opts.Offset + len(items)
-	if env.NextCursor != "" {
+	if page.NextCursor != "" {
 		total++
 	}
 	return RecordPage{
@@ -277,10 +132,10 @@ func (c *httpClient) listRecordIndexes(ctx context.Context, opts RecordPageOptio
 		Total:      total,
 		Limit:      limit,
 		Offset:     opts.Offset,
-		HasMore:    env.NextCursor != "",
-		NextCursor: env.NextCursor,
+		HasMore:    page.NextCursor != "",
+		NextCursor: page.NextCursor,
 		Source:     "server",
-		TotalExact: env.NextCursor == "",
+		TotalExact: page.NextCursor == "",
 	}, nil
 }
 
@@ -369,79 +224,32 @@ type anchorEnvelope struct {
 }
 
 func (c *httpClient) getGlobalProof(ctx context.Context, batchID string) (model.GlobalLogProof, error) {
-	endpoint := c.url("/v1/global-log/inclusion/", batchID)
-	var proof model.GlobalLogProof
-	if err := c.getJSON(ctx, endpoint, &proof); err != nil {
-		return model.GlobalLogProof{}, err
-	}
-	return proof, nil
+	return c.sdk.GetGlobalProof(ctx, batchID)
 }
 
 func (c *httpClient) getAnchor(ctx context.Context, treeSize uint64) (anchorEnvelope, error) {
-	endpoint := c.url("/v1/anchors/sth/", fmt.Sprintf("%d", treeSize))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	status, err := c.sdk.GetAnchor(ctx, treeSize)
 	if err != nil {
+		if sdk.IsUnavailable(err) {
+			return anchorEnvelope{TreeSize: treeSize, Status: "unavailable"}, nil
+		}
 		return anchorEnvelope{}, err
 	}
-	resp, err := c.inner.Do(req)
-	if err != nil {
-		return anchorEnvelope{}, err
-	}
-	defer resp.Body.Close()
-	// 404 / 412 are "no anchor yet" — legitimate states, not errors.
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusPreconditionFailed {
-		return anchorEnvelope{TreeSize: treeSize, Status: "unavailable"}, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return anchorEnvelope{}, decodeError(resp)
-	}
-	var env anchorEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return anchorEnvelope{}, fmt.Errorf("decode anchor response: %w", err)
-	}
-	return env, nil
-}
-
-type rootsEnvelope struct {
-	Roots []model.BatchRoot `json:"roots"`
+	return anchorEnvelope{TreeSize: status.TreeSize, Status: status.Status, Result: status.Result}, nil
 }
 
 func (c *httpClient) listRoots(ctx context.Context, limit int) ([]model.BatchRoot, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	endpoint := c.base + "/v1/roots?limit=" + strconv.Itoa(limit)
-	var env rootsEnvelope
-	if err := c.getJSON(ctx, endpoint, &env); err != nil {
-		return nil, err
-	}
-	return env.Roots, nil
+	return c.sdk.ListRoots(ctx, limit)
 }
 
 func (c *httpClient) latestRoot(ctx context.Context) (model.BatchRoot, error) {
-	var root model.BatchRoot
-	if err := c.getJSON(ctx, c.base+"/v1/roots/latest", &root); err != nil {
-		return model.BatchRoot{}, err
-	}
-	return root, nil
+	return c.sdk.LatestRoot(ctx)
 }
 
 func (c *httpClient) metricsRaw(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/metrics", nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.inner.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", decodeError(resp)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
+	return c.sdk.MetricsRaw(ctx)
+}
+
+func (c *httpClient) exportSingleProof(ctx context.Context, recordID string) (model.SingleProof, error) {
+	return c.sdk.ExportSingleProof(ctx, recordID)
 }

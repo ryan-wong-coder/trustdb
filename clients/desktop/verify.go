@@ -11,7 +11,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/sproof"
-	"github.com/ryan-wong-coder/trustdb/internal/verify"
+	"github.com/ryan-wong-coder/trustdb/sdk"
 )
 
 // VerifyRequest covers both verify modes the UI offers:
@@ -59,8 +59,8 @@ type VerifyResponse struct {
 
 // VerifyProof is the sole verify entry point exposed to the frontend.
 // It dispatches to local-file or remote-http input acquisition, then
-// calls into the shared verify.ProofBundle routine used by the CLI,
-// so the desktop and the CLI can never diverge on validity rules.
+// calls into the shared Go SDK verification routine, so desktop callers use the
+// same verification surface as external applications.
 func (a *App) VerifyProof(req VerifyRequest) (*VerifyResponse, error) {
 	if _, err := a.requireStore(); err != nil {
 		return nil, err
@@ -153,18 +153,14 @@ func (a *App) VerifyProof(req VerifyRequest) (*VerifyResponse, error) {
 	}
 	defer f.Close()
 
-	opts := []verify.Option{}
-	if globalProof != nil {
-		opts = append(opts, verify.WithGlobalProof(*globalProof))
-	}
-	if anchor != nil {
-		opts = append(opts, verify.WithAnchor(*anchor))
-	}
-
-	res, err := verify.ProofBundle(f, bundle, verify.TrustedKeys{
+	res, err := sdk.VerifyArtifacts(f, sdk.ProofArtifacts{
+		Bundle:       bundle,
+		GlobalProof:  globalProof,
+		AnchorResult: anchor,
+	}, sdk.TrustedKeys{
 		ClientPublicKey: clientPub,
 		ServerPublicKey: serverPub,
-	}, opts...)
+	}, sdk.VerifyOptions{SkipAnchor: req.SkipAnchor})
 	if err != nil {
 		return &VerifyResponse{
 			Valid:        false,

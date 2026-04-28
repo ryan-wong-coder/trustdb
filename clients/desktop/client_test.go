@@ -11,6 +11,13 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 )
 
+type recordPageResponse struct {
+	Records    []model.RecordIndex `json:"records"`
+	Limit      int                 `json:"limit"`
+	Direction  string              `json:"direction"`
+	NextCursor string              `json:"next_cursor,omitempty"`
+}
+
 func TestHTTPClientListRecordIndexesMapsServerPage(t *testing.T) {
 	t.Parallel()
 
@@ -22,7 +29,7 @@ func TestHTTPClientListRecordIndexesMapsServerPage(t *testing.T) {
 		if q.Get("limit") != "2" || q.Get("cursor") != "cur-1" || q.Get("batch_id") != "batch-1" || q.Get("direction") != "desc" {
 			t.Fatalf("query = %s", r.URL.RawQuery)
 		}
-		_ = json.NewEncoder(w).Encode(recordsEnvelope{
+		_ = json.NewEncoder(w).Encode(recordPageResponse{
 			Records: []model.RecordIndex{{
 				SchemaVersion:      model.SchemaRecordIndex,
 				RecordID:           "tr1record",
@@ -122,7 +129,7 @@ func TestHTTPClientListRecordIndexesSendsServerSearchFilters(t *testing.T) {
 		default:
 			t.Fatalf("unexpected query = %s", r.URL.RawQuery)
 		}
-		_ = json.NewEncoder(w).Encode(recordsEnvelope{Limit: 50, Direction: "desc"})
+		_ = json.NewEncoder(w).Encode(recordPageResponse{Limit: 50, Direction: "desc"})
 	}))
 	defer srv.Close()
 

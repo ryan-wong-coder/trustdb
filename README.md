@@ -2,6 +2,8 @@
 
 ![CI](https://github.com/ryan-wong-coder/trustdb/actions/workflows/ci.yml/badge.svg)
 
+[中文说明](README.zh-CN.md)
+
 ![TrustDB system architecture](assets/readme/system-architecture.png)
 
 TrustDB is a single-node verifiable evidence database. It turns local file claims into signed receipts, Merkle batch proofs, global transparency-log proofs, and optional external STH anchors.
