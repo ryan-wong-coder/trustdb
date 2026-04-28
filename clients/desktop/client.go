@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
 )
 
 // httpTimeout bounds each request against the server. Submit + proof
@@ -297,10 +298,10 @@ func looksLikeSHA256Hex(query string) bool {
 }
 
 func localRecordFromIndex(idx model.RecordIndex) LocalRecord {
-	proofLevel := "L2"
+	proofLevel := prooflevel.L2
 	var committed *model.CommittedReceipt
 	if idx.BatchID != "" {
-		proofLevel = "L3"
+		proofLevel = prooflevel.L3
 		committed = &model.CommittedReceipt{
 			SchemaVersion: model.SchemaCommittedReceipt,
 			RecordID:      idx.RecordID,
@@ -326,7 +327,7 @@ func localRecordFromIndex(idx model.RecordIndex) LocalRecord {
 		TenantID:         idx.TenantID,
 		ClientID:         idx.ClientID,
 		KeyID:            idx.KeyID,
-		ProofLevel:       proofLevel,
+		ProofLevel:       proofLevel.String(),
 		BatchID:          idx.BatchID,
 		CommittedReceipt: committed,
 	}

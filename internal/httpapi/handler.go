@@ -17,6 +17,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/ingest"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
+	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
@@ -206,7 +207,7 @@ func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, submitClaimResponse{
 		RecordID:        record.RecordID,
 		Status:          accepted.Status,
-		ProofLevel:      "L2",
+		ProofLevel:      prooflevel.L2.String(),
 		Idempotent:      idempotent,
 		BatchEnqueued:   batchEnqueued,
 		BatchError:      batchErr,
@@ -228,7 +229,7 @@ func (h Handler) getProof(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, proofResponse{
 		RecordID:    bundle.RecordID,
-		ProofLevel:  "L3",
+		ProofLevel:  prooflevel.L3.String(),
 		ProofBundle: bundle,
 	})
 }
@@ -583,7 +584,7 @@ func (h Handler) getAnchor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, trusterr.New(trusterr.CodeNotFound, "anchor not found for STH"))
 		return
 	}
-	resp := anchorResponse{TreeSize: treeSize, ProofLevel: "L5"}
+	resp := anchorResponse{TreeSize: treeSize, ProofLevel: prooflevel.L5.String()}
 	switch {
 	case resultOK:
 		resp.Status = model.AnchorStatePublished
