@@ -27,6 +27,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
+	"github.com/ryan-wong-coder/trustdb/internal/sproof"
 	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
 	"github.com/ryan-wong-coder/trustdb/internal/wal"
 )
@@ -35,9 +36,8 @@ import (
 // FileSink, submits a single claim, waits for the L5 anchor to be
 // published, then invokes `trustdb verify --server=... --record=...`
 // and asserts the command reports ProofLevel=L5. This catches every
-// seam the verify CLI relies on in a single run — HTTP decoding of
-// the proof envelope, optional anchor fetch, AnchorConsistency —
-// without mocking anything inside the verify package itself.
+// seam the verify CLI relies on in a single run 鈥?HTTP decoding of
+// the proof envelope, optional anchor fetch, AnchorConsistency 鈥?// without mocking anything inside the verify package itself.
 func TestVerifyCmdRemoteAnchor(t *testing.T) {
 	ctx := context.Background()
 
@@ -120,6 +120,58 @@ func TestVerifyCmdRemoteSkipAnchor(t *testing.T) {
 	}
 }
 
+func TestVerifyCmdLocalSingleProof(t *testing.T) {
+	ctx := context.Background()
+
+	server, _, clientPub, serverPub, contentPath, recordID := runServeForVerify(t, ctx)
+	bundle, global, anchorResult := fetchSingleProofInputs(t, ctx, server, recordID)
+	single, err := sproof.New(bundle, sproof.Options{
+		GlobalProof:     &global,
+		AnchorResult:    anchorResult,
+		ExportedAtUnixN: time.Unix(600, 0).UnixNano(),
+	})
+	if err != nil {
+		t.Fatalf("sproof.New: %v", err)
+	}
+	sproofPath := filepath.Join(t.TempDir(), "proof.sproof")
+	if err := sproof.WriteFile(sproofPath, single); err != nil {
+		t.Fatalf("sproof.WriteFile: %v", err)
+	}
+
+	t.Run("default verifies L5", func(t *testing.T) {
+		rt, outBuf := newVerifyRuntime(t)
+		cmd := newVerifyCommand(rt)
+		cmd.SetArgs([]string{
+			"--file", contentPath,
+			"--sproof", sproofPath,
+			"--client-public-key", writePubKey(t, clientPub),
+			"--server-public-key", writePubKey(t, serverPub),
+		})
+		cmd.SetContext(ctx)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		assertVerifyLevel(t, outBuf, "L5")
+	})
+
+	t.Run("skip anchor stops at L4", func(t *testing.T) {
+		rt, outBuf := newVerifyRuntime(t)
+		cmd := newVerifyCommand(rt)
+		cmd.SetArgs([]string{
+			"--file", contentPath,
+			"--sproof", sproofPath,
+			"--client-public-key", writePubKey(t, clientPub),
+			"--server-public-key", writePubKey(t, serverPub),
+			"--skip-anchor",
+		})
+		cmd.SetContext(ctx)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		assertVerifyLevel(t, outBuf, "L4")
+	})
+}
+
 // TestVerifyCmdRejectsConflictingFlags asserts the CLI guards against
 // obviously-broken flag combinations before doing any IO.
 func TestVerifyCmdRejectsConflictingFlags(t *testing.T) {
@@ -137,6 +189,37 @@ func TestVerifyCmdRejectsConflictingFlags(t *testing.T) {
 				"--proof", filepath.Join(dir, "bundle.tdproof"),
 				"--server", "http://localhost:9",
 				"--record", "r",
+				"--client-public-key", pub,
+				"--server-public-key", pub,
+			},
+		},
+		{
+			name: "sproof with server",
+			args: []string{
+				"--file", filepath.Join(dir, "file.txt"),
+				"--sproof", filepath.Join(dir, "proof.sproof"),
+				"--server", "http://localhost:9",
+				"--record", "r",
+				"--client-public-key", pub,
+				"--server-public-key", pub,
+			},
+		},
+		{
+			name: "sproof with proof",
+			args: []string{
+				"--file", filepath.Join(dir, "file.txt"),
+				"--sproof", filepath.Join(dir, "proof.sproof"),
+				"--proof", filepath.Join(dir, "bundle.tdproof"),
+				"--client-public-key", pub,
+				"--server-public-key", pub,
+			},
+		},
+		{
+			name: "sproof with global proof",
+			args: []string{
+				"--file", filepath.Join(dir, "file.txt"),
+				"--sproof", filepath.Join(dir, "proof.sproof"),
+				"--global-proof", filepath.Join(dir, "global.tdgproof"),
 				"--client-public-key", pub,
 				"--server-public-key", pub,
 			},
@@ -200,7 +283,47 @@ func TestResolveVerifyClientPubPrefersExplicitKey(t *testing.T) {
 	}
 }
 
-// runServeForVerify wires up a minimal but real L1→L5 pipeline
+func fetchSingleProofInputs(
+	t *testing.T,
+	ctx context.Context,
+	server *httptest.Server,
+	recordID string,
+) (model.ProofBundle, model.GlobalLogProof, *model.STHAnchorResult) {
+	t.Helper()
+	client := server.Client()
+	bundle, err := fetchProofBundle(ctx, client, server.URL, recordID)
+	if err != nil {
+		t.Fatalf("fetchProofBundle: %v", err)
+	}
+	global, err := fetchGlobalProof(ctx, client, server.URL, bundle.CommittedReceipt.BatchID)
+	if err != nil {
+		t.Fatalf("fetchGlobalProof: %v", err)
+	}
+	anchorResult, err := fetchAnchorResult(ctx, client, server.URL, global.STH.TreeSize)
+	if err != nil {
+		t.Fatalf("fetchAnchorResult: %v", err)
+	}
+	if anchorResult == nil {
+		t.Fatalf("fetchAnchorResult returned nil, want published anchor")
+	}
+	return bundle, global, anchorResult
+}
+
+func assertVerifyLevel(t *testing.T, out *bytes.Buffer, want string) {
+	t.Helper()
+	var result struct {
+		Valid      bool   `json:"valid"`
+		ProofLevel string `json:"proof_level"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode verify output: %v (raw=%q)", err, out.String())
+	}
+	if !result.Valid || result.ProofLevel != want {
+		t.Fatalf("verify result = %+v, want valid %s", result, want)
+	}
+}
+
+// runServeForVerify wires up a minimal but real L1鈫扡5 pipeline
 // (engine + ingest + batch + anchor) so the verify CLI can talk to a
 // genuine HTTP surface. Returns a running httptest.Server plus every
 // credential the verify command needs.

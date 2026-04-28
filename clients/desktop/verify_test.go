@@ -54,7 +54,7 @@ func TestReadGlobalProofFileExplainsLegacyBatchAnchorMixup(t *testing.T) {
 		t.Fatal("readGlobalProofFile() error = nil, want legacy hint")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "旧版 batch anchor") || !strings.Contains(msg, "GlobalLogProof") {
+	if !strings.Contains(msg, "legacy batch anchor") || !strings.Contains(msg, "GlobalLogProof") {
 		t.Fatalf("error message = %q, want legacy batch-anchor hint", msg)
 	}
 }
@@ -64,24 +64,14 @@ func TestReadSingleProofFileRoundTrip(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "sample.sproof")
 	writeCBORForTest(t, path, model.SingleProof{
-		SchemaVersion: model.SchemaSingleProof,
+		SchemaVersion:   model.SchemaSingleProof,
+		FormatVersion:   1,
+		RecordID:        "rec-1",
+		ProofLevel:      "L3",
+		ExportedAtUnixN: 1,
 		ProofBundle: model.ProofBundle{
 			SchemaVersion: model.SchemaProofBundle,
 			RecordID:      "rec-1",
-		},
-		GlobalProof: &model.GlobalLogProof{
-			SchemaVersion: model.SchemaGlobalLogProof,
-			BatchID:       "batch-1",
-			STH: model.SignedTreeHead{
-				SchemaVersion: model.SchemaSignedTreeHead,
-				TreeSize:      1,
-			},
-		},
-		AnchorResult: &model.STHAnchorResult{
-			SchemaVersion: model.SchemaSTHAnchorResult,
-			TreeSize:      1,
-			SinkName:      "ots",
-			AnchorID:      "ots-test",
 		},
 	})
 
@@ -89,7 +79,7 @@ func TestReadSingleProofFileRoundTrip(t *testing.T) {
 	if err := readSingleProofFile(path, &proof); err != nil {
 		t.Fatalf("readSingleProofFile() error = %v", err)
 	}
-	if proof.SchemaVersion != model.SchemaSingleProof || proof.ProofBundle.RecordID != "rec-1" || proof.GlobalProof == nil || proof.AnchorResult == nil {
+	if proof.SchemaVersion != model.SchemaSingleProof || proof.RecordID != "rec-1" || proof.ProofBundle.RecordID != "rec-1" {
 		t.Fatalf("decoded single proof = %+v, want bundled artefacts", proof)
 	}
 }
@@ -100,7 +90,13 @@ func TestReadProofBundleFileExplainsSingleProofMixup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample.sproof")
 	writeCBORForTest(t, path, model.SingleProof{
 		SchemaVersion: model.SchemaSingleProof,
-		ProofBundle:   model.ProofBundle{SchemaVersion: model.SchemaProofBundle},
+		FormatVersion: 1,
+		RecordID:      "rec-1",
+		ProofLevel:    "L3",
+		ProofBundle: model.ProofBundle{
+			SchemaVersion: model.SchemaProofBundle,
+			RecordID:      "rec-1",
+		},
 	})
 
 	var bundle model.ProofBundle
@@ -109,7 +105,7 @@ func TestReadProofBundleFileExplainsSingleProofMixup(t *testing.T) {
 		t.Fatal("readProofBundleFile() error = nil, want single-proof hint")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, ".sproof") || !strings.Contains(msg, "主验证入口") {
+	if !strings.Contains(msg, ".sproof") || !strings.Contains(msg, "main .sproof input") {
 		t.Fatalf("error message = %q, want single-proof hint", msg)
 	}
 }

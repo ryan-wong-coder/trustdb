@@ -14,6 +14,7 @@ import (
 
 	"github.com/ryan-wong-coder/trustdb/internal/keystore"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/sproof"
 	"github.com/ryan-wong-coder/trustdb/internal/verify"
 	"github.com/spf13/cobra"
 )
@@ -25,11 +26,11 @@ const httpFetchTimeout = 10 * time.Second
 
 func newVerifyCommand(rt *runtimeConfig) *cobra.Command {
 	var (
-		filePath, proofPath, globalProofPath, anchorPath string
-		clientPubPath, registryPath, registryPubPath     string
-		serverPubPath                                    string
-		serverURL, recordID                              string
-		skipAnchor                                       bool
+		filePath, sproofPath, proofPath, globalProofPath, anchorPath string
+		clientPubPath, registryPath, registryPubPath                 string
+		serverPubPath                                                string
+		serverURL, recordID                                          string
+		skipAnchor                                                   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "verify",
@@ -45,6 +46,7 @@ func newVerifyCommand(rt *runtimeConfig) *cobra.Command {
 Two modes are supported:
 
   Local mode (default):
+    --file <path> --sproof <proof.sproof>
     --file <path> --proof <bundle.tdproof> [--global-proof <global.tdgproof>] [--anchor <anchor.tdanchor>]
 
   Server mode:
@@ -54,7 +56,8 @@ Both modes require the server public key and either an explicit
 client public key or a key registry for resolving the client key
 recorded in the bundle. When an anchor is available (either via
 --anchor in local mode or auto-fetched in server mode) the result
-is upgraded to L5; pass --skip-anchor to stop at L3 in server mode.
+is upgraded to L5; pass --skip-anchor to ignore L5 anchors in server mode
+or inside a local .sproof.
 L5 always verifies an STH/global-root anchor; local --anchor requires
 --global-proof because batch roots are no longer directly anchored.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -74,14 +77,22 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 			switch {
 			case remote && recordID == "":
 				return usageError("verify --server requires --record")
+			case remote && sproofPath != "":
+				return usageError("verify: --sproof and --server are mutually exclusive")
 			case remote && proofPath != "":
 				return usageError("verify: --proof and --server are mutually exclusive")
 			case remote && globalProofPath != "":
 				return usageError("verify: --global-proof is only valid in local mode")
 			case remote && anchorPath != "":
 				return usageError("verify: --anchor is only valid in local mode; use --skip-anchor to disable remote fetch")
-			case !remote && proofPath == "":
-				return usageError("verify requires --proof or --server/--record")
+			case !remote && sproofPath == "" && proofPath == "":
+				return usageError("verify requires --sproof, --proof, or --server/--record")
+			case !remote && sproofPath != "" && proofPath != "":
+				return usageError("verify: --sproof and --proof are mutually exclusive")
+			case !remote && sproofPath != "" && globalProofPath != "":
+				return usageError("verify: --global-proof is only valid with --proof")
+			case !remote && sproofPath != "" && anchorPath != "":
+				return usageError("verify: --anchor is only valid with --proof")
 			case !remote && anchorPath != "" && globalProofPath == "":
 				return usageError("verify: --anchor requires --global-proof")
 			}
@@ -89,6 +100,7 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 			bundle, globalProof, remoteAnchor, err := loadVerifyInputs(
 				cmd.Context(),
 				remote,
+				sproofPath,
 				proofPath,
 				globalProofPath,
 				serverURL,
@@ -126,7 +138,7 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 				}
 				opts = append(opts, verify.WithAnchor(ar))
 				anchorInUse = &ar
-			case remote && remoteAnchor != nil:
+			case remoteAnchor != nil:
 				opts = append(opts, verify.WithAnchor(*remoteAnchor))
 				anchorInUse = remoteAnchor
 			}
@@ -152,6 +164,7 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 		},
 	}
 	cmd.Flags().StringVar(&filePath, "file", "", "file to verify")
+	cmd.Flags().StringVar(&sproofPath, "sproof", "", "single proof path (local mode, recommended)")
 	cmd.Flags().StringVar(&proofPath, "proof", "", "proof bundle path (local mode)")
 	cmd.Flags().StringVar(&globalProofPath, "global-proof", "", "global log proof path (local mode; required with --anchor)")
 	cmd.Flags().StringVar(&anchorPath, "anchor", "", "anchor result path (local mode, optional)")
@@ -161,7 +174,7 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 	cmd.Flags().StringVar(&serverPubPath, "server-public-key", "", "server public key")
 	cmd.Flags().StringVar(&serverURL, "server", "", "TrustDB server URL (remote mode)")
 	cmd.Flags().StringVar(&recordID, "record", "", "record id to verify (remote mode)")
-	cmd.Flags().BoolVar(&skipAnchor, "skip-anchor", false, "do not auto-fetch or verify anchor (remote mode)")
+	cmd.Flags().BoolVar(&skipAnchor, "skip-anchor", false, "do not fetch or verify L5 anchor")
 	return cmd
 }
 
@@ -173,10 +186,20 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 func loadVerifyInputs(
 	ctx context.Context,
 	remote bool,
-	proofPath, globalProofPath, serverURL, recordID string,
+	sproofPath, proofPath, globalProofPath, serverURL, recordID string,
 	skipAnchor bool,
 ) (model.ProofBundle, *model.GlobalLogProof, *model.STHAnchorResult, error) {
 	if !remote {
+		if sproofPath != "" {
+			proof, err := sproof.ReadFile(sproofPath)
+			if err != nil {
+				return model.ProofBundle{}, nil, nil, err
+			}
+			if skipAnchor {
+				return proof.ProofBundle, proof.GlobalProof, nil, nil
+			}
+			return proof.ProofBundle, proof.GlobalProof, proof.AnchorResult, nil
+		}
 		var bundle model.ProofBundle
 		if err := readCBORFile(proofPath, &bundle); err != nil {
 			return model.ProofBundle{}, nil, nil, err
