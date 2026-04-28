@@ -59,6 +59,14 @@ npm ci
 
 如果任务涉及架构、证明等级、存储格式、备份格式、外部锚定或公开 API，Issue 中必须先写清楚兼容性边界和安全影响。
 
+仓库提供了 GitHub Issue 模板：
+
+- Bug report：用于已实现路径的缺陷。
+- Feature request：用于新增能力。
+- Engineering task：用于重构、CI、文档、部署和维护任务。
+
+不要绕过模板直接开空白 Issue；如果模板不够用，先在 Issue 内容中解释缺失字段，而不是省略背景、验收和验证。
+
 ## 分支规范
 
 从最新 `main` 创建分支：
@@ -115,6 +123,12 @@ git diff
 - `*.key`、`*.pub`、`*.pem`、`*.tdkeys`
 - `.env`、备份包、临时文件、日志文件
 - 与当前 Issue 无关的格式化或实验文件
+
+开发完成后必须把分支 push 到远程，并通过 Pull Request 合并；不要只停留在本地提交，也不要直接 push 到 `main`：
+
+```powershell
+git push -u origin issue-<number>-<short-name>
+```
 
 ## 工程约束
 
@@ -219,6 +233,20 @@ cd clients/desktop
 wails build
 ```
 
+## CI 质量门
+
+Pull Request 会运行 `.github/workflows/ci.yml`。当前 CI 覆盖：
+
+- Repository hygiene：检查 whitespace，并防止 `doc/` / `docs/` 本地草稿目录被提交。
+- Backend unit tests：根模块依赖校验、`go mod tidy` 检查和 `go test ./...`。
+- Backend race tests：`go test -race ./...`。
+- Backend integration tests：`go test -count=1 -tags=integration ./...`。
+- Backend e2e tests：`go test -count=1 -tags=e2e ./...`。
+- Desktop Go tests：`clients/desktop` 依赖校验、tidy 检查和 Go 测试。
+- Desktop frontend build：`npm ci` 和 `npm run build`。
+
+CI 失败时不要用“本地能跑”直接覆盖。先定位 CI 与本地差异：Go/Node 版本、Linux/Windows 路径差异、race 暴露的并发问题、integration/e2e 的时序问题、或 npm lockfile 不一致。确实无法在本轮修复时，必须在 PR 中写明原因、残余风险和后续 Issue。
+
 如果某个测试因本机工具链、网络或外部服务不可用而无法运行，必须在 Issue 或 PR 中写明原因、已运行的替代检查和残余风险。
 
 ## 文档要求
@@ -252,30 +280,7 @@ wails build
 - 所有用户可见行为变化都更新了 README、配置示例或相关说明。
 - 新增功能有测试，修复 Bug 有回归测试或明确说明无法自动化的原因。
 
-建议 PR 描述模板：
-
-```markdown
-## Summary
-
-- 
-
-## Linked Issue
-
-Refs #
-
-## Tests
-
-- [ ] go test ./...
-- [ ] go test -race ./...
-- [ ] go test -tags=integration ./...
-- [ ] go test -tags=e2e ./...
-- [ ] cd clients/desktop && go test ./...
-- [ ] cd clients/desktop/frontend && npm run build
-
-## Risk / Rollback
-
-- 
-```
+仓库已经提供 `.github/pull_request_template.md`。提交 PR 时保留模板中的证明语义、存储恢复、规模路径和验证清单；不相关的检查可以标注未运行原因，但不要删除风险字段。
 
 ## 安全与密钥
 

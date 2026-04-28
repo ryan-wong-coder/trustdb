@@ -1,5 +1,7 @@
 # TrustDB
 
+![CI](https://github.com/ryan-wong-coder/trustdb/actions/workflows/ci.yml/badge.svg)
+
 ![TrustDB system architecture](assets/readme/system-architecture.png)
 
 TrustDB is a single-node verifiable evidence database. It turns local file claims into signed receipts, Merkle batch proofs, global transparency-log proofs, and optional external STH anchors.
@@ -197,6 +199,8 @@ npm run build
 
 ## Development Checks
 
+Pull requests run the GitHub Actions workflow in `.github/workflows/ci.yml`. It covers repository hygiene, backend unit/race/integration/e2e tests, desktop Go tests, and the desktop frontend build.
+
 Common checks:
 
 ```powershell
@@ -214,4 +218,6 @@ The repository includes tests for deterministic CBOR, claims, WAL, batch proofs,
 
 TrustDB uses an Issue-first development flow. Before starting code, documentation, refactoring, or operations work, create or link a GitHub Issue with scope, acceptance criteria, and a test plan.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution workflow, branch conventions, commit/PR expectations, test matrix, documentation rules, and security notes.
+Use the GitHub Issue templates for bug reports, feature requests, and engineering tasks. Pull requests should use the repository PR template and must reference the linked Issue.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution workflow, branch conventions, commit/PR expectations, CI quality gates, test matrix, documentation rules, and security notes.

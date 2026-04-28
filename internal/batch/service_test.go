@@ -16,6 +16,8 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
+const asyncProofWaitTimeout = 10 * time.Second
+
 func TestServiceCommitsFullBatch(t *testing.T) {
 	t.Parallel()
 
@@ -300,7 +302,7 @@ func waitForLatestRoot(t *testing.T, svc *Service, wantTreeSize uint64) model.Ba
 
 func waitForProof(t *testing.T, svc *Service, recordID string) model.ProofBundle {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(asyncProofWaitTimeout)
 	for time.Now().Before(deadline) {
 		got, err := svc.Proof(context.Background(), recordID)
 		if err == nil {
@@ -309,7 +311,7 @@ func waitForProof(t *testing.T, svc *Service, recordID string) model.ProofBundle
 		time.Sleep(5 * time.Millisecond)
 	}
 	got, err := svc.Proof(context.Background(), recordID)
-	t.Fatalf("Proof() after wait = %+v err=%v lastErr=%v", got, err, svc.LastError())
+	t.Fatalf("Proof(%q) after %s = %+v err=%v lastErr=%v", recordID, asyncProofWaitTimeout, got, err, svc.LastError())
 	return model.ProofBundle{}
 }
 

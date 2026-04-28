@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whitespace
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --check "$PR_BASE_SHA" "$PR_HEAD_SHA"
+          elif git rev-parse HEAD^1 >/dev/null 2>&1; then
+            git diff --check HEAD^1 HEAD
+          else
+            git diff-tree --check --no-commit-id --root -r HEAD
+          fi
+
+      - name: Keep local draft docs out of git
+        shell: bash
+        run: |
+          tracked_docs="$(git ls-files 'doc/**' 'docs/**')"
+          if [ -n "$tracked_docs" ]; then
+            echo "::error::doc/ and docs/ are local draft directories and must not be committed."
+            echo "$tracked_docs"
+            exit 1
+          fi
+
+  backend:
+    name: Backend unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify module dependencies
+        run: go mod verify
+
+      - name: Check module tidiness
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run unit tests
+        run: go test -mod=readonly ./...
+
+  backend-race:
+    name: Backend race tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run race tests
+        run: go test -race -mod=readonly ./...
+
+  backend-integration:
+    name: Backend integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run integration tests
+        run: go test -count=1 -mod=readonly -tags=integration ./...
+
+  backend-e2e:
+    name: Backend e2e tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run e2e tests
+        run: go test -count=1 -mod=readonly -tags=e2e ./...
+
+  desktop-go:
+    name: Desktop Go tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/desktop/frontend/package-lock.json
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: clients/desktop/go.mod
+          cache-dependency-path: clients/desktop/go.sum
+
+      - name: Build embedded frontend assets
+        working-directory: clients/desktop/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Download dependencies
+        working-directory: clients/desktop
+        run: go mod download
+
+      - name: Verify module dependencies
+        working-directory: clients/desktop
+        run: go mod verify
+
+      - name: Check module tidiness
+        working-directory: clients/desktop
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Run go vet
+        working-directory: clients/desktop
+        run: go vet ./...
+
+      - name: Run desktop Go tests
+        working-directory: clients/desktop
+        run: go test -mod=readonly ./...
+
+  desktop-frontend:
+    name: Desktop frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/desktop/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: clients/desktop/frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: clients/desktop/frontend
+        run: npm run build
