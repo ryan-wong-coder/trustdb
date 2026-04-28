@@ -8,6 +8,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/anchor"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
+	"github.com/ryan-wong-coder/trustdb/internal/sproof"
 )
 
 // SubmitRequest is the single, JSON-friendly shape the UI uses to
@@ -291,7 +292,7 @@ func (a *App) ExportSingleProof(recordID, outPath string) error {
 	if err != nil {
 		return err
 	}
-	raw, err := marshalCBOR(proof)
+	raw, err := sproof.Marshal(proof)
 	if err != nil {
 		return err
 	}
@@ -308,28 +309,28 @@ func (a *App) buildSingleProof(recordID string) (model.SingleProof, error) {
 	if err != nil {
 		return model.SingleProof{}, err
 	}
-	out := model.SingleProof{
-		SchemaVersion:   model.SchemaSingleProof,
-		ProofBundle:     bundle,
-		ExportedAtUnixN: time.Now().UTC().UnixNano(),
-	}
+	opts := sproof.Options{ExportedAtUnixN: time.Now().UTC().UnixNano()}
 
 	globalProof, err := c.getGlobalProof(ctx, bundle.CommittedReceipt.BatchID)
 	if err != nil {
 		if proofArtifactUnavailable(err) {
 			a.mergeExportedProofState(recordID, bundle, nil, nil)
-			return out, nil
+			return sproof.New(bundle, opts)
 		}
 		return model.SingleProof{}, fmt.Errorf("fetch global proof: %w", err)
 	}
-	out.GlobalProof = &globalProof
+	opts.GlobalProof = &globalProof
 
 	anchor, err := c.getAnchor(ctx, globalProof.STH.TreeSize)
 	if err != nil {
 		return model.SingleProof{}, fmt.Errorf("fetch STH anchor: %w", err)
 	}
 	if anchor.Result != nil {
-		out.AnchorResult = anchor.Result
+		opts.AnchorResult = anchor.Result
+	}
+	out, err := sproof.New(bundle, opts)
+	if err != nil {
+		return model.SingleProof{}, err
 	}
 	a.mergeExportedProofState(recordID, bundle, out.GlobalProof, out.AnchorResult)
 	return out, nil

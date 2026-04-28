@@ -10,6 +10,7 @@ import (
 
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/sproof"
 	"github.com/ryan-wong-coder/trustdb/internal/verify"
 )
 
@@ -22,7 +23,7 @@ import (
 //     plus global/STH artefacts from the configured server, so field
 //     auditors can verify a claim without downloading anything.
 //
-// ClientPublicKeyB64 is optional — if empty we fall back to the
+// ClientPublicKeyB64 is optional 鈥?if empty we fall back to the
 // desktop's own identity public key, which is the common case for
 // verifying your own submissions.
 type VerifyRequest struct {
@@ -207,8 +208,8 @@ func (a *App) resolveClientPub(bundle model.ProofBundle, override string) (ed255
 		return ed25519.PublicKey(raw), nil
 	}
 	// Fall back to our own key. This is the right default when the
-	// user is verifying their own submissions — it's the public
-	// half of the same key that signed them — but it will fail
+	// user is verifying their own submissions 鈥?it's the public
+	// half of the same key that signed them 鈥?but it will fail
 	// with a clean error if the bundle's key_id does not match.
 	st, err := a.requireStore()
 	if err != nil {
@@ -262,27 +263,17 @@ func readSingleProofFile(path string, out *model.SingleProof) error {
 	if err != nil {
 		return fmt.Errorf("read single proof: %w", err)
 	}
-	if err := cborx.Unmarshal(data, out); err != nil {
+	if err := cborx.UnmarshalLimit(data, out, sproof.MaxBytes); err != nil {
 		return typedProofFileError("single proof", path, model.SchemaSingleProof, data, err)
 	}
 	if out.SchemaVersion != model.SchemaSingleProof {
 		return schemaMismatchError("single proof", path, model.SchemaSingleProof, out.SchemaVersion)
 	}
-	if out.ProofBundle.SchemaVersion != model.SchemaProofBundle {
-		return fmt.Errorf("decode single proof: %s 内部 proof_bundle 的 schema_version 是 %q，不是 %q",
-			filepath.Base(path), out.ProofBundle.SchemaVersion, model.SchemaProofBundle)
-	}
-	if out.GlobalProof != nil && out.GlobalProof.SchemaVersion != model.SchemaGlobalLogProof {
-		return fmt.Errorf("decode single proof: %s 内部 global_proof 的 schema_version 是 %q，不是 %q",
-			filepath.Base(path), out.GlobalProof.SchemaVersion, model.SchemaGlobalLogProof)
-	}
-	if out.AnchorResult != nil && out.AnchorResult.SchemaVersion != model.SchemaSTHAnchorResult {
-		return fmt.Errorf("decode single proof: %s 内部 anchor_result 的 schema_version 是 %q，不是 %q",
-			filepath.Base(path), out.AnchorResult.SchemaVersion, model.SchemaSTHAnchorResult)
+	if err := sproof.Validate(*out); err != nil {
+		return fmt.Errorf("decode single proof: %s: %w", filepath.Base(path), err)
 	}
 	return nil
 }
-
 func readGlobalProofFile(path string, out *model.GlobalLogProof) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -312,32 +303,33 @@ func readAnchorResultFile(path string, out *model.STHAnchorResult) error {
 }
 
 func schemaMismatchError(kind, path, want, got string) error {
+	name := filepath.Base(path)
 	if got == "" {
-		return fmt.Errorf("decode %s: %s 缺少 schema_version，不是 %s 文件", kind, filepath.Base(path), want)
+		return fmt.Errorf("decode %s: %s has no schema_version; want %s", kind, name, want)
 	}
 	if got != want {
-		return wrongSchemaHint(kind, filepath.Base(path), want, got)
+		return wrongSchemaHint(kind, name, want, got)
 	}
-	return fmt.Errorf("decode %s: %s 的 schema_version 是 %q，不是 %q", kind, filepath.Base(path), got, want)
+	return fmt.Errorf("decode %s: %s schema_version=%q, want %q", kind, name, got, want)
 }
 
 func typedProofFileError(kind, path, want string, data []byte, decodeErr error) error {
 	name := filepath.Base(path)
 	if isJSONLike(data) {
-		return fmt.Errorf("decode %s: %s 是 JSON 文本，不是 TrustDB CBOR 文件；请使用客户端导出的文件，或 CLI 带 --out 导出 CBOR", kind, name)
+		return fmt.Errorf("decode %s: %s is JSON text, not a TrustDB CBOR proof file", kind, name)
 	}
 	fields, ok := cborTopLevelMap(data)
 	if ok {
 		schema := stringField(fields, "schema_version")
 		switch {
 		case schema == want:
-			return fmt.Errorf("decode %s: %s 是 %s，但结构无法解析：%w", kind, name, want, decodeErr)
+			return fmt.Errorf("decode %s: %s has schema %s but cannot be decoded: %w", kind, name, want, decodeErr)
 		case schema != "":
 			return wrongSchemaHint(kind, name, want, schema)
 		case looksLikeSTHAnchorResult(fields):
 			return wrongSchemaHint(kind, name, want, model.SchemaSTHAnchorResult)
 		case looksLikeLegacyBatchAnchor(fields):
-			return fmt.Errorf("decode %s: %s 看起来是旧版 batch anchor 结果，不是新版 GlobalLogProof；当前 L5 只接受 STH/global root，请重新导出 .tdgproof 和 STHAnchorResult", kind, name)
+			return fmt.Errorf("decode %s: %s looks like a legacy batch anchor result, not GlobalLogProof; current L5 only accepts STH/global root, export .tdgproof and STHAnchorResult again", kind, name)
 		}
 	}
 	return fmt.Errorf("decode %s: %w", kind, decodeErr)
@@ -345,27 +337,26 @@ func typedProofFileError(kind, path, want string, data []byte, decodeErr error) 
 
 func wrongSchemaHint(kind, name, want, got string) error {
 	if got == model.SchemaSingleProof && kind != "single proof" {
-		return fmt.Errorf("decode %s: %s 是 .sproof 单文件证明，请放到主验证入口；%s 输入框只接受 %q", kind, name, kind, want)
+		return fmt.Errorf("decode %s: %s is a .sproof single proof; use the main .sproof input, not the %s input that expects %q", kind, name, kind, want)
 	}
 	if kind == "single proof" {
 		switch got {
 		case model.SchemaProofBundle:
-			return fmt.Errorf("decode single proof: %s 是 .tdproof 分散式证据包；主入口需要 .sproof，或展开高级入口后把它放到 .tdproof 输入框", name)
+			return fmt.Errorf("decode single proof: %s is a .tdproof split proof bundle; use .sproof or put it in the advanced .tdproof input", name)
 		case model.SchemaGlobalLogProof:
-			return fmt.Errorf("decode single proof: %s 是 .tdgproof GlobalLogProof；主入口需要 .sproof，或展开高级入口后把它放到 .tdgproof 输入框", name)
+			return fmt.Errorf("decode single proof: %s is a .tdgproof GlobalLogProof; use .sproof or put it in the advanced .tdgproof input", name)
 		case model.SchemaSTHAnchorResult:
-			return fmt.Errorf("decode single proof: %s 是 .tdanchor-result STHAnchorResult；主入口需要 .sproof，或展开高级入口后把它放到 .tdanchor-result 输入框", name)
+			return fmt.Errorf("decode single proof: %s is a .tdanchor-result STHAnchorResult; use .sproof or put it in the advanced .tdanchor-result input", name)
 		}
 	}
 	if kind == "global proof" && got == model.SchemaSTHAnchorResult {
-		return fmt.Errorf("decode global proof: %s 是 STHAnchorResult（L5 anchor 文件），请放到 .tdanchor-result 输入框；.tdgproof 需要用“导出 .tdgproof / GlobalLogProof”生成", name)
+		return fmt.Errorf("decode global proof: %s is an STHAnchorResult L5 anchor file; put it in the .tdanchor-result input; .tdgproof must be exported as GlobalLogProof", name)
 	}
 	if kind == "anchor" && got == model.SchemaGlobalLogProof {
-		return fmt.Errorf("decode anchor: %s 是 GlobalLogProof（L4 文件），请放到 .tdgproof 输入框；L5 还需要选择 STHAnchorResult", name)
+		return fmt.Errorf("decode anchor: %s is a GlobalLogProof L4 file; put it in the .tdgproof input; L5 also needs STHAnchorResult", name)
 	}
-	return fmt.Errorf("decode %s: %s 是 %q，不是 %q", kind, name, got, want)
+	return fmt.Errorf("decode %s: %s schema_version=%q, want %q", kind, name, got, want)
 }
-
 func isJSONLike(data []byte) bool {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {

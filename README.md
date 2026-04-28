@@ -45,7 +45,7 @@ TrustDB uses layered proof semantics:
 | L4 | The batch root is included in the Global Transparency Log and a target STH. | `GlobalLogProof` / `.tdgproof` |
 | L5 | The corresponding STH/global root is externally anchored. | `STHAnchorResult` / `.tdanchor-result` |
 
-For exchange and desktop verification, `.sproof` is the main single-file proof format. It can contain the L3 `ProofBundle`, optional L4 `GlobalLogProof`, and optional L5 `STHAnchorResult` together.
+For exchange and desktop verification, `.sproof` is the main single-file proof format. It can contain the L3 `ProofBundle`, optional L4 `GlobalLogProof`, and optional L5 `STHAnchorResult` together. The stable v1 format is documented in [formats/SPROOF_V1.md](formats/SPROOF_V1.md).
 
 ## Architecture
 
@@ -127,6 +127,16 @@ Verify a local file and proof bundle:
 go run ./cmd/trustdb verify `
   --file .\example.txt `
   --proof .trustdb-dev/example.tdproof `
+  --server-public-key .trustdb-dev/server.pub `
+  --client-public-key .trustdb-dev/client.pub
+```
+
+Verify a local file with the recommended single-file proof:
+
+```powershell
+go run ./cmd/trustdb verify `
+  --file .\example.txt `
+  --sproof .trustdb-dev/example.sproof `
   --server-public-key .trustdb-dev/server.pub `
   --client-public-key .trustdb-dev/client.pub
 ```

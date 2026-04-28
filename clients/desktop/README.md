@@ -11,6 +11,8 @@ Current capabilities:
 - primary `.sproof` export plus advanced `.tdproof`, `.tdgproof`, and `.tdanchor-result` exports;
 - local proof verification with optional GlobalLogProof and STHAnchorResult.
 
+`.sproof` uses the repository-level v1 format documented in `formats/SPROOF_V1.md`.
+
 Development:
 
 ```powershell

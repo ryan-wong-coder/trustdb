@@ -166,6 +166,9 @@ type ProofBundle struct {
 // available level without juggling multiple files.
 type SingleProof struct {
 	SchemaVersion   string           `cbor:"schema_version" json:"schema_version"`
+	FormatVersion   uint64           `cbor:"format_version" json:"format_version"`
+	RecordID        string           `cbor:"record_id" json:"record_id"`
+	ProofLevel      string           `cbor:"proof_level" json:"proof_level"`
 	ProofBundle     ProofBundle      `cbor:"proof_bundle" json:"proof_bundle"`
 	GlobalProof     *GlobalLogProof  `cbor:"global_proof,omitempty" json:"global_proof,omitempty"`
 	AnchorResult    *STHAnchorResult `cbor:"anchor_result,omitempty" json:"anchor_result,omitempty"`
