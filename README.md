@@ -209,3 +209,9 @@ cd clients/desktop/frontend; npm run build
 ```
 
 The repository includes tests for deterministic CBOR, claims, WAL, batch proofs, global log proofs, anchors, backup/restore, HTTP API behavior, and desktop-local storage/verification paths.
+
+## Contributing
+
+TrustDB uses an Issue-first development flow. Before starting code, documentation, refactoring, or operations work, create or link a GitHub Issue with scope, acceptance criteria, and a test plan.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution workflow, branch conventions, commit/PR expectations, test matrix, documentation rules, and security notes.
