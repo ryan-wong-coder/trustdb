@@ -7,6 +7,7 @@ import (
 
 	"github.com/ryan-wong-coder/trustdb/internal/anchor"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
 )
 
 // SubmitRequest is the single, JSON-friendly shape the UI uses to
@@ -108,7 +109,7 @@ func (a *App) SubmitFile(req SubmitRequest) (*SubmitResult, error) {
 		TenantID:        id.TenantID,
 		ClientID:        id.ClientID,
 		KeyID:           id.KeyID,
-		ProofLevel:      "L2",
+		ProofLevel:      prooflevel.L2.String(),
 		ServerRecord:    &resp.ServerRecord,
 		AcceptedReceipt: &resp.AcceptedReceipt,
 	}
@@ -204,14 +205,16 @@ func (a *App) RefreshRecord(recordID string) (*LocalRecord, error) {
 		return &rec, err
 	}
 	cr := bundle.CommittedReceipt
-	rec.ProofLevel = "L3"
+	evidence := prooflevel.EvidenceFor(prooflevel.L3)
+	rec.ProofLevel = prooflevel.Evaluate(evidence).String()
 	rec.BatchID = cr.BatchID
 	rec.CommittedReceipt = &cr
 
 	globalProof, err := c.getGlobalProof(a.ensureCtx(), cr.BatchID)
 	if err == nil {
 		rec.GlobalProof = &globalProof
-		rec.ProofLevel = "L4"
+		evidence.GlobalLogProof = true
+		rec.ProofLevel = prooflevel.Evaluate(evidence).String()
 		anchor, err := c.getAnchor(a.ensureCtx(), globalProof.STH.TreeSize)
 		if err == nil {
 			rec.AnchorStatus = anchor.Status
@@ -219,7 +222,8 @@ func (a *App) RefreshRecord(recordID string) (*LocalRecord, error) {
 				rec.AnchorResult = anchor.Result
 				rec.AnchorSink = anchor.Result.SinkName
 				rec.AnchorID = anchor.Result.AnchorID
-				rec.ProofLevel = "L5"
+				evidence.STHAnchorResult = true
+				rec.ProofLevel = prooflevel.Evaluate(evidence).String()
 			}
 		}
 	}
@@ -350,20 +354,23 @@ func (a *App) mergeExportedProofState(recordID string, bundle model.ProofBundle,
 	}
 	rec.LastError = ""
 	setLocalRecordLastSyncedAt(&rec, time.Now().UTC())
-	rec.ProofLevel = "L3"
+	evidence := prooflevel.EvidenceFor(prooflevel.L3)
+	rec.ProofLevel = prooflevel.Evaluate(evidence).String()
 	rec.BatchID = bundle.CommittedReceipt.BatchID
 	cr := bundle.CommittedReceipt
 	rec.CommittedReceipt = &cr
 	if global != nil {
 		rec.GlobalProof = global
-		rec.ProofLevel = "L4"
+		evidence.GlobalLogProof = true
+		rec.ProofLevel = prooflevel.Evaluate(evidence).String()
 	}
 	if anchor != nil {
 		rec.AnchorResult = anchor
 		rec.AnchorStatus = model.AnchorStatePublished
 		rec.AnchorSink = anchor.SinkName
 		rec.AnchorID = anchor.AnchorID
-		rec.ProofLevel = "L5"
+		evidence.STHAnchorResult = true
+		rec.ProofLevel = prooflevel.Evaluate(evidence).String()
 	}
 	_ = st.upsertRecord(rec)
 }

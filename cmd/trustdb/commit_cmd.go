@@ -12,6 +12,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	"github.com/ryan-wong-coder/trustdb/internal/keystore"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
 	"github.com/ryan-wong-coder/trustdb/internal/wal"
 	"github.com/spf13/cobra"
 )
@@ -82,7 +83,7 @@ func newCommitCommand(rt *runtimeConfig) *cobra.Command {
 			return rt.writeJSON(map[string]string{
 				"record_id": record.RecordID,
 				"proof":     outPath,
-				"level":     "L3",
+				"level":     prooflevel.L3.String(),
 			})
 		},
 	}
@@ -172,7 +173,7 @@ func newCommitBatchCommand(rt *runtimeConfig) *cobra.Command {
 				outputs[i] = map[string]string{
 					"record_id": bundles[i].RecordID,
 					"proof":     outPath,
-					"level":     "L3",
+					"level":     prooflevel.L3.String(),
 				}
 			}
 			rt.logger.Info().

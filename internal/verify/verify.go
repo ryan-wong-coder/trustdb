@@ -11,6 +11,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/globallog"
 	"github.com/ryan-wong-coder/trustdb/internal/merkle"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
 	"github.com/ryan-wong-coder/trustdb/internal/receipt"
 	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
 )
@@ -20,12 +21,8 @@ type TrustedKeys struct {
 	ServerPublicKey ed25519.PublicKey
 }
 
-// Result is the outcome of ProofBundle. ProofLevel reflects the
-// highest level that was successfully verified:
-//
-//   - "L3" — content, signatures and merkle proof all match.
-//   - "L4" — the committed batch root is included in a global STH.
-//   - "L5" — that same STH/global root is externally anchored.
+// Result is the outcome of ProofBundle. ProofLevel follows the centralized
+// prooflevel ladder so CLI, desktop and future SDK code do not drift.
 type Result struct {
 	Valid      bool   `json:"valid"`
 	RecordID   string `json:"record_id"`
@@ -106,16 +103,18 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	) {
 		return Result{}, fmt.Errorf("verify: merkle proof failed")
 	}
+	evidence := prooflevel.EvidenceFor(prooflevel.L3)
 	result := Result{
 		Valid:      true,
 		RecordID:   verified.RecordID,
-		ProofLevel: "L3",
+		ProofLevel: prooflevel.Evaluate(evidence).String(),
 	}
 	if o.global != nil {
 		if err := GlobalLogConsistency(bundle, *o.global); err != nil {
 			return Result{}, err
 		}
-		result.ProofLevel = "L4"
+		evidence.GlobalLogProof = true
+		result.ProofLevel = prooflevel.Evaluate(evidence).String()
 	}
 	if o.anchor != nil {
 		if o.global == nil {
@@ -124,7 +123,8 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		if err := AnchorConsistency(*o.global, *o.anchor); err != nil {
 			return Result{}, err
 		}
-		result.ProofLevel = "L5"
+		evidence.STHAnchorResult = true
+		result.ProofLevel = prooflevel.Evaluate(evidence).String()
 		result.AnchorSink = o.anchor.SinkName
 		result.AnchorID = o.anchor.AnchorID
 	}
