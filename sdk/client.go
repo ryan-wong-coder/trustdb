@@ -67,17 +67,37 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
 func (c *Client) Health(ctx context.Context) error {
+	status := c.CheckHealth(ctx)
+	if status.OK {
+		return nil
+	}
+	return &Error{Op: "health", URL: c.baseURL + "/healthz", StatusCode: status.StatusCode, Message: status.Error}
+}
+
+func (c *Client) CheckHealth(ctx context.Context) HealthStatus {
+	start := time.Now()
 	var out struct {
 		OK bool `json:"ok"`
 	}
-	if err := c.getJSON(ctx, "/healthz", nil, &out); err != nil {
-		return err
+	err := c.getJSON(ctx, "/healthz", nil, &out)
+	rtt := time.Since(start).Milliseconds()
+	if err != nil {
+		var sdkErr *Error
+		statusCode := 0
+		if errors.As(err, &sdkErr) {
+			statusCode = sdkErr.StatusCode
+		}
+		return HealthStatus{ServerURL: c.baseURL, RTTMillis: rtt, StatusCode: statusCode, Error: err.Error()}
 	}
 	if !out.OK {
-		return &Error{Op: "health", Message: "server returned ok=false"}
+		return HealthStatus{ServerURL: c.baseURL, RTTMillis: rtt, Error: "server returned ok=false"}
 	}
-	return nil
+	return HealthStatus{OK: true, ServerURL: c.baseURL, RTTMillis: rtt}
 }
 
 func (c *Client) SubmitFile(ctx context.Context, raw io.Reader, id Identity, opts FileClaimOptions) (SubmitResult, error) {
@@ -164,6 +184,29 @@ func (c *Client) ListRecords(ctx context.Context, opts ListRecordsOptions) (Reco
 	}, nil
 }
 
+func (c *Client) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	values := url.Values{}
+	values.Set("limit", strconv.Itoa(limit))
+	var env rootsEnvelope
+	if err := c.getJSON(ctx, "/v1/roots", values, &env); err != nil {
+		return nil, err
+	}
+	roots := make([]BatchRoot, 0, len(env.Roots))
+	roots = append(roots, env.Roots...)
+	return roots, nil
+}
+
+func (c *Client) LatestRoot(ctx context.Context) (BatchRoot, error) {
+	var root model.BatchRoot
+	if err := c.getJSON(ctx, "/v1/roots/latest", nil, &root); err != nil {
+		return BatchRoot{}, err
+	}
+	return root, nil
+}
+
 func (c *Client) GetProofBundle(ctx context.Context, recordID string) (ProofBundle, error) {
 	var env proofEnvelope
 	if err := c.getJSON(ctx, "/v1/proofs/"+url.PathEscape(recordID), nil, &env); err != nil {
@@ -244,6 +287,14 @@ func (c *Client) WriteSingleProofFile(ctx context.Context, recordID, path string
 	return sproof.WriteFile(path, proof)
 }
 
+func (c *Client) MetricsRaw(ctx context.Context) (string, error) {
+	raw, err := c.doRaw(ctx, http.MethodGet, "/metrics", nil, nil, "", 1<<20)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, query url.Values, dst any) error {
 	return c.doJSON(ctx, http.MethodGet, path, query, nil, "", dst)
 }
@@ -286,6 +337,47 @@ func (c *Client) doJSON(
 		return &Error{Op: method, URL: endpoint, Err: fmt.Errorf("decode json: %w", err)}
 	}
 	return nil
+}
+
+func (c *Client) doRaw(
+	ctx context.Context,
+	method string,
+	path string,
+	query url.Values,
+	body io.Reader,
+	contentType string,
+	limit int64,
+) ([]byte, error) {
+	endpoint := c.baseURL + path
+	if len(query) > 0 {
+		endpoint += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return nil, &Error{Op: method, URL: endpoint, Err: err}
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if c.userAgent != "" {
+		req.Header.Set("User-Agent", c.userAgent)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, &Error{Op: method, URL: endpoint, Err: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, decodeHTTPError(method, endpoint, resp)
+	}
+	if limit <= 0 {
+		limit = 1 << 20
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err != nil {
+		return nil, &Error{Op: method, URL: endpoint, Err: err}
+	}
+	return raw, nil
 }
 
 func decodeHTTPError(method, endpoint string, resp *http.Response) error {
@@ -339,6 +431,10 @@ type recordsEnvelope struct {
 	Limit      int           `json:"limit"`
 	Direction  string        `json:"direction"`
 	NextCursor string        `json:"next_cursor,omitempty"`
+}
+
+type rootsEnvelope struct {
+	Roots []BatchRoot `json:"roots"`
 }
 
 type anchorEnvelope struct {

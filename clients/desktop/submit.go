@@ -34,7 +34,7 @@ type SubmitResult struct {
 	BatchError  string      `json:"batch_error,omitempty"`
 }
 
-// SubmitFile hashes, signs, CBOR-encodes and POSTs one file to the
+// SubmitFile hashes, signs and submits one file through the shared Go SDK to the
 // configured TrustDB server. On success we persist a LocalRecord so
 // the Records page can resume tracking (L2→L3→L5) across restarts.
 // Any error leaves the store untouched — a half-submitted attestation
@@ -83,16 +83,12 @@ func (a *App) SubmitFile(req SubmitRequest) (*SubmitResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, err := marshalClaim(signed)
-	if err != nil {
-		return nil, fmt.Errorf("encode claim: %w", err)
-	}
 
 	c, err := a.httpClient()
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.submitClaimCBOR(a.ensureCtx(), body)
+	resp, err := c.submitSignedClaim(a.ensureCtx(), signed)
 	if err != nil {
 		return nil, err
 	}
@@ -304,44 +300,12 @@ func (a *App) buildSingleProof(recordID string) (model.SingleProof, error) {
 	if err != nil {
 		return model.SingleProof{}, err
 	}
-	ctx := a.ensureCtx()
-	bundle, err := c.getProof(ctx, recordID)
+	proof, err := c.exportSingleProof(a.ensureCtx(), recordID)
 	if err != nil {
 		return model.SingleProof{}, err
 	}
-	opts := sproof.Options{ExportedAtUnixN: time.Now().UTC().UnixNano()}
-
-	globalProof, err := c.getGlobalProof(ctx, bundle.CommittedReceipt.BatchID)
-	if err != nil {
-		if proofArtifactUnavailable(err) {
-			a.mergeExportedProofState(recordID, bundle, nil, nil)
-			return sproof.New(bundle, opts)
-		}
-		return model.SingleProof{}, fmt.Errorf("fetch global proof: %w", err)
-	}
-	opts.GlobalProof = &globalProof
-
-	anchor, err := c.getAnchor(ctx, globalProof.STH.TreeSize)
-	if err != nil {
-		return model.SingleProof{}, fmt.Errorf("fetch STH anchor: %w", err)
-	}
-	if anchor.Result != nil {
-		opts.AnchorResult = anchor.Result
-	}
-	out, err := sproof.New(bundle, opts)
-	if err != nil {
-		return model.SingleProof{}, err
-	}
-	a.mergeExportedProofState(recordID, bundle, out.GlobalProof, out.AnchorResult)
-	return out, nil
-}
-
-func proofArtifactUnavailable(err error) bool {
-	var se *ServerError
-	if errors.As(err, &se) {
-		return se.StatusCode == 404 || se.StatusCode == 412
-	}
-	return false
+	a.mergeExportedProofState(recordID, proof.ProofBundle, proof.GlobalProof, proof.AnchorResult)
+	return proof, nil
 }
 
 func (a *App) mergeExportedProofState(recordID string, bundle model.ProofBundle, global *model.GlobalLogProof, anchor *model.STHAnchorResult) {

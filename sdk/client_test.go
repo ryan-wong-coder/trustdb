@@ -120,6 +120,67 @@ func TestClientListRecordsEncodesQuery(t *testing.T) {
 	}
 }
 
+func TestClientOperationalEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			writeJSONForTest(t, w, http.StatusOK, map[string]bool{"ok": true})
+		case "/v1/roots":
+			if r.URL.Query().Get("limit") != "7" {
+				t.Fatalf("roots query = %s", r.URL.RawQuery)
+			}
+			writeJSONForTest(t, w, http.StatusOK, rootsEnvelope{Roots: []BatchRoot{{
+				SchemaVersion: model.SchemaBatchRoot,
+				BatchID:       "batch-1",
+				TreeSize:      1,
+			}}})
+		case "/v1/roots/latest":
+			writeJSONForTest(t, w, http.StatusOK, BatchRoot{
+				SchemaVersion: model.SchemaBatchRoot,
+				BatchID:       "batch-latest",
+				TreeSize:      2,
+			})
+		case "/metrics":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("trustdb_ingest_total 1\n"))
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if status := client.CheckHealth(context.Background()); !status.OK || status.ServerURL != server.URL {
+		t.Fatalf("health status = %+v", status)
+	}
+	roots, err := client.ListRoots(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("ListRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].BatchID != "batch-1" {
+		t.Fatalf("roots = %+v", roots)
+	}
+	latest, err := client.LatestRoot(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRoot: %v", err)
+	}
+	if latest.BatchID != "batch-latest" {
+		t.Fatalf("latest = %+v", latest)
+	}
+	metrics, err := client.MetricsRaw(context.Background())
+	if err != nil {
+		t.Fatalf("MetricsRaw: %v", err)
+	}
+	if !strings.Contains(metrics, "trustdb_ingest_total") {
+		t.Fatalf("metrics = %q", metrics)
+	}
+}
+
 func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testing.T) {
 	t.Parallel()
 
