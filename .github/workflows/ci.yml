@@ -22,11 +22,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Check whitespace
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if git rev-parse HEAD^1 >/dev/null 2>&1; then
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --check "$PR_BASE_SHA" "$PR_HEAD_SHA"
+          elif git rev-parse HEAD^1 >/dev/null 2>&1; then
             git diff --check HEAD^1 HEAD
           else
             git diff-tree --check --no-commit-id --root -r HEAD
@@ -137,11 +145,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/desktop/frontend/package-lock.json
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version-file: clients/desktop/go.mod
           cache-dependency-path: clients/desktop/go.sum
+
+      - name: Build embedded frontend assets
+        working-directory: clients/desktop/frontend
+        run: |
+          npm ci
+          npm run build
 
       - name: Download dependencies
         working-directory: clients/desktop
