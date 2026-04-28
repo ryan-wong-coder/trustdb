@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/app"
 	"github.com/ryan-wong-coder/trustdb/internal/batch"
 	"github.com/ryan-wong-coder/trustdb/internal/globallog"
+	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
 	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
 	"github.com/ryan-wong-coder/trustdb/internal/ingest"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
@@ -24,10 +26,13 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 	"github.com/ryan-wong-coder/trustdb/internal/wal"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func newServeCommand(rt *runtimeConfig) *cobra.Command {
-	var listen, serverKeyPath, walPath, proofDir, clientPubPath, registryPath, registryPubPath string
+	var listen, grpcListen, serverKeyPath, walPath, proofDir, clientPubPath, registryPath, registryPubPath string
 	var queueSize, workers, batchQueueSize, batchMaxRecords int
 	var walMaxSegmentBytes int64
 	var walKeepSegments int
@@ -48,6 +53,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 		Short: "Run a local TrustDB HTTP ingest server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			listen = stringOrConfig(cmd, rt, "listen", listen, "server.listen")
+			grpcListen = stringOrConfig(cmd, rt, "grpc-listen", grpcListen, "server.grpc_listen")
 			serverKeyPath = stringOrConfig(cmd, rt, "server-private-key", serverKeyPath, "keys.server_private")
 			walPath = stringOrConfig(cmd, rt, "wal", walPath, "wal")
 			proofDir = stringOrConfig(cmd, rt, "proof-dir", proofDir, "proof_dir")
@@ -347,11 +353,12 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				otsUpgrader.Start(context.Background())
 				defer otsUpgrader.Stop()
 			}
+			metricsHandler := observability.Handler(reg)
 			var handler http.Handler
 			if anchorAPI != nil {
-				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, observability.Handler(reg), batchSvc, globalSvc, anchorAPI)
+				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, metricsHandler, batchSvc, globalSvc, anchorAPI)
 			} else {
-				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, observability.Handler(reg), batchSvc, globalSvc, nil)
+				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, metricsHandler, batchSvc, globalSvc, nil)
 			}
 			server := &http.Server{
 				Addr:         listen,
@@ -359,10 +366,34 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				ReadTimeout:  readTimeout,
 				WriteTimeout: writeTimeout,
 			}
+			errCh := make(chan error, 2)
+			var grpcServer *grpc.Server
+			if strings.TrimSpace(grpcListen) != "" {
+				listener, err := net.Listen("tcp", grpcListen)
+				if err != nil {
+					return trusterr.Wrap(trusterr.CodeInvalidArgument, "listen grpc", err)
+				}
+				defer listener.Close()
+				grpcServer = grpc.NewServer(
+					grpc.MaxRecvMsgSize(grpcapi.MaxMessageBytes),
+					grpc.MaxSendMsgSize(grpcapi.MaxMessageBytes),
+				)
+				healthSvc := health.NewServer()
+				healthSvc.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+				healthpb.RegisterHealthServer(grpcServer, healthSvc)
+				defer healthSvc.Shutdown()
+				grpcapi.RegisterTrustDBServiceServer(grpcServer, grpcapi.NewServer(ingestSvc, batchSvc, globalSvc, anchorAPI, metricsHandler))
+				defer grpcServer.Stop()
+				go func() {
+					rt.logger.Info().Str("listen", grpcListen).Msg("starting trustdb grpc server")
+					if err := grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+						errCh <- err
+					}
+				}()
+			}
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			errCh := make(chan error, 1)
 			go func() {
 				rt.logger.Info().Str("listen", listen).Msg("starting trustdb server")
 				errCh <- server.ListenAndServe()
@@ -374,6 +405,9 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				defer cancel()
 				if err := server.Shutdown(shutdownCtx); err != nil {
 					return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "http server shutdown", err)
+				}
+				if grpcServer != nil {
+					shutdownGRPCServer(shutdownCtx, grpcServer)
 				}
 				if err := ingestSvc.Shutdown(shutdownCtx); err != nil {
 					return err
@@ -393,6 +427,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	}
 	addServerFlags(cmd)
 	cmd.Flags().StringVar(&listen, "listen", "", "listen address")
+	cmd.Flags().StringVar(&grpcListen, "grpc-listen", "", "optional gRPC listen address; empty disables gRPC")
 	cmd.Flags().StringVar(&serverKeyPath, "server-private-key", "", "server private key")
 	cmd.Flags().StringVar(&walPath, "wal", "", "wal path")
 	cmd.Flags().StringVar(&proofDir, "proof-dir", "", "proof bundle and root directory")
@@ -423,6 +458,19 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().IntVar(&anchorOtsUpgradeBatchSize, "anchor-ots-upgrade-batch-size", 0, "max number of OTS STHAnchorResults processed per upgrade sweep (default 64)")
 	cmd.Flags().StringVar(&anchorOtsUpgradeTimeoutText, "anchor-ots-upgrade-timeout", "", "per-calendar GET timeout for the OTS upgrader (default 30s)")
 	return cmd
+}
+
+func shutdownGRPCServer(ctx context.Context, server *grpc.Server) {
+	stopped := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		server.Stop()
+	}
 }
 
 // otsSinkParams carries the OpenTimestamps-specific options through

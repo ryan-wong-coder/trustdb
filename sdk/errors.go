@@ -42,9 +42,18 @@ func (e *Error) Unwrap() error {
 	return e.Err
 }
 
+func asSDKError(err error) (*Error, bool) {
+	var sdkErr *Error
+	if errors.As(err, &sdkErr) {
+		return sdkErr, true
+	}
+	return nil, false
+}
+
 func IsNotFound(err error) bool {
 	var sdkErr *Error
-	return errors.As(err, &sdkErr) && sdkErr.StatusCode == http.StatusNotFound
+	return errors.As(err, &sdkErr) &&
+		(sdkErr.StatusCode == http.StatusNotFound || sdkErr.Code == string(trusterr.CodeNotFound))
 }
 
 func IsUnavailable(err error) bool {

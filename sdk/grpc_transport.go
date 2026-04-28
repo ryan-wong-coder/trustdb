@@ -1,0 +1,280 @@
+package sdk
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+)
+
+type GRPCOption func(*grpcTransportConfig)
+
+type grpcTransportConfig struct {
+	dialOptions          []grpc.DialOption
+	transportCredentials credentials.TransportCredentials
+}
+
+func WithGRPCDialOptions(opts ...grpc.DialOption) GRPCOption {
+	return func(c *grpcTransportConfig) {
+		c.dialOptions = append(c.dialOptions, opts...)
+	}
+}
+
+func WithGRPCTransportCredentials(creds credentials.TransportCredentials) GRPCOption {
+	return func(c *grpcTransportConfig) {
+		if creds != nil {
+			c.transportCredentials = creds
+		}
+	}
+}
+
+func NewGRPCClient(target string, opts ...GRPCOption) (*Client, error) {
+	transport, err := NewGRPCTransport(target, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return NewClientWithTransport(transport)
+}
+
+func NewGRPCTransport(target string, opts ...GRPCOption) (Transport, error) {
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" {
+		return nil, errors.New("sdk: grpc target is empty")
+	}
+	cfg := grpcTransportConfig{}
+	for _, apply := range opts {
+		apply(&cfg)
+	}
+	if cfg.transportCredentials == nil {
+		cfg.transportCredentials = insecure.NewCredentials()
+	}
+	dialOptions := []grpc.DialOption{
+		grpc.WithTransportCredentials(cfg.transportCredentials),
+		grpc.WithDefaultCallOptions(
+			grpc.ForceCodec(grpcapi.Codec()),
+			grpc.MaxCallRecvMsgSize(grpcapi.MaxMessageBytes),
+			grpc.MaxCallSendMsgSize(grpcapi.MaxMessageBytes),
+		),
+	}
+	dialOptions = append(dialOptions, cfg.dialOptions...)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultHTTPTimeout)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, trimmed, dialOptions...)
+	if err != nil {
+		return nil, &Error{Op: "grpc dial", URL: trimmed, Err: err}
+	}
+	return NewGRPCTransportFromConn(trimmed, conn), nil
+}
+
+func NewGRPCTransportFromConn(target string, conn *grpc.ClientConn) Transport {
+	return &grpcTransport{target: target, conn: conn}
+}
+
+type grpcTransport struct {
+	target string
+	conn   *grpc.ClientConn
+}
+
+func (t *grpcTransport) Endpoint() string {
+	return t.target
+}
+
+func (t *grpcTransport) Close() error {
+	if t.conn == nil {
+		return nil
+	}
+	return t.conn.Close()
+}
+
+func (t *grpcTransport) CheckHealth(ctx context.Context) HealthStatus {
+	start := time.Now()
+	callCtx, cancel := contextWithDefaultTimeout(ctx)
+	defer cancel()
+	var out grpcapi.HealthResponse
+	err := t.invoke(callCtx, grpcapi.FullMethodHealth, &grpcapi.HealthRequest{}, &out)
+	rtt := time.Since(start).Milliseconds()
+	if err != nil {
+		return HealthStatus{ServerURL: t.target, RTTMillis: rtt, Error: err.Error()}
+	}
+	if !out.OK {
+		return HealthStatus{ServerURL: t.target, RTTMillis: rtt, Error: "server returned ok=false"}
+	}
+	return HealthStatus{OK: true, ServerURL: t.target, RTTMillis: rtt}
+}
+
+func (t *grpcTransport) SubmitSignedClaim(ctx context.Context, signed SignedClaim) (SubmitResult, error) {
+	var out grpcapi.SubmitClaimResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodSubmitClaim, &grpcapi.SubmitClaimRequest{SignedClaim: signed}, &out); err != nil {
+		return SubmitResult{}, err
+	}
+	return SubmitResult{
+		RecordID:        out.RecordID,
+		Status:          out.Status,
+		ProofLevel:      out.ProofLevel,
+		Idempotent:      out.Idempotent,
+		BatchEnqueued:   out.BatchEnqueued,
+		BatchError:      out.BatchError,
+		ServerRecord:    out.ServerRecord,
+		AcceptedReceipt: out.AcceptedReceipt,
+		SignedClaim:     signed,
+	}, nil
+}
+
+func (t *grpcTransport) GetRecord(ctx context.Context, recordID string) (RecordIndex, error) {
+	var out grpcapi.GetRecordResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodGetRecord, &grpcapi.GetRecordRequest{RecordID: recordID}, &out); err != nil {
+		return RecordIndex{}, err
+	}
+	if out.Record.RecordID == "" {
+		return RecordIndex{}, &Error{Op: "grpc get record", URL: t.target, Message: "server returned empty record index"}
+	}
+	return out.Record, nil
+}
+
+func (t *grpcTransport) ListRecords(ctx context.Context, opts ListRecordsOptions) (RecordPage, error) {
+	var out grpcapi.ListRecordsResponse
+	in := grpcapi.ListRecordsRequest{
+		Limit:             opts.Limit,
+		Direction:         opts.Direction,
+		Cursor:            opts.Cursor,
+		BatchID:           opts.BatchID,
+		TenantID:          opts.TenantID,
+		ClientID:          opts.ClientID,
+		Query:             opts.Query,
+		ContentHashHex:    opts.ContentHashHex,
+		ReceivedFromUnixN: opts.ReceivedFromUnixN,
+		ReceivedToUnixN:   opts.ReceivedToUnixN,
+	}
+	if err := t.invoke(ctx, grpcapi.FullMethodListRecords, &in, &out); err != nil {
+		return RecordPage{}, err
+	}
+	return RecordPage{Records: out.Records, Limit: out.Limit, Direction: out.Direction, NextCursor: out.NextCursor}, nil
+}
+
+func (t *grpcTransport) GetProofBundle(ctx context.Context, recordID string) (ProofBundle, error) {
+	var out grpcapi.GetProofBundleResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodGetProofBundle, &grpcapi.GetProofBundleRequest{RecordID: recordID}, &out); err != nil {
+		return ProofBundle{}, err
+	}
+	if out.ProofBundle.RecordID == "" {
+		return ProofBundle{}, &Error{Op: "grpc get proof bundle", URL: t.target, Message: "server returned empty proof bundle"}
+	}
+	return out.ProofBundle, nil
+}
+
+func (t *grpcTransport) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
+	var out grpcapi.ListRootsResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodListRoots, &grpcapi.ListRootsRequest{Limit: limit}, &out); err != nil {
+		return nil, err
+	}
+	return out.Roots, nil
+}
+
+func (t *grpcTransport) LatestRoot(ctx context.Context) (BatchRoot, error) {
+	var out grpcapi.LatestRootResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodLatestRoot, &grpcapi.LatestRootRequest{}, &out); err != nil {
+		return BatchRoot{}, err
+	}
+	return out.Root, nil
+}
+
+func (t *grpcTransport) GetGlobalProof(ctx context.Context, batchID string) (GlobalLogProof, error) {
+	var out grpcapi.GetGlobalProofResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodGetGlobalProof, &grpcapi.GetGlobalProofRequest{BatchID: batchID}, &out); err != nil {
+		return GlobalLogProof{}, err
+	}
+	return out.Proof, nil
+}
+
+func (t *grpcTransport) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {
+	var out grpcapi.GetAnchorResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodGetAnchor, &grpcapi.GetAnchorRequest{TreeSize: treeSize}, &out); err != nil {
+		return AnchorStatus{}, err
+	}
+	return AnchorStatus{TreeSize: out.TreeSize, Status: out.Status, Result: out.Result}, nil
+}
+
+func (t *grpcTransport) LatestSTH(ctx context.Context) (SignedTreeHead, error) {
+	var out grpcapi.LatestSTHResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodLatestSTH, &grpcapi.LatestSTHRequest{}, &out); err != nil {
+		return SignedTreeHead{}, err
+	}
+	return out.STH, nil
+}
+
+func (t *grpcTransport) GetSTH(ctx context.Context, treeSize uint64) (SignedTreeHead, error) {
+	var out grpcapi.GetSTHResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodGetSTH, &grpcapi.GetSTHRequest{TreeSize: treeSize}, &out); err != nil {
+		return SignedTreeHead{}, err
+	}
+	return out.STH, nil
+}
+
+func (t *grpcTransport) MetricsRaw(ctx context.Context) (string, error) {
+	var out grpcapi.MetricsResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodMetrics, &grpcapi.MetricsRequest{}, &out); err != nil {
+		return "", err
+	}
+	return out.Text, nil
+}
+
+func (t *grpcTransport) invoke(ctx context.Context, method string, in any, out any) error {
+	if t.conn == nil {
+		return &Error{Op: "grpc invoke", URL: t.target, Message: "grpc connection is nil"}
+	}
+	callCtx, cancel := contextWithDefaultTimeout(ctx)
+	defer cancel()
+	if err := t.conn.Invoke(callCtx, method, in, out, grpc.ForceCodec(grpcapi.Codec())); err != nil {
+		return grpcError(method, t.target, err)
+	}
+	return nil
+}
+
+func contextWithDefaultTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithTimeout(context.Background(), defaultHTTPTimeout)
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultHTTPTimeout)
+}
+
+func grpcError(method, target string, err error) error {
+	st, ok := status.FromError(err)
+	if !ok {
+		return &Error{Op: method, URL: target, Err: err}
+	}
+	return &Error{Op: method, URL: target, Code: trustCodeFromGRPC(st.Code()), Message: st.Message(), Err: err}
+}
+
+func trustCodeFromGRPC(code codes.Code) string {
+	switch code {
+	case codes.InvalidArgument:
+		return string(trusterr.CodeInvalidArgument)
+	case codes.AlreadyExists:
+		return string(trusterr.CodeAlreadyExists)
+	case codes.FailedPrecondition:
+		return string(trusterr.CodeFailedPrecondition)
+	case codes.NotFound:
+		return string(trusterr.CodeNotFound)
+	case codes.ResourceExhausted:
+		return string(trusterr.CodeResourceExhausted)
+	case codes.DeadlineExceeded:
+		return string(trusterr.CodeDeadlineExceeded)
+	case codes.DataLoss:
+		return string(trusterr.CodeDataLoss)
+	case codes.Unavailable:
+		return string(trusterr.CodeFailedPrecondition)
+	default:
+		return string(trusterr.CodeInternal)
+	}
+}

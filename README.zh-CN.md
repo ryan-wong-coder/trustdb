@@ -23,6 +23,7 @@ github.com/ryan-wong-coder/trustdb
 - 支持文件 claim 创建：计算 SHA-256 内容哈希，可选复制到本地 object store。
 - WAL-backed ingest 路径，支持 `strict`、`group`、`batch` 三种 fsync 模式。
 - HTTP ingest server：有界队列、worker pool、健康检查、Prometheus metrics、优雅关闭。
+- 可选 gRPC server：面向 SDK 和服务间调用，使用 TrustDB CBOR payload 承载 unary gRPC 调用。
 - Batch Merkle worker：生成 `ProofBundle` 和服务端 record index。
 - Global Transparency Log：提交 batch root 后追加全局日志，持久化 STH，并提供 inclusion/consistency proof。
 - L5 anchor pipeline：只锚定 `SignedTreeHead` / global root，不支持旧的 per-batch root 直锚。
@@ -82,6 +83,12 @@ TrustDB 使用分层证明语义：
 | `GET /v1/global-log/consistency?from=&to=` | 获取 global-log consistency proof。 |
 | `GET /v1/anchors/sth/{tree_size}` | 获取 STH anchor 状态或结果。 |
 | `GET /metrics` | Prometheus metrics。 |
+
+## gRPC API
+
+服务端可以通过 `--grpc-listen` 或 `server.grpc_listen` 额外暴露 gRPC listener。第一阶段实现继续复用 TrustDB 现有确定性 CBOR 模型作为 gRPC payload codec，因此 SDK 调用方可以在 HTTP 和 gRPC transport 之间切换，而不会改变 proof object 语义。
+
+当前 gRPC service 覆盖桌面客户端和 SDK 已使用的核心路径：health、submit claim、record list/detail、proof bundle、roots/latest root、STH、global proof、anchor state 和 metrics。同时注册标准 `grpc.health.v1.Health` 服务，便于基础设施探活。
 
 ## 快速向导
 
@@ -178,7 +185,7 @@ go run ./cmd/trustdb backup verify --file .trustdb-dev/trustdb.tdbackup
 | `paths` | 数据、key registry、WAL、object、proof 目录。 |
 | `metastore` / `metastore_path` | Proofstore 后端：`file` 或 `pebble`。 |
 | `wal` | Fsync 策略与 group commit interval。 |
-| `server` | 监听地址、队列大小、worker 数量和 timeout。 |
+| `server` | HTTP 监听地址、可选 gRPC 监听地址、队列大小、worker 数量和 timeout。 |
 | `batch` | Batch 队列、最大记录数、最大延迟。 |
 | `global_log` | 是否启用 global transparency log。 |
 | `anchor` | L5 anchor scope、sink、max delay、OTS calendars、OTS upgrader。 |
@@ -223,6 +230,7 @@ import "github.com/ryan-wong-coder/trustdb/sdk"
 - 构造并签名文件 claim；
 - 提交 signed claim 到 `POST /v1/claims`；
 - 查询 records、proof bundles、STH、GlobalLogProof、STH anchor state；
+- 默认使用 HTTP transport，也可以通过 `sdk.NewGRPCClient` 使用 gRPC transport；
 - 导出推荐的 `.sproof` 单文件证明；
 - 本地验证 `.sproof` 或拆分 proof artifacts；
 - 读取 health、batch roots 和 Prometheus metrics，供客户端复用服务端访问逻辑。
@@ -239,6 +247,12 @@ if err != nil {
     return err
 }
 return sdk.WriteSingleProofFile("example.sproof", proof)
+```
+
+如果要使用 gRPC transport：
+
+```go
+client, err := sdk.NewGRPCClient("127.0.0.1:9090")
 ```
 
 ## 开发检查
