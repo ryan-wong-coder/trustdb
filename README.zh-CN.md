@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/ryan-wong-coder/trustdb/actions/workflows/ci.yml/badge.svg)
 
-[English README](README.md)
+[English README](README.md) | [作者博客](https://www.blog.ryan-wong.cn/)
 
 ![TrustDB 系统架构](assets/readme/system-architecture.png)
 
