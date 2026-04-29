@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,32 @@ import (
 	"google.golang.org/grpc"
 )
 
-const trustdbBenchArtifactDirEnv = "TRUSTDB_BENCH_ARTIFACT_DIR"
+const (
+	trustdbBenchArtifactDirEnv                = "TRUSTDB_BENCH_ARTIFACT_DIR"
+	trustdbBenchMinCandidateThroughputEnv     = "TRUSTDB_BENCH_MIN_CANDIDATE_THROUGHPUT"
+	trustdbBenchMaxThroughputRegressionPctEnv = "TRUSTDB_BENCH_MAX_THROUGHPUT_REGRESSION_PCT"
+	trustdbBenchMaxDurationRegressionPctEnv   = "TRUSTDB_BENCH_MAX_DURATION_REGRESSION_PCT"
+	trustdbBenchMaxSubmitP95RegressionPctEnv  = "TRUSTDB_BENCH_MAX_SUBMIT_P95_REGRESSION_PCT"
+	trustdbBenchMaxCandidateSubmitP95MsEnv    = "TRUSTDB_BENCH_MAX_CANDIDATE_SUBMIT_P95_MS"
+	trustdbBenchMaxCandidateFailedEnv         = "TRUSTDB_BENCH_MAX_CANDIDATE_FAILED"
+	trustdbBenchMaxCandidateBatchErrorsEnv    = "TRUSTDB_BENCH_MAX_CANDIDATE_BATCH_ERRORS"
+	trustdbBenchMaxCandidateQueryFailedEnv    = "TRUSTDB_BENCH_MAX_CANDIDATE_QUERY_FAILED"
+	trustdbBenchMaxCandidateProofTimeoutsEnv  = "TRUSTDB_BENCH_MAX_CANDIDATE_PROOF_TIMEOUTS"
+	trustdbBenchMaxCandidateProofFailedEnv    = "TRUSTDB_BENCH_MAX_CANDIDATE_PROOF_FAILED"
+)
+
+type benchSmokeGateConfig struct {
+	MinCandidateThroughput     float64
+	MaxThroughputRegressionPct float64
+	MaxDurationRegressionPct   float64
+	MaxSubmitP95RegressionPct  float64
+	MaxCandidateSubmitP95Ms    float64
+	MaxCandidateFailed         int
+	MaxCandidateBatchErrors    int
+	MaxCandidateQueryFailed    int
+	MaxCandidateProofTimeouts  int
+	MaxCandidateProofFailed    int
+}
 
 func TestBenchIngestCollectsPebbleMetricsOverHTTPAndGRPC(t *testing.T) {
 	t.Parallel()
@@ -198,6 +224,7 @@ func TestBenchMatrixCommandWritesCaseReports(t *testing.T) {
 
 func TestBenchCIArtifactFlow(t *testing.T) {
 	env := newBenchPebbleE2EEnv(t)
+	gate := loadBenchSmokeGateConfig(t)
 	tmp := t.TempDir()
 	keyPath := filepath.Join(tmp, "client.key")
 	if err := writeKey(keyPath, env.identity.PrivateKey); err != nil {
@@ -284,21 +311,13 @@ func TestBenchCIArtifactFlow(t *testing.T) {
 		t.Fatalf("bench ingest candidate: %v", err)
 	}
 
-	compareOut, _, err := runBenchCLICommand(t, []string{
+	compareArgs := append([]string{
 		"bench", "compare",
 		"--baseline", baselinePath,
 		"--candidate", candidatePath,
 		"--output", "json",
-		"--min-candidate-throughput", "1",
-		"--max-throughput-regression-pct", "80",
-		"--max-duration-regression-pct", "200",
-		"--max-submit-p95-regression-pct", "200",
-		"--max-candidate-failed", "0",
-		"--max-candidate-batch-errors", "0",
-		"--max-candidate-query-failed", "0",
-		"--max-candidate-proof-timeouts", "0",
-		"--max-candidate-proof-failed", "0",
-	})
+	}, gate.CompareArgs()...)
+	compareOut, _, err := runBenchCLICommand(t, compareArgs)
 	if err != nil {
 		t.Fatalf("bench compare: %v", err)
 	}
@@ -501,4 +520,64 @@ func runBenchCLICommand(t *testing.T, args []string) (*bytes.Buffer, *bytes.Buff
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return &out, &errOut, err
+}
+
+func loadBenchSmokeGateConfig(t testing.TB) benchSmokeGateConfig {
+	t.Helper()
+	return benchSmokeGateConfig{
+		MinCandidateThroughput:     benchEnvFloat(t, trustdbBenchMinCandidateThroughputEnv, 1),
+		MaxThroughputRegressionPct: benchEnvFloat(t, trustdbBenchMaxThroughputRegressionPctEnv, 80),
+		MaxDurationRegressionPct:   benchEnvFloat(t, trustdbBenchMaxDurationRegressionPctEnv, 200),
+		MaxSubmitP95RegressionPct:  benchEnvFloat(t, trustdbBenchMaxSubmitP95RegressionPctEnv, 200),
+		MaxCandidateSubmitP95Ms:    benchEnvFloat(t, trustdbBenchMaxCandidateSubmitP95MsEnv, 0),
+		MaxCandidateFailed:         benchEnvInt(t, trustdbBenchMaxCandidateFailedEnv, 0),
+		MaxCandidateBatchErrors:    benchEnvInt(t, trustdbBenchMaxCandidateBatchErrorsEnv, 0),
+		MaxCandidateQueryFailed:    benchEnvInt(t, trustdbBenchMaxCandidateQueryFailedEnv, 0),
+		MaxCandidateProofTimeouts:  benchEnvInt(t, trustdbBenchMaxCandidateProofTimeoutsEnv, 0),
+		MaxCandidateProofFailed:    benchEnvInt(t, trustdbBenchMaxCandidateProofFailedEnv, 0),
+	}
+}
+
+func (cfg benchSmokeGateConfig) CompareArgs() []string {
+	args := []string{
+		"--min-candidate-throughput", strconv.FormatFloat(cfg.MinCandidateThroughput, 'f', -1, 64),
+		"--max-throughput-regression-pct", strconv.FormatFloat(cfg.MaxThroughputRegressionPct, 'f', -1, 64),
+		"--max-duration-regression-pct", strconv.FormatFloat(cfg.MaxDurationRegressionPct, 'f', -1, 64),
+		"--max-submit-p95-regression-pct", strconv.FormatFloat(cfg.MaxSubmitP95RegressionPct, 'f', -1, 64),
+		"--max-candidate-failed", strconv.Itoa(cfg.MaxCandidateFailed),
+		"--max-candidate-batch-errors", strconv.Itoa(cfg.MaxCandidateBatchErrors),
+		"--max-candidate-query-failed", strconv.Itoa(cfg.MaxCandidateQueryFailed),
+		"--max-candidate-proof-timeouts", strconv.Itoa(cfg.MaxCandidateProofTimeouts),
+		"--max-candidate-proof-failed", strconv.Itoa(cfg.MaxCandidateProofFailed),
+	}
+	if cfg.MaxCandidateSubmitP95Ms > 0 {
+		args = append(args, "--max-candidate-submit-p95-ms", strconv.FormatFloat(cfg.MaxCandidateSubmitP95Ms, 'f', -1, 64))
+	}
+	return args
+}
+
+func benchEnvFloat(t testing.TB, name string, fallback float64) float64 {
+	t.Helper()
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		t.Fatalf("ParseFloat(%s=%q): %v", name, raw, err)
+	}
+	return value
+}
+
+func benchEnvInt(t testing.TB, name string, fallback int) int {
+	t.Helper()
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("Atoi(%s=%q): %v", name, raw, err)
+	}
+	return value
 }

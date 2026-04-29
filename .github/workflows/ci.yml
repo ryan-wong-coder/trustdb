@@ -140,6 +140,18 @@ jobs:
     name: Backend bench smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TRUSTDB_BENCH_ARTIFACT_DIR: ${{ runner.temp }}/trustdb-bench
+      TRUSTDB_BENCH_MIN_CANDIDATE_THROUGHPUT: "1"
+      TRUSTDB_BENCH_MAX_THROUGHPUT_REGRESSION_PCT: "80"
+      TRUSTDB_BENCH_MAX_DURATION_REGRESSION_PCT: "200"
+      TRUSTDB_BENCH_MAX_SUBMIT_P95_REGRESSION_PCT: "200"
+      TRUSTDB_BENCH_MAX_CANDIDATE_SUBMIT_P95_MS: "0"
+      TRUSTDB_BENCH_MAX_CANDIDATE_FAILED: "0"
+      TRUSTDB_BENCH_MAX_CANDIDATE_BATCH_ERRORS: "0"
+      TRUSTDB_BENCH_MAX_CANDIDATE_QUERY_FAILED: "0"
+      TRUSTDB_BENCH_MAX_CANDIDATE_PROOF_TIMEOUTS: "0"
+      TRUSTDB_BENCH_MAX_CANDIDATE_PROOF_FAILED: "0"
 
     steps:
       - name: Checkout
@@ -152,13 +164,9 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Run bench smoke artifact flow
-        env:
-          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ runner.temp }}/trustdb-bench
         run: go test -count=1 -mod=readonly -tags=e2e ./cmd/trustdb -run TestBenchCIArtifactFlow
 
       - name: Write bench summary
-        env:
-          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ runner.temp }}/trustdb-bench
         shell: bash
         run: |
           python - <<'PY'
@@ -188,6 +196,20 @@ jobs:
                   f"- candidate failed: {candidate.get('failed', 0)}",
                   f"- assertions passed: {assertions.get('passed', False)}",
                   f"- assertion failures: {assertions.get('failed_count', 0)}",
+              ])
+              lines.extend([
+                  "",
+                  "### Gate thresholds",
+                  f"- min candidate throughput: {os.environ.get('TRUSTDB_BENCH_MIN_CANDIDATE_THROUGHPUT', '')} ops/s",
+                  f"- max throughput regression: {os.environ.get('TRUSTDB_BENCH_MAX_THROUGHPUT_REGRESSION_PCT', '')}%",
+                  f"- max duration regression: {os.environ.get('TRUSTDB_BENCH_MAX_DURATION_REGRESSION_PCT', '')}%",
+                  f"- max submit p95 regression: {os.environ.get('TRUSTDB_BENCH_MAX_SUBMIT_P95_REGRESSION_PCT', '')}%",
+                  f"- max candidate submit p95: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_SUBMIT_P95_MS', '')} ms",
+                  f"- max candidate failed: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_FAILED', '')}",
+                  f"- max candidate batch errors: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_BATCH_ERRORS', '')}",
+                  f"- max candidate query failed: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_QUERY_FAILED', '')}",
+                  f"- max candidate proof timeouts: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_PROOF_TIMEOUTS', '')}",
+                  f"- max candidate proof failed: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_PROOF_FAILED', '')}",
               ])
           if matrix_path.exists():
               matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
