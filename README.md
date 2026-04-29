@@ -16,6 +16,12 @@ github.com/ryan-wong-coder/trustdb
 
 License: AGPL-3.0-only. See [LICENSE](LICENSE).
 
+## Desktop Client
+
+![TrustDB desktop client overview](assets/readme/desktop-overview.png)
+
+The Wails + Vue desktop client provides local identity setup, HTTP/gRPC server configuration, file attestation, record and proof management, `.sproof` export, and local proof verification.
+
 ## Current Features
 
 - Deterministic CBOR proof objects for claims, receipts, proof bundles, global-log proofs, STHs, anchors, and portable single-file proofs.
