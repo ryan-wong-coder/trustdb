@@ -1,0 +1,3 @@
+# Global ownership for protected-branch review enforcement.
+* @ryan-wong-coder
+/.github/CODEOWNERS @ryan-wong-coder
