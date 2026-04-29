@@ -28,6 +28,7 @@ identity:
 
 server:
   listen: "127.0.0.1:8080"
+  grpc_listen: ""
   id: "local-server"
   key_id: "server-key"
   queue_size: 1024
@@ -112,6 +113,7 @@ type Identity struct {
 
 type Server struct {
 	Listen          string `mapstructure:"listen" json:"listen"`
+	GRPCListen      string `mapstructure:"grpc_listen" json:"grpc_listen"`
 	ID              string `mapstructure:"id" json:"id"`
 	KeyID           string `mapstructure:"key_id" json:"key_id"`
 	QueueSize       int    `mapstructure:"queue_size" json:"queue_size"`

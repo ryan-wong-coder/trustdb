@@ -23,6 +23,7 @@ License: AGPL-3.0-only. See [LICENSE](LICENSE).
 - File claim creation with SHA-256 content hashing and optional local object-store copy.
 - WAL-backed ingest path with configurable fsync mode: `strict`, `group`, or `batch`.
 - HTTP ingest server with bounded queues, worker pool, health endpoint, Prometheus metrics, and graceful shutdown.
+- Optional gRPC server for SDK/service-to-service access, using TrustDB CBOR payloads over unary gRPC calls.
 - Batch Merkle worker that emits `ProofBundle` data and server-side record indexes.
 - Global Transparency Log that appends committed batch roots, persists STHs, and serves inclusion/consistency proofs.
 - L5 anchor pipeline that anchors only `SignedTreeHead` / global roots, not per-batch roots.
@@ -82,6 +83,12 @@ Implemented HTTP endpoints include:
 | `GET /v1/global-log/consistency?from=&to=` | Fetch global-log consistency proof. |
 | `GET /v1/anchors/sth/{tree_size}` | Fetch STH anchor status/result. |
 | `GET /metrics` | Prometheus metrics. |
+
+## gRPC API
+
+The server can also expose a gRPC listener with `--grpc-listen` or `server.grpc_listen`. The first implementation keeps TrustDB's existing deterministic CBOR model as the gRPC payload codec, so SDK callers can use HTTP or gRPC without changing proof object semantics.
+
+The gRPC service covers the same core SDK paths currently used by the desktop client: health, submit claim, record list/detail, proof bundle, roots/latest root, STH, global proof, anchor state, and metrics. It also registers the standard `grpc.health.v1.Health` service for infrastructure probes.
 
 ## CLI Quick Guide
 
@@ -178,7 +185,7 @@ Important configuration groups:
 | `paths` | Data, key registry, WAL, object, and proof directories. |
 | `metastore` / `metastore_path` | Proofstore backend selection: `file` or `pebble`. |
 | `wal` | Fsync strategy and group-commit interval. |
-| `server` | Listen address, queue size, workers, and timeouts. |
+| `server` | HTTP listen address, optional gRPC listen address, queue size, workers, and timeouts. |
 | `batch` | Batch queue, max records, and max delay. |
 | `global_log` | Enables the global transparency log. |
 | `anchor` | L5 anchor scope, sink, max delay, OTS calendars, and OTS upgrader. |
@@ -223,6 +230,7 @@ Current SDK capabilities:
 - build and sign file claims with Ed25519;
 - submit signed claims to `POST /v1/claims`;
 - query records, proof bundles, STHs, GlobalLogProof, and STH anchor state;
+- use either the default HTTP transport or the gRPC transport via `sdk.NewGRPCClient`;
 - export the recommended `.sproof` single-file proof;
 - verify `.sproof` and split proof artifacts locally.
 
@@ -238,6 +246,12 @@ if err != nil {
     return err
 }
 return sdk.WriteSingleProofFile("example.sproof", proof)
+```
+
+Use gRPC transport instead of HTTP:
+
+```go
+client, err := sdk.NewGRPCClient("127.0.0.1:9090")
 ```
 
 ## Development Checks

@@ -27,6 +27,7 @@ identity:
 
 server:
   listen: "0.0.0.0:8080"
+  grpc_listen: ""
   id: "trustdb-prod-1"
   key_id: "server-key"
   queue_size: 65536
