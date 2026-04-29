@@ -218,12 +218,12 @@ func loadVerifyInputs(
 	if err != nil {
 		return model.ProofBundle{}, nil, nil, err
 	}
-	if skipAnchor {
-		return bundle, nil, nil, nil
-	}
 	global, err := fetchGlobalProof(ctx, client, serverURL, bundle.CommittedReceipt.BatchID)
 	if err != nil {
 		return model.ProofBundle{}, nil, nil, err
+	}
+	if skipAnchor {
+		return bundle, &global, nil, nil
 	}
 	ar, err := fetchAnchorResult(ctx, client, serverURL, global.STH.TreeSize)
 	if err != nil {
