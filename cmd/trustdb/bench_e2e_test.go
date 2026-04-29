@@ -3,9 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,6 +121,76 @@ func TestBenchIngestCollectsPebbleMetricsOverHTTPAndGRPC(t *testing.T) {
 				t.Fatalf("result metrics missing pebble memtable size entry")
 			}
 		})
+	}
+}
+
+func TestBenchMatrixCommandWritesCaseReports(t *testing.T) {
+	t.Parallel()
+
+	env := newBenchPebbleE2EEnv(t)
+	tmp := t.TempDir()
+	keyPath := filepath.Join(tmp, "client.key")
+	if err := writeKey(keyPath, env.identity.PrivateKey); err != nil {
+		t.Fatalf("writeKey: %v", err)
+	}
+	matrixPath := filepath.Join(tmp, "matrix.json")
+	if err := os.WriteFile(matrixPath, []byte(`{
+  "schema_version": "`+benchMatrixConfigSchema+`",
+  "defaults": {
+    "proof_level": "L5",
+    "proof_timeout": "10s",
+    "settle": "250ms",
+    "event_type": "bench.matrix.e2e",
+    "source": "bench-matrix-e2e"
+  },
+  "cases": [
+    {"name": "small", "count": 2, "concurrency": 1, "payload_bytes": 128, "samples": 1},
+    {"name": "medium", "count": 3, "concurrency": 2, "payload_bytes": 256, "samples": 1}
+  ]
+}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(matrix): %v", err)
+	}
+	reportDir := filepath.Join(tmp, "reports")
+
+	var out, errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"bench", "matrix",
+		"--server", env.httpURL,
+		"--transport", "http",
+		"--tenant", env.identity.TenantID,
+		"--client", env.identity.ClientID,
+		"--key-id", env.identity.KeyID,
+		"--private-key", keyPath,
+		"--matrix-file", matrixPath,
+		"--report-dir", reportDir,
+		"--output", "json",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("bench matrix execute: %v stderr=%s", err, errOut.String())
+	}
+
+	var result benchMatrixResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal(matrix output): %v body=%q", err, out.String())
+	}
+	if result.SchemaVersion != benchMatrixReportSchema {
+		t.Fatalf("schema = %q", result.SchemaVersion)
+	}
+	if len(result.Cases) != 2 || result.Summary.CaseCount != 2 {
+		t.Fatalf("cases/summary = %+v", result)
+	}
+	if result.Cases[0].ReportFile == "" || result.Cases[1].ReportFile == "" || result.SummaryFile == "" {
+		t.Fatalf("report paths missing: %+v", result)
+	}
+	if _, err := os.Stat(result.Cases[0].ReportFile); err != nil {
+		t.Fatalf("stat case report: %v", err)
+	}
+	if _, err := os.Stat(result.SummaryFile); err != nil {
+		t.Fatalf("stat summary report: %v", err)
+	}
+	if result.Summary.TotalSubmitted != 5 {
+		t.Fatalf("total submitted = %d, want 5", result.Summary.TotalSubmitted)
 	}
 }
 

@@ -29,6 +29,7 @@ func newBenchCommand(rt *runtimeConfig) *cobra.Command {
 		Short: "Benchmark ingest and proof/query paths against a TrustDB server",
 	}
 	cmd.AddCommand(newBenchIngestCommand(rt))
+	cmd.AddCommand(newBenchMatrixCommand(rt))
 	cmd.AddCommand(newBenchCompareCommand(rt))
 	return cmd
 }
