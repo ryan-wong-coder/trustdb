@@ -164,13 +164,13 @@ jobs:
 
       - name: Run bench smoke artifact flow
         env:
-          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ github.workspace }}/.bench-smoke
+          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ github.workspace }}/bench-smoke-artifacts
         run: go test -count=1 -mod=readonly -tags=e2e ./cmd/trustdb -run TestBenchCIArtifactFlow
 
       - name: Write bench summary
         shell: bash
         env:
-          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ github.workspace }}/.bench-smoke
+          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ github.workspace }}/bench-smoke-artifacts
         run: |
           python - <<'PY'
           import json
@@ -233,7 +233,7 @@ jobs:
         if: always()
         with:
           name: trustdb-bench-smoke
-          path: ${{ github.workspace }}/.bench-smoke
+          path: ${{ github.workspace }}/bench-smoke-artifacts
           if-no-files-found: error
 
   desktop-go:
