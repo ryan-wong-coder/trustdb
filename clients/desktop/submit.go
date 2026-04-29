@@ -84,10 +84,11 @@ func (a *App) SubmitFile(req SubmitRequest) (*SubmitResult, error) {
 		return nil, err
 	}
 
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return nil, err
 	}
+	defer c.close()
 	resp, err := c.submitSignedClaim(a.ensureCtx(), signed)
 	if err != nil {
 		return nil, err
@@ -174,10 +175,11 @@ func (a *App) RefreshRecord(recordID string) (*LocalRecord, error) {
 		return nil, err
 	}
 	rec, ok := st.getRecord(recordID)
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return nil, err
 	}
+	defer c.close()
 	if !ok {
 		idx, err := c.getRecordIndex(a.ensureCtx(), recordID)
 		if err != nil {
@@ -237,10 +239,11 @@ func (a *App) ExportProofBundle(recordID, outPath string) error {
 	if outPath == "" {
 		return errors.New("output path required")
 	}
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return err
 	}
+	defer c.close()
 	bundle, err := c.getProof(a.ensureCtx(), recordID)
 	if err != nil {
 		return err
@@ -258,10 +261,11 @@ func (a *App) ExportGlobalProof(recordID, outPath string) error {
 	if outPath == "" {
 		return errors.New("output path required")
 	}
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return err
 	}
+	defer c.close()
 	bundle, err := c.getProof(a.ensureCtx(), recordID)
 	if err != nil {
 		return err
@@ -296,10 +300,11 @@ func (a *App) ExportSingleProof(recordID, outPath string) error {
 }
 
 func (a *App) buildSingleProof(recordID string) (model.SingleProof, error) {
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return model.SingleProof{}, err
 	}
+	defer c.close()
 	proof, err := c.exportSingleProof(a.ensureCtx(), recordID)
 	if err != nil {
 		return model.SingleProof{}, err
@@ -419,9 +424,10 @@ func (a *App) ExportAnchorResult(recordID, outPath string) error {
 // (verify page uses it so the user doesn't have to export-then-
 // re-import just to view the batch details).
 func (a *App) GetProofBundle(recordID string) (model.ProofBundle, error) {
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return model.ProofBundle{}, err
 	}
+	defer c.close()
 	return c.getProof(a.ensureCtx(), recordID)
 }

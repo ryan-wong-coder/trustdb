@@ -54,9 +54,9 @@ func TestHTTPClientListRecordIndexesMapsServerPage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := newHTTPClient(srv.URL)
+	client, err := newServerClient(serverTransportHTTP, srv.URL)
 	if err != nil {
-		t.Fatalf("newHTTPClient: %v", err)
+		t.Fatalf("newServerClient: %v", err)
 	}
 	page, err := client.listRecordIndexes(context.Background(), RecordPageOptions{
 		Limit:  2,
@@ -91,9 +91,9 @@ func TestHTTPClientListRecordIndexesSupportsExactRecordQuery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := newHTTPClient(srv.URL)
+	client, err := newServerClient(serverTransportHTTP, srv.URL)
 	if err != nil {
-		t.Fatalf("newHTTPClient: %v", err)
+		t.Fatalf("newServerClient: %v", err)
 	}
 	page, err := client.listRecordIndexes(context.Background(), RecordPageOptions{Query: "tr1exact"})
 	if err != nil {
@@ -133,9 +133,9 @@ func TestHTTPClientListRecordIndexesSendsServerSearchFilters(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := newHTTPClient(srv.URL)
+	client, err := newServerClient(serverTransportHTTP, srv.URL)
 	if err != nil {
-		t.Fatalf("newHTTPClient: %v", err)
+		t.Fatalf("newServerClient: %v", err)
 	}
 	if _, err := client.listRecordIndexes(context.Background(), RecordPageOptions{Query: "screenshot"}); err != nil {
 		t.Fatalf("listRecordIndexes q: %v", err)
@@ -147,5 +147,31 @@ func TestHTTPClientListRecordIndexesSendsServerSearchFilters(t *testing.T) {
 	defer mu.Unlock()
 	if !sawTextQuery || !sawHashQuery {
 		t.Fatalf("saw text=%v hash=%v", sawTextQuery, sawHashQuery)
+	}
+}
+
+func TestNormalizeGRPCTargetStripsHTTPStyleURL(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		want     string
+	}{
+		{name: "host port", endpoint: "127.0.0.1:9090", want: "127.0.0.1:9090"},
+		{name: "http url", endpoint: "http://127.0.0.1:9090", want: "127.0.0.1:9090"},
+		{name: "grpc url", endpoint: "grpc://trustdb.example:9090/", want: "trustdb.example:9090"},
+		{name: "resolver target", endpoint: "dns:///trustdb.example:9090", want: "dns:///trustdb.example:9090"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := normalizeGRPCTarget(tc.endpoint)
+			if err != nil {
+				t.Fatalf("normalizeGRPCTarget: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("target = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

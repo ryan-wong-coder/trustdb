@@ -37,6 +37,7 @@ const showSplitProofs = ref(false)
 // Remote-only
 const recordID = ref('')
 const serverURL = ref('')
+const configuredTransport = computed(() => (settings.settings.server_transport || 'http').toUpperCase())
 
 const running = ref(false)
 const result = ref<VerifyResponse | null>(null)
@@ -148,7 +149,8 @@ function stepState(s: Step): 'pass' | 'current' | 'todo' | 'fail' {
           需要逐级审计时，可以展开下方的分布式证明入口。
         </template>
         <template v-else>
-          输入 record_id，客户端会从 <span class="font-mono">{{ serverURL || settings.settings.server_url || '（未配置）' }}</span>
+          输入 record_id，客户端会按设置里的 <span class="font-mono">{{ configuredTransport }}</span>
+          transport 从 <span class="font-mono">{{ serverURL || settings.settings.server_url || '（未配置）' }}</span>
           拉取 proof bundle、GlobalLogProof 和 STH anchor 并就地验证。
         </template>
       </p>
@@ -231,8 +233,8 @@ function stepState(s: Step): 'pass' | 'current' | 'todo' | 'fail' {
           <Field label="record_id" hint="服务端返回的 64 位十六进制 ID">
             <Input v-model="recordID" placeholder="例如 2e9d…" :mono="true" />
           </Field>
-          <Field label="服务器 URL（可选）" :hint="`默认使用设置里的 ${settings.settings.server_url || 'http://localhost:8081'}`">
-            <Input v-model="serverURL" placeholder="http://host:8081" />
+          <Field label="服务器地址（可选）" :hint="`默认使用设置里的 ${configuredTransport} · ${settings.settings.server_url || 'http://localhost:8081'}`">
+            <Input v-model="serverURL" :placeholder="configuredTransport === 'GRPC' ? '127.0.0.1:9090' : 'http://host:8081'" />
           </Field>
         </template>
 

@@ -246,6 +246,7 @@ export namespace main {
 	export class HealthStatus {
 	    ok: boolean;
 	    server_url: string;
+	    transport: string;
 	    rtt_millis: number;
 	    error?: string;
 	    status_code?: number;
@@ -258,6 +259,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ok = source["ok"];
 	        this.server_url = source["server_url"];
+	        this.transport = source["transport"];
 	        this.rtt_millis = source["rtt_millis"];
 	        this.error = source["error"];
 	        this.status_code = source["status_code"];
@@ -380,6 +382,7 @@ export namespace main {
 	}
 	export class Settings {
 	    server_url: string;
+	    server_transport: string;
 	    server_public_key_b64: string;
 	    default_media_type: string;
 	    default_event_type: string;
@@ -392,6 +395,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.server_url = source["server_url"];
+	        this.server_transport = source["server_transport"];
 	        this.server_public_key_b64 = source["server_public_key_b64"];
 	        this.default_media_type = source["default_media_type"];
 	        this.default_event_type = source["default_event_type"];

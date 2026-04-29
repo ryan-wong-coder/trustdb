@@ -250,6 +250,9 @@ func (a *App) SaveSettings(s Settings) error {
 	if err != nil {
 		return err
 	}
+	if !validServerTransport(s.ServerTransport) {
+		return fmt.Errorf("unsupported server transport: %s", s.ServerTransport)
+	}
 	if s.ServerPubKeyB64 != "" {
 		raw, err := decodeKeyField(s.ServerPubKeyB64)
 		if err != nil {
@@ -505,10 +508,11 @@ func (a *App) ListRecordsPage(opts RecordPageOptions) RecordPage {
 }
 
 func (a *App) ListRemoteRecordsPage(opts RecordPageOptions) (RecordPage, error) {
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return RecordPage{}, err
 	}
+	defer c.close()
 	return c.listRecordIndexes(a.ensureCtx(), opts)
 }
 
@@ -523,36 +527,40 @@ func (a *App) DeleteRecord(recordID string) error {
 // --- Server health & roots -----------------------------------------
 
 func (a *App) ServerHealth() HealthStatus {
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return HealthStatus{Error: err.Error()}
 	}
+	defer c.close()
 	return c.health(a.ensureCtx())
 }
 
 func (a *App) LatestRoot() (model.BatchRoot, error) {
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return model.BatchRoot{}, err
 	}
+	defer c.close()
 	return c.latestRoot(a.ensureCtx())
 }
 
 func (a *App) ListRoots(limit int) ([]model.BatchRoot, error) {
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return nil, err
 	}
+	defer c.close()
 	return c.listRoots(a.ensureCtx(), limit)
 }
 
 // --- Metrics --------------------------------------------------------
 
 func (a *App) ServerMetrics() ([]Metric, error) {
-	c, err := a.httpClient()
+	c, err := a.serverClient()
 	if err != nil {
 		return nil, err
 	}
+	defer c.close()
 	raw, err := c.metricsRaw(a.ensureCtx())
 	if err != nil {
 		return nil, err
@@ -569,13 +577,13 @@ func (a *App) ensureCtx() context.Context {
 	return context.Background()
 }
 
-func (a *App) httpClient() (*httpClient, error) {
+func (a *App) serverClient() (*serverClient, error) {
 	s, err := a.requireStore()
 	if err != nil {
 		return nil, err
 	}
 	cfg := s.getSettings()
-	return newHTTPClient(cfg.ServerURL)
+	return newServerClient(cfg.ServerTransport, cfg.ServerURL)
 }
 
 // serverPublicKey decodes the configured server public key, or returns

@@ -40,6 +40,7 @@ const settings = useSettings()
 const { settings: cfg } = storeToRefs(settings)
 
 const activePath = computed(() => route.path)
+const endpointTransport = computed(() => (cfg.value.server_transport || 'http').toUpperCase())
 
 function isActive(to: string): boolean {
   return activePath.value === to || (to === '/dashboard' && activePath.value === '/')
@@ -97,6 +98,7 @@ function isActive(to: string): boolean {
     <footer class="px-4 py-4 hairline-t no-drag">
       <div class="rounded-[16px] border border-accent/20 bg-accent/10 p-3">
         <div class="kicker text-[9px] font-bold">Endpoint</div>
+        <div class="mt-1 font-mono text-[10px] text-accent">{{ endpointTransport }}</div>
         <div class="mt-1 truncate font-mono text-[11px] text-ink-200">{{ cfg.server_url || '未配置服务器' }}</div>
       </div>
     </footer>

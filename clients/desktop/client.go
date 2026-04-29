@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,16 +15,88 @@ import (
 	"github.com/ryan-wong-coder/trustdb/sdk"
 )
 
-type httpClient struct {
-	sdk *sdk.Client
+type serverClient struct {
+	sdk       *sdk.Client
+	transport string
 }
 
-func newHTTPClient(base string) (*httpClient, error) {
-	client, err := sdk.NewClient(base)
+func newServerClient(transport, endpoint string) (*serverClient, error) {
+	transport = normalizeServerTransport(transport)
+	endpoint = strings.TrimSpace(endpoint)
+	var (
+		client *sdk.Client
+		err    error
+	)
+	switch transport {
+	case serverTransportHTTP:
+		client, err = sdk.NewClient(endpoint)
+	case serverTransportGRPC:
+		target, targetErr := normalizeGRPCTarget(endpoint)
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		client, err = sdk.NewGRPCClient(target)
+	default:
+		return nil, fmt.Errorf("unsupported server transport: %s", transport)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return &httpClient{sdk: client}, nil
+	return &serverClient{sdk: client, transport: transport}, nil
+}
+
+func normalizeServerTransport(transport string) string {
+	switch strings.ToLower(strings.TrimSpace(transport)) {
+	case "", serverTransportHTTP:
+		return serverTransportHTTP
+	case serverTransportGRPC:
+		return serverTransportGRPC
+	default:
+		return strings.ToLower(strings.TrimSpace(transport))
+	}
+}
+
+func validServerTransport(transport string) bool {
+	switch normalizeServerTransport(transport) {
+	case serverTransportHTTP, serverTransportGRPC:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeGRPCTarget(endpoint string) (string, error) {
+	trimmed := strings.TrimSpace(endpoint)
+	if trimmed == "" {
+		return "", errors.New("grpc server target is empty")
+	}
+	if !strings.Contains(trimmed, "://") {
+		return strings.TrimRight(trimmed, "/"), nil
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("parse grpc target: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "grpc":
+		if u.Host == "" {
+			return "", fmt.Errorf("grpc target must include host: %s", trimmed)
+		}
+		if path := strings.Trim(u.Path, "/"); path != "" {
+			return "", fmt.Errorf("grpc target must be host:port, got path %q", u.Path)
+		}
+		return u.Host, nil
+	default:
+		// Keep advanced gRPC resolver targets such as dns:///host untouched.
+		return trimmed, nil
+	}
+}
+
+func (c *serverClient) close() {
+	if c == nil || c.sdk == nil {
+		return
+	}
+	_ = c.sdk.Close()
 }
 
 type ServerError = sdk.Error
@@ -30,16 +104,18 @@ type ServerError = sdk.Error
 type HealthStatus struct {
 	OK         bool   `json:"ok"`
 	ServerURL  string `json:"server_url"`
+	Transport  string `json:"transport"`
 	RTTMillis  int64  `json:"rtt_millis"`
 	Error      string `json:"error,omitempty"`
 	StatusCode int    `json:"status_code,omitempty"`
 }
 
-func (c *httpClient) health(ctx context.Context) HealthStatus {
+func (c *serverClient) health(ctx context.Context) HealthStatus {
 	status := c.sdk.CheckHealth(ctx)
 	return HealthStatus{
 		OK:         status.OK,
 		ServerURL:  status.ServerURL,
+		Transport:  c.transport,
 		RTTMillis:  status.RTTMillis,
 		Error:      status.Error,
 		StatusCode: status.StatusCode,
@@ -50,19 +126,19 @@ func (c *httpClient) health(ctx context.Context) HealthStatus {
 // batch_enqueued / idempotent flags without making a second call.
 type submitClaimResult = sdk.SubmitResult
 
-func (c *httpClient) submitSignedClaim(ctx context.Context, signed model.SignedClaim) (submitClaimResult, error) {
+func (c *serverClient) submitSignedClaim(ctx context.Context, signed model.SignedClaim) (submitClaimResult, error) {
 	return c.sdk.SubmitSignedClaim(ctx, signed)
 }
 
-func (c *httpClient) getProof(ctx context.Context, recordID string) (model.ProofBundle, error) {
+func (c *serverClient) getProof(ctx context.Context, recordID string) (model.ProofBundle, error) {
 	return c.sdk.GetProofBundle(ctx, recordID)
 }
 
-func (c *httpClient) getRecordIndex(ctx context.Context, recordID string) (model.RecordIndex, error) {
+func (c *serverClient) getRecordIndex(ctx context.Context, recordID string) (model.RecordIndex, error) {
 	return c.sdk.GetRecord(ctx, recordID)
 }
 
-func (c *httpClient) listRecordIndexes(ctx context.Context, opts RecordPageOptions) (RecordPage, error) {
+func (c *serverClient) listRecordIndexes(ctx context.Context, opts RecordPageOptions) (RecordPage, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 50
@@ -223,11 +299,11 @@ type anchorEnvelope struct {
 	Outbox   *model.STHAnchorOutboxItem `json:"outbox,omitempty"`
 }
 
-func (c *httpClient) getGlobalProof(ctx context.Context, batchID string) (model.GlobalLogProof, error) {
+func (c *serverClient) getGlobalProof(ctx context.Context, batchID string) (model.GlobalLogProof, error) {
 	return c.sdk.GetGlobalProof(ctx, batchID)
 }
 
-func (c *httpClient) getAnchor(ctx context.Context, treeSize uint64) (anchorEnvelope, error) {
+func (c *serverClient) getAnchor(ctx context.Context, treeSize uint64) (anchorEnvelope, error) {
 	status, err := c.sdk.GetAnchor(ctx, treeSize)
 	if err != nil {
 		if sdk.IsUnavailable(err) {
@@ -238,18 +314,18 @@ func (c *httpClient) getAnchor(ctx context.Context, treeSize uint64) (anchorEnve
 	return anchorEnvelope{TreeSize: status.TreeSize, Status: status.Status, Result: status.Result}, nil
 }
 
-func (c *httpClient) listRoots(ctx context.Context, limit int) ([]model.BatchRoot, error) {
+func (c *serverClient) listRoots(ctx context.Context, limit int) ([]model.BatchRoot, error) {
 	return c.sdk.ListRoots(ctx, limit)
 }
 
-func (c *httpClient) latestRoot(ctx context.Context) (model.BatchRoot, error) {
+func (c *serverClient) latestRoot(ctx context.Context) (model.BatchRoot, error) {
 	return c.sdk.LatestRoot(ctx)
 }
 
-func (c *httpClient) metricsRaw(ctx context.Context) (string, error) {
+func (c *serverClient) metricsRaw(ctx context.Context) (string, error) {
 	return c.sdk.MetricsRaw(ctx)
 }
 
-func (c *httpClient) exportSingleProof(ctx context.Context, recordID string) (model.SingleProof, error) {
+func (c *serverClient) exportSingleProof(ctx context.Context, recordID string) (model.SingleProof, error) {
 	return c.sdk.ExportSingleProof(ctx, recordID)
 }

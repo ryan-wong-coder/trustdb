@@ -21,6 +21,9 @@ func TestStoreLoadMissingConfigUsesDefaults(t *testing.T) {
 	if cfg.ServerURL != "http://127.0.0.1:8080" {
 		t.Fatalf("ServerURL = %q, want default", cfg.ServerURL)
 	}
+	if cfg.ServerTransport != serverTransportHTTP {
+		t.Fatalf("ServerTransport = %q, want http", cfg.ServerTransport)
+	}
 }
 
 func TestWailsRecordDTOsDoNotExposeTimeTime(t *testing.T) {
@@ -85,6 +88,9 @@ func TestStoreLoadAcceptsUTF8BOM(t *testing.T) {
 	cfg := store.getSettings()
 	if cfg.ServerURL != "http://127.0.0.1:8081" {
 		t.Fatalf("ServerURL = %q, want 8081", cfg.ServerURL)
+	}
+	if cfg.ServerTransport != serverTransportHTTP {
+		t.Fatalf("ServerTransport = %q, want http", cfg.ServerTransport)
 	}
 }
 

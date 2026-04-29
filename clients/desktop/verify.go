@@ -120,6 +120,7 @@ func (a *App) VerifyProof(req VerifyRequest) (*VerifyResponse, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer c.close()
 		bundle, err = c.getProof(a.ensureCtx(), req.RecordID)
 		if err != nil {
 			return nil, fmt.Errorf("fetch proof: %w", err)
@@ -185,11 +186,17 @@ func (a *App) VerifyProof(req VerifyRequest) (*VerifyResponse, error) {
 	}, nil
 }
 
-func (a *App) remoteClient(override string) (*httpClient, error) {
-	if override != "" {
-		return newHTTPClient(override)
+func (a *App) remoteClient(override string) (*serverClient, error) {
+	if override == "" {
+		return a.serverClient()
 	}
-	return a.httpClient()
+	s, err := a.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	cfg := s.getSettings()
+	cfg.ServerURL = override
+	return newServerClient(cfg.ServerTransport, cfg.ServerURL)
 }
 
 func (a *App) resolveClientPub(bundle model.ProofBundle, override string) (ed25519.PublicKey, error) {
