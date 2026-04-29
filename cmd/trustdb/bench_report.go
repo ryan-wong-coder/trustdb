@@ -14,13 +14,23 @@ import (
 
 const (
 	benchIngestReportSchema  = "trustdb.bench.ingest.v1"
-	benchCompareReportSchema = "trustdb.bench.compare.v1"
+	benchCompareReportSchema = "trustdb.bench.compare.v2"
 )
 
 type benchCompareConfig struct {
-	BaselinePath  string
-	CandidatePath string
-	OutputFormat  string
+	BaselinePath               string
+	CandidatePath              string
+	OutputFormat               string
+	MinCandidateThroughput     float64
+	MaxThroughputRegressionPct float64
+	MaxDurationRegressionPct   float64
+	MaxSubmitP95RegressionPct  float64
+	MaxCandidateSubmitP95Ms    float64
+	MaxCandidateFailed         int
+	MaxCandidateBatchErrors    int
+	MaxCandidateQueryFailed    int
+	MaxCandidateProofTimeouts  int
+	MaxCandidateProofFailed    int
 }
 
 type benchCompareResult struct {
@@ -31,6 +41,7 @@ type benchCompareResult struct {
 	Candidate     benchCompareMetadata    `json:"candidate"`
 	Summary       benchCompareSummary     `json:"summary"`
 	Metrics       []benchMetricComparison `json:"metrics,omitempty"`
+	Assertions    *benchCompareAssertions `json:"assertions,omitempty"`
 }
 
 type benchCompareMetadata struct {
@@ -78,6 +89,22 @@ type benchMetricComparison struct {
 	DeltaPct       *float64 `json:"delta_pct,omitempty"`
 }
 
+type benchCompareAssertions struct {
+	Passed      bool                `json:"passed"`
+	FailedCount int                 `json:"failed_count"`
+	Checks      []benchCompareCheck `json:"checks"`
+}
+
+type benchCompareCheck struct {
+	Name       string  `json:"name"`
+	Passed     bool    `json:"passed"`
+	Actual     float64 `json:"actual"`
+	Limit      float64 `json:"limit"`
+	Comparator string  `json:"comparator"`
+	Unit       string  `json:"unit,omitempty"`
+	Message    string  `json:"message,omitempty"`
+}
+
 func newBenchCompareCommand(rt *runtimeConfig) *cobra.Command {
 	var cfg benchCompareConfig
 	cmd := &cobra.Command{
@@ -110,16 +137,30 @@ func newBenchCompareCommand(rt *runtimeConfig) *cobra.Command {
 			}
 
 			result := compareBenchIngestResults(cfg.BaselinePath, cfg.CandidatePath, baseline, candidate)
+			result.Assertions = evaluateBenchCompareAssertions(cmd, cfg, result)
 			if cfg.OutputFormat == "text" {
 				writeBenchCompareText(rt.out, result)
-				return nil
+				return benchCompareAssertionsError(result.Assertions)
 			}
-			return rt.writeJSON(result)
+			if err := rt.writeJSON(result); err != nil {
+				return err
+			}
+			return benchCompareAssertionsError(result.Assertions)
 		},
 	}
 	cmd.Flags().StringVar(&cfg.BaselinePath, "baseline", "", "baseline ingest bench JSON report path")
 	cmd.Flags().StringVar(&cfg.CandidatePath, "candidate", "", "candidate ingest bench JSON report path")
 	cmd.Flags().StringVar(&cfg.OutputFormat, "output", "text", "output format: text or json")
+	cmd.Flags().Float64Var(&cfg.MinCandidateThroughput, "min-candidate-throughput", 0, "fail if candidate throughput_per_sec is lower than this value")
+	cmd.Flags().Float64Var(&cfg.MaxThroughputRegressionPct, "max-throughput-regression-pct", 0, "fail if candidate throughput regresses more than this percentage versus baseline")
+	cmd.Flags().Float64Var(&cfg.MaxDurationRegressionPct, "max-duration-regression-pct", 0, "fail if candidate duration_seconds increases more than this percentage versus baseline")
+	cmd.Flags().Float64Var(&cfg.MaxSubmitP95RegressionPct, "max-submit-p95-regression-pct", 0, "fail if candidate submit_p95_ms increases more than this percentage versus baseline")
+	cmd.Flags().Float64Var(&cfg.MaxCandidateSubmitP95Ms, "max-candidate-submit-p95-ms", 0, "fail if candidate submit_p95_ms exceeds this absolute value")
+	cmd.Flags().IntVar(&cfg.MaxCandidateFailed, "max-candidate-failed", 0, "fail if candidate failed submissions exceeds this value")
+	cmd.Flags().IntVar(&cfg.MaxCandidateBatchErrors, "max-candidate-batch-errors", 0, "fail if candidate batch_errors exceeds this value")
+	cmd.Flags().IntVar(&cfg.MaxCandidateQueryFailed, "max-candidate-query-failed", 0, "fail if candidate query_failed exceeds this value")
+	cmd.Flags().IntVar(&cfg.MaxCandidateProofTimeouts, "max-candidate-proof-timeouts", 0, "fail if candidate proof_timeouts exceeds this value")
+	cmd.Flags().IntVar(&cfg.MaxCandidateProofFailed, "max-candidate-proof-failed", 0, "fail if candidate proof_failed exceeds this value")
 	return cmd
 }
 
@@ -298,6 +339,33 @@ func writeBenchCompareText(w io.Writer, result benchCompareResult) {
 			)
 		}
 	}
+	if result.Assertions != nil {
+		fmt.Fprintln(w, "assertions:")
+		fmt.Fprintf(w, "  passed: %t\n", result.Assertions.Passed)
+		fmt.Fprintf(w, "  failed_count: %d\n", result.Assertions.FailedCount)
+		for _, check := range result.Assertions.Checks {
+			status := "PASS"
+			if !check.Passed {
+				status = "FAIL"
+			}
+			fmt.Fprintf(
+				w,
+				"  [%s] %s actual=%s limit=%s comparator=%s",
+				status,
+				check.Name,
+				formatBenchNumber(check.Actual, 2),
+				formatBenchNumber(check.Limit, 2),
+				check.Comparator,
+			)
+			if check.Unit != "" {
+				fmt.Fprintf(w, " unit=%s", check.Unit)
+			}
+			if check.Message != "" {
+				fmt.Fprintf(w, " message=%q", check.Message)
+			}
+			fmt.Fprintln(w)
+		}
+	}
 }
 
 func writeBenchComparisonLine(w io.Writer, name string, cmp benchNumberComparison, decimals int) {
@@ -325,4 +393,102 @@ func formatBenchPct(value *float64) string {
 		return "(n/a)"
 	}
 	return fmt.Sprintf("(%+.2f%%)", *value)
+}
+
+func evaluateBenchCompareAssertions(cmd *cobra.Command, cfg benchCompareConfig, result benchCompareResult) *benchCompareAssertions {
+	var checks []benchCompareCheck
+	addMax := func(flagName, name string, actual, limit float64, unit string) {
+		if !cmd.Flags().Changed(flagName) {
+			return
+		}
+		passed := actual <= limit
+		checks = append(checks, benchCompareCheck{
+			Name:       name,
+			Passed:     passed,
+			Actual:     actual,
+			Limit:      limit,
+			Comparator: "<=",
+			Unit:       unit,
+			Message:    benchCompareCheckMessage(name, passed, actual, limit, "<=", unit),
+		})
+	}
+	addMin := func(flagName, name string, actual, limit float64, unit string) {
+		if !cmd.Flags().Changed(flagName) {
+			return
+		}
+		passed := actual >= limit
+		checks = append(checks, benchCompareCheck{
+			Name:       name,
+			Passed:     passed,
+			Actual:     actual,
+			Limit:      limit,
+			Comparator: ">=",
+			Unit:       unit,
+			Message:    benchCompareCheckMessage(name, passed, actual, limit, ">=", unit),
+		})
+	}
+
+	addMin("min-candidate-throughput", "candidate_throughput_per_sec", result.Candidate.ThroughputPerSec, cfg.MinCandidateThroughput, "ops/s")
+	if delta := result.Summary.ThroughputPerSec.DeltaPct; delta != nil {
+		addMax("max-throughput-regression-pct", "throughput_regression_pct", math.Max(0, -*delta), cfg.MaxThroughputRegressionPct, "pct")
+	} else if cmd.Flags().Changed("max-throughput-regression-pct") {
+		addMax("max-throughput-regression-pct", "throughput_regression_pct", 0, cfg.MaxThroughputRegressionPct, "pct")
+	}
+	if delta := result.Summary.DurationSeconds.DeltaPct; delta != nil {
+		addMax("max-duration-regression-pct", "duration_regression_pct", math.Max(0, *delta), cfg.MaxDurationRegressionPct, "pct")
+	} else if cmd.Flags().Changed("max-duration-regression-pct") {
+		addMax("max-duration-regression-pct", "duration_regression_pct", 0, cfg.MaxDurationRegressionPct, "pct")
+	}
+	if delta := result.Summary.SubmitP95Ms.DeltaPct; delta != nil {
+		addMax("max-submit-p95-regression-pct", "submit_p95_regression_pct", math.Max(0, *delta), cfg.MaxSubmitP95RegressionPct, "pct")
+	} else if cmd.Flags().Changed("max-submit-p95-regression-pct") {
+		addMax("max-submit-p95-regression-pct", "submit_p95_regression_pct", 0, cfg.MaxSubmitP95RegressionPct, "pct")
+	}
+	addMax("max-candidate-submit-p95-ms", "candidate_submit_p95_ms", result.Summary.SubmitP95Ms.Candidate, cfg.MaxCandidateSubmitP95Ms, "ms")
+	addMax("max-candidate-failed", "candidate_failed", float64(result.Candidate.Failed), float64(cfg.MaxCandidateFailed), "count")
+	addMax("max-candidate-batch-errors", "candidate_batch_errors", float64(result.Candidate.BatchErrors), float64(cfg.MaxCandidateBatchErrors), "count")
+	addMax("max-candidate-query-failed", "candidate_query_failed", result.Summary.QueryFailed.Candidate, float64(cfg.MaxCandidateQueryFailed), "count")
+	addMax("max-candidate-proof-timeouts", "candidate_proof_timeouts", result.Summary.ProofTimeouts.Candidate, float64(cfg.MaxCandidateProofTimeouts), "count")
+	addMax("max-candidate-proof-failed", "candidate_proof_failed", result.Summary.ProofFailed.Candidate, float64(cfg.MaxCandidateProofFailed), "count")
+
+	if len(checks) == 0 {
+		return nil
+	}
+	out := &benchCompareAssertions{
+		Passed: true,
+		Checks: checks,
+	}
+	for _, check := range checks {
+		if check.Passed {
+			continue
+		}
+		out.Passed = false
+		out.FailedCount++
+	}
+	return out
+}
+
+func benchCompareCheckMessage(name string, passed bool, actual, limit float64, comparator, unit string) string {
+	if passed {
+		return ""
+	}
+	suffix := ""
+	if unit != "" {
+		suffix = " " + unit
+	}
+	return fmt.Sprintf("%s %.2f%s is not %s %.2f%s", name, actual, suffix, comparator, limit, suffix)
+}
+
+func benchCompareAssertionsError(assertions *benchCompareAssertions) error {
+	if assertions == nil || assertions.Passed {
+		return nil
+	}
+	failed := make([]string, 0, assertions.FailedCount)
+	for _, check := range assertions.Checks {
+		if check.Passed {
+			continue
+		}
+		failed = append(failed, check.Name)
+	}
+	return fmt.Errorf("bench compare assertions failed: %s", strings.Join(failed, ", "))
 }

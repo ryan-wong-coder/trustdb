@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func TestEmitBenchIngestResultWritesReportFile(t *testing.T) {
@@ -153,5 +156,150 @@ func TestBenchCompareCommandJSON(t *testing.T) {
 	}
 	if result.Summary.Submitted.Delta != 2 {
 		t.Fatalf("submitted delta = %+v", result.Summary.Submitted)
+	}
+}
+
+func TestEvaluateBenchCompareAssertions(t *testing.T) {
+	t.Parallel()
+
+	flags := pflag.NewFlagSet("bench-compare", pflag.ContinueOnError)
+	flags.Float64("min-candidate-throughput", 0, "")
+	flags.Float64("max-throughput-regression-pct", 0, "")
+	flags.Float64("max-duration-regression-pct", 0, "")
+	flags.Float64("max-submit-p95-regression-pct", 0, "")
+	flags.Float64("max-candidate-submit-p95-ms", 0, "")
+	flags.Int("max-candidate-failed", 0, "")
+	flags.Int("max-candidate-batch-errors", 0, "")
+	flags.Int("max-candidate-query-failed", 0, "")
+	flags.Int("max-candidate-proof-timeouts", 0, "")
+	flags.Int("max-candidate-proof-failed", 0, "")
+	args := []string{
+		"--min-candidate-throughput=90",
+		"--max-throughput-regression-pct=15",
+		"--max-duration-regression-pct=10",
+		"--max-submit-p95-regression-pct=25",
+		"--max-candidate-submit-p95-ms=18",
+		"--max-candidate-failed=1",
+		"--max-candidate-batch-errors=0",
+		"--max-candidate-query-failed=0",
+		"--max-candidate-proof-timeouts=0",
+		"--max-candidate-proof-failed=0",
+	}
+	if err := flags.Parse(args); err != nil {
+		t.Fatalf("flags.Parse(): %v", err)
+	}
+	cmd := &cobra.Command{Use: "compare"}
+	cmd.Flags().AddFlagSet(flags)
+
+	result := compareBenchIngestResults("baseline.json", "candidate.json",
+		benchIngestResult{
+			SchemaVersion:    benchIngestReportSchema,
+			Submitted:        10,
+			Failed:           0,
+			BatchErrors:      0,
+			DurationSeconds:  10,
+			ThroughputPerSec: 100,
+			SubmitLatency:    benchLatencySummary{P95Ms: 10},
+			QuerySamples:     benchQuerySummary{Failed: 0},
+			ProofSamples:     benchProofSummary{Timeouts: 0, Failed: 0},
+		},
+		benchIngestResult{
+			SchemaVersion:    benchIngestReportSchema,
+			Submitted:        10,
+			Failed:           2,
+			BatchErrors:      1,
+			DurationSeconds:  12,
+			ThroughputPerSec: 80,
+			SubmitLatency:    benchLatencySummary{P95Ms: 20},
+			QuerySamples:     benchQuerySummary{Failed: 1},
+			ProofSamples:     benchProofSummary{Timeouts: 1, Failed: 1},
+		},
+	)
+
+	assertions := evaluateBenchCompareAssertions(cmd, benchCompareConfig{
+		MinCandidateThroughput:     90,
+		MaxThroughputRegressionPct: 15,
+		MaxDurationRegressionPct:   10,
+		MaxSubmitP95RegressionPct:  25,
+		MaxCandidateSubmitP95Ms:    18,
+		MaxCandidateFailed:         1,
+		MaxCandidateBatchErrors:    0,
+		MaxCandidateQueryFailed:    0,
+		MaxCandidateProofTimeouts:  0,
+		MaxCandidateProofFailed:    0,
+	}, result)
+	if assertions == nil {
+		t.Fatalf("assertions = nil")
+	}
+	if assertions.Passed {
+		t.Fatalf("assertions should fail: %+v", assertions)
+	}
+	if assertions.FailedCount != len(assertions.Checks) {
+		t.Fatalf("failed count = %d, want %d", assertions.FailedCount, len(assertions.Checks))
+	}
+	if err := benchCompareAssertionsError(assertions); err == nil || !strings.Contains(err.Error(), "assertions failed") {
+		t.Fatalf("benchCompareAssertionsError() = %v, want failure", err)
+	}
+}
+
+func TestBenchCompareCommandJSONWithAssertionsFailure(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	baselinePath := filepath.Join(tmp, "baseline.json")
+	candidatePath := filepath.Join(tmp, "candidate.json")
+	if err := writeJSONFile(baselinePath, benchIngestResult{
+		SchemaVersion:    benchIngestReportSchema,
+		Endpoint:         "http://baseline",
+		Transport:        "http",
+		Submitted:        10,
+		Failed:           0,
+		ThroughputPerSec: 100,
+		SubmitLatency:    benchLatencySummary{P95Ms: 10},
+		ProofSamples:     benchProofSummary{Timeouts: 0, Failed: 0},
+	}); err != nil {
+		t.Fatalf("write baseline report: %v", err)
+	}
+	if err := writeJSONFile(candidatePath, benchIngestResult{
+		SchemaVersion:    benchIngestReportSchema,
+		Endpoint:         "http://candidate",
+		Transport:        "grpc",
+		Submitted:        10,
+		Failed:           2,
+		ThroughputPerSec: 70,
+		SubmitLatency:    benchLatencySummary{P95Ms: 20},
+		QuerySamples:     benchQuerySummary{Failed: 1},
+		ProofSamples:     benchProofSummary{Timeouts: 1, Failed: 1},
+	}); err != nil {
+		t.Fatalf("write candidate report: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"bench", "compare",
+		"--baseline", baselinePath,
+		"--candidate", candidatePath,
+		"--output", "json",
+		"--max-throughput-regression-pct", "20",
+		"--max-candidate-failed", "0",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("bench compare execute error = nil, want assertion failure")
+	}
+	if !strings.Contains(err.Error(), "assertions failed") {
+		t.Fatalf("bench compare error = %v", err)
+	}
+
+	var result benchCompareResult
+	if jsonErr := json.Unmarshal(out.Bytes(), &result); jsonErr != nil {
+		t.Fatalf("json.Unmarshal(compare output): %v body=%q", jsonErr, out.String())
+	}
+	if result.Assertions == nil || result.Assertions.Passed {
+		t.Fatalf("assertions missing or unexpectedly passed: %+v", result.Assertions)
+	}
+	if result.Assertions.FailedCount != 2 {
+		t.Fatalf("failed count = %d, want 2", result.Assertions.FailedCount)
 	}
 }
