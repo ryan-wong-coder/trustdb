@@ -136,6 +136,76 @@ jobs:
       - name: Run e2e tests
         run: go test -count=1 -mod=readonly -tags=e2e ./...
 
+  backend-bench-smoke:
+    name: Backend bench smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run bench smoke artifact flow
+        env:
+          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ runner.temp }}/trustdb-bench
+        run: go test -count=1 -mod=readonly -tags=e2e ./cmd/trustdb -run TestBenchCIArtifactFlow
+
+      - name: Write bench summary
+        env:
+          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ runner.temp }}/trustdb-bench
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["TRUSTDB_BENCH_ARTIFACT_DIR"])
+          compare_path = root / "compare.json"
+          matrix_path = root / "matrix" / "matrix-summary.json"
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+
+          lines = ["## Bench Smoke"]
+          if compare_path.exists():
+              compare = json.loads(compare_path.read_text(encoding="utf-8"))
+              candidate = compare.get("candidate", {})
+              assertions = compare.get("assertions") or {}
+              lines.extend([
+                  "",
+                  f"- candidate throughput: {candidate.get('throughput_per_sec', 0):.2f} ops/s",
+                  f"- candidate duration: {candidate.get('duration_seconds', 0):.3f} s",
+                  f"- candidate failed: {candidate.get('failed', 0)}",
+                  f"- assertions passed: {assertions.get('passed', False)}",
+                  f"- assertion failures: {assertions.get('failed_count', 0)}",
+              ])
+          if matrix_path.exists():
+              matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+              summary = matrix.get("summary", {})
+              lines.extend([
+                  "",
+                  "### Matrix",
+                  f"- case count: {summary.get('case_count', 0)}",
+                  f"- total submitted: {summary.get('total_submitted', 0)}",
+                  f"- average throughput: {summary.get('average_throughput_per_sec', 0):.2f} ops/s",
+                  f"- fastest case: {summary.get('fastest_case_name', '')}",
+              ])
+          summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload bench smoke artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trustdb-bench-smoke
+          path: ${{ runner.temp }}/trustdb-bench
+          if-no-files-found: error
+
   desktop-go:
     name: Desktop Go tests
     runs-on: ubuntu-latest

@@ -30,6 +30,8 @@ import (
 	"google.golang.org/grpc"
 )
 
+const trustdbBenchArtifactDirEnv = "TRUSTDB_BENCH_ARTIFACT_DIR"
+
 func TestBenchIngestCollectsPebbleMetricsOverHTTPAndGRPC(t *testing.T) {
 	t.Parallel()
 
@@ -194,6 +196,147 @@ func TestBenchMatrixCommandWritesCaseReports(t *testing.T) {
 	}
 }
 
+func TestBenchCIArtifactFlow(t *testing.T) {
+	env := newBenchPebbleE2EEnv(t)
+	tmp := t.TempDir()
+	keyPath := filepath.Join(tmp, "client.key")
+	if err := writeKey(keyPath, env.identity.PrivateKey); err != nil {
+		t.Fatalf("writeKey: %v", err)
+	}
+
+	artifactDir := strings.TrimSpace(os.Getenv(trustdbBenchArtifactDirEnv))
+	if artifactDir == "" {
+		artifactDir = filepath.Join(tmp, "artifacts")
+	}
+	if err := ensureDir(artifactDir); err != nil {
+		t.Fatalf("ensureDir(%q): %v", artifactDir, err)
+	}
+	matrixDir := filepath.Join(artifactDir, "matrix")
+	if err := ensureDir(matrixDir); err != nil {
+		t.Fatalf("ensureDir(%q): %v", matrixDir, err)
+	}
+
+	baselinePath := filepath.Join(artifactDir, "baseline.json")
+	candidatePath := filepath.Join(artifactDir, "candidate.json")
+	comparePath := filepath.Join(artifactDir, "compare.json")
+	matrixStdoutPath := filepath.Join(artifactDir, "matrix-result.json")
+	matrixPath := filepath.Join(tmp, "ci-matrix.json")
+	if err := os.WriteFile(matrixPath, []byte(`{
+  "schema_version": "`+benchMatrixConfigSchema+`",
+  "defaults": {
+    "proof_level": "L5",
+    "proof_timeout": "10s",
+    "settle": "250ms",
+    "event_type": "bench.ci.matrix",
+    "source": "bench-ci"
+  },
+  "cases": [
+    {"name": "http-small", "count": 2, "concurrency": 1, "payload_bytes": 128, "samples": 1},
+    {"name": "http-medium", "count": 3, "concurrency": 2, "payload_bytes": 256, "samples": 1}
+  ]
+}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(matrix): %v", err)
+	}
+
+	if _, _, err := runBenchCLICommand(t, []string{
+		"bench", "ingest",
+		"--server", env.httpURL,
+		"--transport", "http",
+		"--tenant", env.identity.TenantID,
+		"--client", env.identity.ClientID,
+		"--key-id", env.identity.KeyID,
+		"--private-key", keyPath,
+		"--count", "2",
+		"--concurrency", "1",
+		"--payload-bytes", "128",
+		"--samples", "1",
+		"--proof-level", "L5",
+		"--proof-timeout", "10s",
+		"--settle", "250ms",
+		"--event-type", "bench.ci.baseline",
+		"--source", "bench-ci",
+		"--report-file", baselinePath,
+		"--output", "json",
+	}); err != nil {
+		t.Fatalf("bench ingest baseline: %v", err)
+	}
+
+	if _, _, err := runBenchCLICommand(t, []string{
+		"bench", "ingest",
+		"--server", env.httpURL,
+		"--transport", "http",
+		"--tenant", env.identity.TenantID,
+		"--client", env.identity.ClientID,
+		"--key-id", env.identity.KeyID,
+		"--private-key", keyPath,
+		"--count", "3",
+		"--concurrency", "2",
+		"--payload-bytes", "256",
+		"--samples", "1",
+		"--proof-level", "L5",
+		"--proof-timeout", "10s",
+		"--settle", "250ms",
+		"--event-type", "bench.ci.candidate",
+		"--source", "bench-ci",
+		"--report-file", candidatePath,
+		"--output", "json",
+	}); err != nil {
+		t.Fatalf("bench ingest candidate: %v", err)
+	}
+
+	compareOut, _, err := runBenchCLICommand(t, []string{
+		"bench", "compare",
+		"--baseline", baselinePath,
+		"--candidate", candidatePath,
+		"--output", "json",
+		"--min-candidate-throughput", "1",
+		"--max-candidate-failed", "0",
+		"--max-candidate-batch-errors", "0",
+		"--max-candidate-query-failed", "0",
+		"--max-candidate-proof-timeouts", "0",
+		"--max-candidate-proof-failed", "0",
+	})
+	if err != nil {
+		t.Fatalf("bench compare: %v", err)
+	}
+	if err := os.WriteFile(comparePath, compareOut.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile(compare): %v", err)
+	}
+
+	matrixOut, _, err := runBenchCLICommand(t, []string{
+		"bench", "matrix",
+		"--server", env.httpURL,
+		"--transport", "http",
+		"--tenant", env.identity.TenantID,
+		"--client", env.identity.ClientID,
+		"--key-id", env.identity.KeyID,
+		"--private-key", keyPath,
+		"--matrix-file", matrixPath,
+		"--report-dir", matrixDir,
+		"--output", "json",
+	})
+	if err != nil {
+		t.Fatalf("bench matrix: %v", err)
+	}
+	if err := os.WriteFile(matrixStdoutPath, matrixOut.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile(matrix stdout): %v", err)
+	}
+
+	for _, path := range []string{
+		baselinePath,
+		candidatePath,
+		comparePath,
+		matrixStdoutPath,
+		filepath.Join(matrixDir, "matrix-summary.json"),
+		filepath.Join(matrixDir, "01-http-small.json"),
+		filepath.Join(matrixDir, "02-http-medium.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("artifact %q missing: %v", path, err)
+		}
+	}
+}
+
 type benchPebbleE2EEnv struct {
 	httpURL    string
 	grpcTarget string
@@ -346,4 +489,13 @@ func findBenchMetric(metrics []benchMetricDelta, name string) (benchMetricDelta,
 		}
 	}
 	return benchMetricDelta{}, false
+}
+
+func runBenchCLICommand(t *testing.T, args []string) (*bytes.Buffer, *bytes.Buffer, error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return &out, &errOut, err
 }
