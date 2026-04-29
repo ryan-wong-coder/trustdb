@@ -94,6 +94,16 @@ func (s *Store) Close() error {
 	return s.closeErr
 }
 
+// PebbleMetrics returns a point-in-time snapshot of the underlying
+// Pebble engine metrics. The snapshot is cheap to read and safe for
+// concurrent use by observability collectors.
+func (s *Store) PebbleMetrics() *pdb.Metrics {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Metrics()
+}
+
 // bundleKey returns the Pebble key used to store a proof bundle. The
 // record_id is written raw because Pebble, unlike the filesystem, has
 // no filename escaping constraints.

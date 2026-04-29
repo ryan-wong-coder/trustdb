@@ -504,6 +504,7 @@ var benchMetricPrefixes = []string{
 	"trustdb_wal_active_segment_id",
 	"trustdb_wal_segments_total",
 	"trustdb_wal_bytes_pruned_total",
+	"trustdb_pebble_",
 	"go_goroutines",
 	"go_memstats_alloc_bytes",
 	"go_memstats_heap_alloc_bytes",

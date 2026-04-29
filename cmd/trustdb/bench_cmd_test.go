@@ -22,6 +22,9 @@ func TestParseBenchMetrics(t *testing.T) {
 # HELP trustdb_ingest_requests_total Total ingest requests by result.
 # TYPE trustdb_ingest_requests_total counter
 trustdb_ingest_requests_total{result="accepted"} 12
+# HELP trustdb_pebble_compactions_total Total number of Pebble compactions since the database was opened.
+# TYPE trustdb_pebble_compactions_total counter
+trustdb_pebble_compactions_total 4
 # HELP trustdb_queue_depth Current queue depth by queue name.
 # TYPE trustdb_queue_depth gauge
 trustdb_queue_depth{queue="ingest"} 3
@@ -48,6 +51,9 @@ trustdb_batch_commit_latency_seconds_count 2
 	}
 	if got := metrics[`trustdb_batch_commit_latency_seconds_sum`]; got != 0.012 {
 		t.Fatalf("batch sum = %v", got)
+	}
+	if got := metrics[`trustdb_pebble_compactions_total`]; got != 4 {
+		t.Fatalf("pebble compactions = %v", got)
 	}
 }
 
