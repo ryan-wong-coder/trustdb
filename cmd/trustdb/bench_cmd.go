@@ -29,6 +29,7 @@ func newBenchCommand(rt *runtimeConfig) *cobra.Command {
 		Short: "Benchmark ingest and proof/query paths against a TrustDB server",
 	}
 	cmd.AddCommand(newBenchIngestCommand(rt))
+	cmd.AddCommand(newBenchCompareCommand(rt))
 	return cmd
 }
 
@@ -99,6 +100,7 @@ func newBenchIngestCommand(rt *runtimeConfig) *cobra.Command {
 			if cfg.OutputFormat != "json" && cfg.OutputFormat != "text" {
 				return usageError("bench ingest --output must be json or text")
 			}
+			cfg.ReportFile = strings.TrimSpace(cfg.ReportFile)
 
 			priv, err := readPrivateKey(cfg.PrivateKeyPath)
 			if err != nil {
@@ -117,11 +119,7 @@ func newBenchIngestCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if cfg.OutputFormat == "text" {
-				writeBenchIngestText(rt.out, result)
-				return nil
-			}
-			return rt.writeJSON(result)
+			return emitBenchIngestResult(rt, cfg, result)
 		},
 	}
 	cmd.Flags().StringVar(&cfg.Endpoint, "server", "", "TrustDB server HTTP base URL or gRPC target")
@@ -139,6 +137,7 @@ func newBenchIngestCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().StringVar(&cfg.EventType, "event-type", "bench.synthetic", "metadata.event_type for synthetic claims")
 	cmd.Flags().StringVar(&cfg.Source, "source", "trustdb-bench", "metadata.source for synthetic claims")
 	cmd.Flags().StringVar(&cfg.OutputFormat, "output", "json", "output format: json or text")
+	cmd.Flags().StringVar(&cfg.ReportFile, "report-file", "", "optional JSON report path to persist the ingest benchmark result")
 	return cmd
 }
 
@@ -158,9 +157,11 @@ type benchIngestConfig struct {
 	EventType      string
 	Source         string
 	OutputFormat   string
+	ReportFile     string
 }
 
 type benchIngestResult struct {
+	SchemaVersion    string              `json:"schema_version"`
 	Endpoint         string              `json:"endpoint"`
 	Transport        string              `json:"transport"`
 	Count            int                 `json:"count"`
@@ -401,6 +402,7 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 	finished := time.Now().UTC()
 	duration := finished.Sub(started)
 	result := benchIngestResult{
+		SchemaVersion:   benchIngestReportSchema,
 		Endpoint:        cfg.Endpoint,
 		Transport:       cfg.Transport,
 		Count:           cfg.Count,
