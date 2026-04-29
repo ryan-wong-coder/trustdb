@@ -174,12 +174,17 @@ jobs:
           lines = ["## Bench Smoke"]
           if compare_path.exists():
               compare = json.loads(compare_path.read_text(encoding="utf-8"))
+              baseline = compare.get("baseline", {})
               candidate = compare.get("candidate", {})
+              summary = compare.get("summary", {})
               assertions = compare.get("assertions") or {}
               lines.extend([
                   "",
+                  f"- baseline throughput: {baseline.get('throughput_per_sec', 0):.2f} ops/s",
                   f"- candidate throughput: {candidate.get('throughput_per_sec', 0):.2f} ops/s",
+                  f"- throughput delta: {summary.get('throughput_per_sec', {}).get('delta', 0):.2f} ops/s",
                   f"- candidate duration: {candidate.get('duration_seconds', 0):.3f} s",
+                  f"- submit p95 delta: {summary.get('submit_p95_ms', {}).get('delta', 0):.2f} ms",
                   f"- candidate failed: {candidate.get('failed', 0)}",
                   f"- assertions passed: {assertions.get('passed', False)}",
                   f"- assertion failures: {assertions.get('failed_count', 0)}",
