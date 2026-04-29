@@ -7,18 +7,21 @@ const MaxMessageBytes = 16 << 20
 const ServiceName = "trustdb.v1.TrustDB"
 
 const (
-	FullMethodHealth         = "/" + ServiceName + "/Health"
-	FullMethodSubmitClaim    = "/" + ServiceName + "/SubmitClaim"
-	FullMethodGetRecord      = "/" + ServiceName + "/GetRecord"
-	FullMethodListRecords    = "/" + ServiceName + "/ListRecords"
-	FullMethodGetProofBundle = "/" + ServiceName + "/GetProofBundle"
-	FullMethodListRoots      = "/" + ServiceName + "/ListRoots"
-	FullMethodLatestRoot     = "/" + ServiceName + "/LatestRoot"
-	FullMethodLatestSTH      = "/" + ServiceName + "/LatestSTH"
-	FullMethodGetSTH         = "/" + ServiceName + "/GetSTH"
-	FullMethodGetGlobalProof = "/" + ServiceName + "/GetGlobalProof"
-	FullMethodGetAnchor      = "/" + ServiceName + "/GetAnchor"
-	FullMethodMetrics        = "/" + ServiceName + "/Metrics"
+	FullMethodHealth           = "/" + ServiceName + "/Health"
+	FullMethodSubmitClaim      = "/" + ServiceName + "/SubmitClaim"
+	FullMethodGetRecord        = "/" + ServiceName + "/GetRecord"
+	FullMethodListRecords      = "/" + ServiceName + "/ListRecords"
+	FullMethodGetProofBundle   = "/" + ServiceName + "/GetProofBundle"
+	FullMethodListRoots        = "/" + ServiceName + "/ListRoots"
+	FullMethodLatestRoot       = "/" + ServiceName + "/LatestRoot"
+	FullMethodListSTHs         = "/" + ServiceName + "/ListSTHs"
+	FullMethodLatestSTH        = "/" + ServiceName + "/LatestSTH"
+	FullMethodGetSTH           = "/" + ServiceName + "/GetSTH"
+	FullMethodListGlobalLeaves = "/" + ServiceName + "/ListGlobalLeaves"
+	FullMethodGetGlobalProof   = "/" + ServiceName + "/GetGlobalProof"
+	FullMethodListAnchors      = "/" + ServiceName + "/ListAnchors"
+	FullMethodGetAnchor        = "/" + ServiceName + "/GetAnchor"
+	FullMethodMetrics          = "/" + ServiceName + "/Metrics"
 )
 
 type HealthRequest struct{}
@@ -57,6 +60,7 @@ type ListRecordsRequest struct {
 	BatchID           string `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
 	TenantID          string `cbor:"tenant_id,omitempty" json:"tenant_id,omitempty"`
 	ClientID          string `cbor:"client_id,omitempty" json:"client_id,omitempty"`
+	ProofLevel        string `cbor:"proof_level,omitempty" json:"proof_level,omitempty"`
 	Query             string `cbor:"query,omitempty" json:"query,omitempty"`
 	ContentHashHex    string `cbor:"content_hash_hex,omitempty" json:"content_hash_hex,omitempty"`
 	ReceivedFromUnixN int64  `cbor:"received_from_unix_nano,omitempty" json:"received_from_unix_nano,omitempty"`
@@ -81,13 +85,16 @@ type GetProofBundleResponse struct {
 }
 
 type ListRootsRequest struct {
-	Limit int   `cbor:"limit" json:"limit"`
-	After int64 `cbor:"after,omitempty" json:"after,omitempty"`
+	Limit     int    `cbor:"limit" json:"limit"`
+	Direction string `cbor:"direction" json:"direction"`
+	Cursor    string `cbor:"cursor,omitempty" json:"cursor,omitempty"`
+	After     int64  `cbor:"after,omitempty" json:"after,omitempty"`
 }
 
 type ListRootsResponse struct {
 	Roots      []model.BatchRoot `cbor:"roots" json:"roots"`
 	Limit      int               `cbor:"limit" json:"limit"`
+	Direction  string            `cbor:"direction" json:"direction"`
 	NextCursor string            `cbor:"next_cursor,omitempty" json:"next_cursor,omitempty"`
 }
 
@@ -111,6 +118,19 @@ type GetSTHResponse struct {
 	STH model.SignedTreeHead `cbor:"sth" json:"sth"`
 }
 
+type ListSTHsRequest struct {
+	Limit     int    `cbor:"limit" json:"limit"`
+	Direction string `cbor:"direction" json:"direction"`
+	Cursor    string `cbor:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+type ListSTHsResponse struct {
+	STHs       []model.SignedTreeHead `cbor:"sths" json:"sths"`
+	Limit      int                    `cbor:"limit" json:"limit"`
+	Direction  string                 `cbor:"direction" json:"direction"`
+	NextCursor string                 `cbor:"next_cursor,omitempty" json:"next_cursor,omitempty"`
+}
+
 type GetGlobalProofRequest struct {
 	BatchID  string `cbor:"batch_id" json:"batch_id"`
 	TreeSize uint64 `cbor:"tree_size,omitempty" json:"tree_size,omitempty"`
@@ -118,6 +138,19 @@ type GetGlobalProofRequest struct {
 
 type GetGlobalProofResponse struct {
 	Proof model.GlobalLogProof `cbor:"proof" json:"proof"`
+}
+
+type ListGlobalLeavesRequest struct {
+	Limit     int    `cbor:"limit" json:"limit"`
+	Direction string `cbor:"direction" json:"direction"`
+	Cursor    string `cbor:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+type ListGlobalLeavesResponse struct {
+	Leaves     []model.GlobalLogLeaf `cbor:"leaves" json:"leaves"`
+	Limit      int                   `cbor:"limit" json:"limit"`
+	Direction  string                `cbor:"direction" json:"direction"`
+	NextCursor string                `cbor:"next_cursor,omitempty" json:"next_cursor,omitempty"`
 }
 
 type GetAnchorRequest struct {
@@ -130,6 +163,19 @@ type GetAnchorResponse struct {
 	ProofLevel string                     `cbor:"proof_level" json:"proof_level"`
 	Result     *model.STHAnchorResult     `cbor:"result,omitempty" json:"result,omitempty"`
 	Outbox     *model.STHAnchorOutboxItem `cbor:"outbox,omitempty" json:"outbox,omitempty"`
+}
+
+type ListAnchorsRequest struct {
+	Limit     int    `cbor:"limit" json:"limit"`
+	Direction string `cbor:"direction" json:"direction"`
+	Cursor    string `cbor:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+type ListAnchorsResponse struct {
+	Anchors    []GetAnchorResponse `cbor:"anchors" json:"anchors"`
+	Limit      int                 `cbor:"limit" json:"limit"`
+	Direction  string              `cbor:"direction" json:"direction"`
+	NextCursor string              `cbor:"next_cursor,omitempty" json:"next_cursor,omitempty"`
 }
 
 type MetricsRequest struct{}

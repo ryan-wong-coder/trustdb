@@ -26,3 +26,7 @@ func (a *API) AnchorResult(ctx context.Context, treeSize uint64) (model.STHAncho
 func (a *API) AnchorStatus(ctx context.Context, treeSize uint64) (model.STHAnchorOutboxItem, bool, error) {
 	return a.Store.GetSTHAnchorOutboxItem(ctx, treeSize)
 }
+
+func (a *API) Anchors(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error) {
+	return a.Store.ListSTHAnchorsPage(ctx, opts)
+}

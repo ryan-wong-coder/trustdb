@@ -38,6 +38,7 @@ type BatchService interface {
 	Records(context.Context, model.RecordListOptions) ([]model.RecordIndex, error)
 	Roots(context.Context, int) ([]model.BatchRoot, error)
 	RootsAfter(context.Context, int64, int) ([]model.BatchRoot, error)
+	RootsPage(context.Context, model.RootListOptions) ([]model.BatchRoot, error)
 	LatestRoot(context.Context) (model.BatchRoot, error)
 }
 
@@ -47,11 +48,14 @@ type BatchService interface {
 type AnchorService interface {
 	AnchorResult(context.Context, uint64) (model.STHAnchorResult, bool, error)
 	AnchorStatus(context.Context, uint64) (model.STHAnchorOutboxItem, bool, error)
+	Anchors(context.Context, model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error)
 }
 
 type GlobalLogService interface {
 	LatestSTH(context.Context) (model.SignedTreeHead, bool, error)
 	STH(context.Context, uint64) (model.SignedTreeHead, bool, error)
+	ListSTHs(context.Context, model.TreeHeadListOptions) ([]model.SignedTreeHead, error)
+	ListLeaves(context.Context, model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error)
 	InclusionProof(context.Context, string, uint64) (model.GlobalLogProof, error)
 	ConsistencyProof(context.Context, uint64, uint64) (model.GlobalConsistencyProof, error)
 }
@@ -80,6 +84,7 @@ type proofResponse struct {
 type rootsResponse struct {
 	Roots      []model.BatchRoot `json:"roots"`
 	Limit      int               `json:"limit"`
+	Direction  string            `json:"direction"`
 	NextCursor string            `json:"next_cursor,omitempty"`
 }
 
@@ -88,6 +93,27 @@ type recordsResponse struct {
 	Limit      int                 `json:"limit"`
 	Direction  string              `json:"direction"`
 	NextCursor string              `json:"next_cursor,omitempty"`
+}
+
+type sthsResponse struct {
+	STHs       []model.SignedTreeHead `json:"sths"`
+	Limit      int                    `json:"limit"`
+	Direction  string                 `json:"direction"`
+	NextCursor string                 `json:"next_cursor,omitempty"`
+}
+
+type globalLeavesResponse struct {
+	Leaves     []model.GlobalLogLeaf `json:"leaves"`
+	Limit      int                   `json:"limit"`
+	Direction  string                `json:"direction"`
+	NextCursor string                `json:"next_cursor,omitempty"`
+}
+
+type anchorsResponse struct {
+	Anchors    []anchorResponse `json:"anchors"`
+	Limit      int              `json:"limit"`
+	Direction  string           `json:"direction"`
+	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
 type anchorResponse struct {
@@ -150,12 +176,15 @@ func buildMux(h Handler) http.Handler {
 	mux.HandleFunc("GET /v1/roots", h.listRoots)
 	mux.HandleFunc("GET /v1/roots/latest", h.latestRoot)
 	if h.Global != nil {
+		mux.HandleFunc("GET /v1/sth", h.listSTHs)
 		mux.HandleFunc("GET /v1/sth/latest", h.latestSTH)
 		mux.HandleFunc("GET /v1/sth/{tree_size}", h.getSTH)
+		mux.HandleFunc("GET /v1/global-log/leaves", h.listGlobalLeaves)
 		mux.HandleFunc("GET /v1/global-log/inclusion/{batch_id}", h.getGlobalInclusion)
 		mux.HandleFunc("GET /v1/global-log/consistency", h.getGlobalConsistency)
 	}
 	if h.Anchors != nil {
+		mux.HandleFunc("GET /v1/anchors/sth", h.listAnchors)
 		mux.HandleFunc("GET /v1/anchors/sth/{tree_size}", h.getAnchor)
 	}
 	if h.Metrics != nil {
@@ -283,42 +312,21 @@ func (h Handler) listRoots(w http.ResponseWriter, r *http.Request) {
 		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
 		return
 	}
-	limit := 100
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 || parsed > 1000 {
-			writeError(w, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000"))
-			return
-		}
-		limit = parsed
+	opts, err := parseRootListOptions(r)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
-	after := int64(0)
-	if raw := r.URL.Query().Get("after"); raw != "" {
-		parsed, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || parsed < 0 {
-			writeError(w, trusterr.New(trusterr.CodeInvalidArgument, "after must be a non-negative unix nano cursor"))
-			return
-		}
-		after = parsed
-	}
-	var (
-		roots []model.BatchRoot
-		err   error
-	)
-	if after > 0 {
-		roots, err = h.Batch.RootsAfter(r.Context(), after, limit)
-	} else {
-		roots, err = h.Batch.Roots(r.Context(), limit)
-	}
+	roots, err := h.Batch.RootsPage(r.Context(), opts)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	next := ""
-	if after > 0 && len(roots) == limit {
-		next = strconv.FormatInt(roots[len(roots)-1].ClosedAtUnixN, 10)
+	if len(roots) == opts.Limit {
+		next = encodeRootCursor(roots[len(roots)-1])
 	}
-	writeJSON(w, http.StatusOK, rootsResponse{Roots: roots, Limit: limit, NextCursor: next})
+	writeJSON(w, http.StatusOK, rootsResponse{Roots: roots, Limit: opts.Limit, Direction: opts.Direction, NextCursor: next})
 }
 
 func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
@@ -339,13 +347,18 @@ func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
 		return model.RecordListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "direction must be asc or desc")
 	}
 	opts := model.RecordListOptions{
-		Limit:     limit,
-		Direction: direction,
-		BatchID:   r.URL.Query().Get("batch_id"),
-		TenantID:  r.URL.Query().Get("tenant_id"),
-		ClientID:  r.URL.Query().Get("client_id"),
-		Query:     strings.TrimSpace(r.URL.Query().Get("q")),
+		Limit:      limit,
+		Direction:  direction,
+		BatchID:    r.URL.Query().Get("batch_id"),
+		TenantID:   r.URL.Query().Get("tenant_id"),
+		ClientID:   r.URL.Query().Get("client_id"),
+		ProofLevel: strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("level"))),
+		Query:      strings.TrimSpace(r.URL.Query().Get("q")),
 	}
+	if opts.ProofLevel != "" && model.NormalizedProofLevel(opts.ProofLevel) == "" {
+		return model.RecordListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "level must be one of L1-L5")
+	}
+	opts.ProofLevel = model.NormalizedProofLevel(opts.ProofLevel)
 	if opts.BatchID == "" && strings.HasPrefix(strings.ToLower(opts.Query), "batch-") {
 		opts.BatchID = opts.Query
 		opts.Query = ""
@@ -385,6 +398,111 @@ func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
 		}
 		opts.AfterReceivedAtUnixN = cursor.ReceivedAtUnixN
 		opts.AfterRecordID = cursor.RecordID
+	}
+	return opts, nil
+}
+
+func parseRootListOptions(r *http.Request) (model.RootListOptions, error) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			return model.RootListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000")
+		}
+		limit = parsed
+	}
+	direction, err := parseDirection(r.URL.Query().Get("direction"))
+	if err != nil {
+		return model.RootListOptions{}, err
+	}
+	opts := model.RootListOptions{Limit: limit, Direction: direction}
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		cursor, err := decodeRootCursor(raw)
+		if err != nil {
+			return model.RootListOptions{}, err
+		}
+		opts.AfterClosedAtUnixN = cursor.ClosedAtUnixN
+		opts.AfterBatchID = cursor.BatchID
+		return opts, nil
+	}
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			return model.RootListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "after must be a non-negative unix nano cursor")
+		}
+		opts.AfterClosedAtUnixN = parsed
+	}
+	return opts, nil
+}
+
+func parseTreeHeadListOptions(r *http.Request) (model.TreeHeadListOptions, error) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			return model.TreeHeadListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000")
+		}
+		limit = parsed
+	}
+	direction, err := parseDirection(r.URL.Query().Get("direction"))
+	if err != nil {
+		return model.TreeHeadListOptions{}, err
+	}
+	opts := model.TreeHeadListOptions{Limit: limit, Direction: direction}
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		cursor, err := decodeUint64Cursor(raw)
+		if err != nil {
+			return model.TreeHeadListOptions{}, err
+		}
+		opts.AfterTreeSize = cursor.Value
+	}
+	return opts, nil
+}
+
+func parseGlobalLeafListOptions(r *http.Request) (model.GlobalLeafListOptions, error) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			return model.GlobalLeafListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000")
+		}
+		limit = parsed
+	}
+	direction, err := parseDirection(r.URL.Query().Get("direction"))
+	if err != nil {
+		return model.GlobalLeafListOptions{}, err
+	}
+	opts := model.GlobalLeafListOptions{Limit: limit, Direction: direction}
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		cursor, err := decodeUint64Cursor(raw)
+		if err != nil {
+			return model.GlobalLeafListOptions{}, err
+		}
+		opts.AfterLeafIndex = cursor.Value
+	}
+	return opts, nil
+}
+
+func parseAnchorListOptions(r *http.Request) (model.AnchorListOptions, error) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			return model.AnchorListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000")
+		}
+		limit = parsed
+	}
+	direction, err := parseDirection(r.URL.Query().Get("direction"))
+	if err != nil {
+		return model.AnchorListOptions{}, err
+	}
+	opts := model.AnchorListOptions{Limit: limit, Direction: direction}
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		cursor, err := decodeUint64Cursor(raw)
+		if err != nil {
+			return model.AnchorListOptions{}, err
+		}
+		opts.AfterTreeSize = cursor.Value
 	}
 	return opts, nil
 }
@@ -466,6 +584,66 @@ func decodeRecordCursor(raw string) (recordCursor, error) {
 	return cursor, nil
 }
 
+type rootCursor struct {
+	ClosedAtUnixN int64  `json:"t"`
+	BatchID       string `json:"b"`
+}
+
+func encodeRootCursor(root model.BatchRoot) string {
+	data, err := json.Marshal(rootCursor{ClosedAtUnixN: root.ClosedAtUnixN, BatchID: root.BatchID})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeRootCursor(raw string) (rootCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return rootCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	var cursor rootCursor
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.BatchID == "" {
+		return rootCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	return cursor, nil
+}
+
+type uint64Cursor struct {
+	Value uint64 `json:"v"`
+}
+
+func encodeUint64Cursor(value uint64) string {
+	data, err := json.Marshal(uint64Cursor{Value: value})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeUint64Cursor(raw string) (uint64Cursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return uint64Cursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	var cursor uint64Cursor
+	if err := json.Unmarshal(data, &cursor); err != nil {
+		return uint64Cursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	return cursor, nil
+}
+
+func parseDirection(raw string) (string, error) {
+	switch raw {
+	case "":
+		return model.RecordListDirectionDesc, nil
+	case model.RecordListDirectionAsc, model.RecordListDirectionDesc:
+		return raw, nil
+	default:
+		return "", trusterr.New(trusterr.CodeInvalidArgument, "direction must be asc or desc")
+	}
+}
+
 func (h Handler) latestSTH(w http.ResponseWriter, r *http.Request) {
 	if h.Global == nil {
 		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
@@ -481,6 +659,33 @@ func (h Handler) latestSTH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sth)
+}
+
+func (h Handler) listSTHs(w http.ResponseWriter, r *http.Request) {
+	if h.Global == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+		return
+	}
+	opts, err := parseTreeHeadListOptions(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	sths, err := h.Global.ListSTHs(r.Context(), opts)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	next := ""
+	if len(sths) == opts.Limit {
+		next = encodeUint64Cursor(sths[len(sths)-1].TreeSize)
+	}
+	writeJSON(w, http.StatusOK, sthsResponse{
+		STHs:       sths,
+		Limit:      opts.Limit,
+		Direction:  opts.Direction,
+		NextCursor: next,
+	})
 }
 
 func (h Handler) getSTH(w http.ResponseWriter, r *http.Request) {
@@ -525,6 +730,33 @@ func (h Handler) getGlobalInclusion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, proof)
+}
+
+func (h Handler) listGlobalLeaves(w http.ResponseWriter, r *http.Request) {
+	if h.Global == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+		return
+	}
+	opts, err := parseGlobalLeafListOptions(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	leaves, err := h.Global.ListLeaves(r.Context(), opts)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	next := ""
+	if len(leaves) == opts.Limit {
+		next = encodeUint64Cursor(leaves[len(leaves)-1].LeafIndex)
+	}
+	writeJSON(w, http.StatusOK, globalLeavesResponse{
+		Leaves:     leaves,
+		Limit:      opts.Limit,
+		Direction:  opts.Direction,
+		NextCursor: next,
+	})
 }
 
 func (h Handler) getGlobalConsistency(w http.ResponseWriter, r *http.Request) {
@@ -584,6 +816,10 @@ func (h Handler) getAnchor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, trusterr.New(trusterr.CodeNotFound, "anchor not found for STH"))
 		return
 	}
+	writeJSON(w, http.StatusOK, buildAnchorResponse(treeSize, item, itemOK, result, resultOK))
+}
+
+func buildAnchorResponse(treeSize uint64, item model.STHAnchorOutboxItem, itemOK bool, result model.STHAnchorResult, resultOK bool) anchorResponse {
 	resp := anchorResponse{TreeSize: treeSize, ProofLevel: prooflevel.L5.String()}
 	switch {
 	case resultOK:
@@ -599,7 +835,43 @@ func (h Handler) getAnchor(w http.ResponseWriter, r *http.Request) {
 		it := item
 		resp.Outbox = &it
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp
+}
+
+func (h Handler) listAnchors(w http.ResponseWriter, r *http.Request) {
+	if h.Anchors == nil {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "anchor service is not configured"))
+		return
+	}
+	opts, err := parseAnchorListOptions(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	items, err := h.Anchors.Anchors(r.Context(), opts)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	anchors := make([]anchorResponse, 0, len(items))
+	for _, item := range items {
+		result, resultOK, err := h.Anchors.AnchorResult(r.Context(), item.TreeSize)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		anchors = append(anchors, buildAnchorResponse(item.TreeSize, item, true, result, resultOK))
+	}
+	next := ""
+	if len(items) == opts.Limit {
+		next = encodeUint64Cursor(items[len(items)-1].TreeSize)
+	}
+	writeJSON(w, http.StatusOK, anchorsResponse{
+		Anchors:    anchors,
+		Limit:      opts.Limit,
+		Direction:  opts.Direction,
+		NextCursor: next,
+	})
 }
 
 func (h Handler) latestRoot(w http.ResponseWriter, r *http.Request) {

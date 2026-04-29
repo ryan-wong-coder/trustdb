@@ -298,9 +298,6 @@ async function upgradeOts(r: LocalRecord) {
         <span class="rounded-full border border-accent/20 bg-accent/10 px-2.5 py-1 text-accent">
           {{ source === 'server' ? '服务端分页 · /v1/records' : '本地缓存' }}
         </span>
-        <span v-if="levelFilter && source === 'local'">
-          证明等级筛选目前走本地缓存；服务端 records index 不做 L4/L5 全量扫描。
-        </span>
         <span v-if="listError" class="text-warn">
           {{ listError }}
         </span>

@@ -23,6 +23,9 @@ func RecordIndexMatchesListOptions(idx RecordIndex, opts RecordListOptions) bool
 	if opts.ClientID != "" && idx.ClientID != opts.ClientID {
 		return false
 	}
+	if opts.ProofLevel != "" && RecordIndexProofLevel(idx) != opts.ProofLevel {
+		return false
+	}
 	if len(opts.ContentHash) > 0 && !bytes.Equal(idx.ContentHash, opts.ContentHash) {
 		return false
 	}

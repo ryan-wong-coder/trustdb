@@ -148,6 +148,7 @@ func (t *grpcTransport) ListRecords(ctx context.Context, opts ListRecordsOptions
 		BatchID:           opts.BatchID,
 		TenantID:          opts.TenantID,
 		ClientID:          opts.ClientID,
+		ProofLevel:        opts.ProofLevel,
 		Query:             opts.Query,
 		ContentHashHex:    opts.ContentHashHex,
 		ReceivedFromUnixN: opts.ReceivedFromUnixN,
@@ -170,12 +171,21 @@ func (t *grpcTransport) GetProofBundle(ctx context.Context, recordID string) (Pr
 	return out.ProofBundle, nil
 }
 
-func (t *grpcTransport) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
+func (t *grpcTransport) ListRootsPage(ctx context.Context, opts ListPageOptions) (RootPage, error) {
 	var out grpcapi.ListRootsResponse
-	if err := t.invoke(ctx, grpcapi.FullMethodListRoots, &grpcapi.ListRootsRequest{Limit: limit}, &out); err != nil {
+	in := grpcapi.ListRootsRequest{Limit: opts.Limit, Direction: opts.Direction, Cursor: opts.Cursor}
+	if err := t.invoke(ctx, grpcapi.FullMethodListRoots, &in, &out); err != nil {
+		return RootPage{}, err
+	}
+	return RootPage{Roots: out.Roots, Limit: out.Limit, Direction: out.Direction, NextCursor: out.NextCursor}, nil
+}
+
+func (t *grpcTransport) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
+	page, err := t.ListRootsPage(ctx, ListPageOptions{Limit: limit, Direction: RecordListDirectionDesc})
+	if err != nil {
 		return nil, err
 	}
-	return out.Roots, nil
+	return page.Roots, nil
 }
 
 func (t *grpcTransport) LatestRoot(ctx context.Context) (BatchRoot, error) {
@@ -192,6 +202,42 @@ func (t *grpcTransport) GetGlobalProof(ctx context.Context, batchID string) (Glo
 		return GlobalLogProof{}, err
 	}
 	return out.Proof, nil
+}
+
+func (t *grpcTransport) ListSTHs(ctx context.Context, opts ListPageOptions) (TreeHeadPage, error) {
+	var out grpcapi.ListSTHsResponse
+	in := grpcapi.ListSTHsRequest{Limit: opts.Limit, Direction: opts.Direction, Cursor: opts.Cursor}
+	if err := t.invoke(ctx, grpcapi.FullMethodListSTHs, &in, &out); err != nil {
+		return TreeHeadPage{}, err
+	}
+	return TreeHeadPage{STHs: out.STHs, Limit: out.Limit, Direction: out.Direction, NextCursor: out.NextCursor}, nil
+}
+
+func (t *grpcTransport) ListGlobalLeaves(ctx context.Context, opts ListPageOptions) (GlobalLeafPage, error) {
+	var out grpcapi.ListGlobalLeavesResponse
+	in := grpcapi.ListGlobalLeavesRequest{Limit: opts.Limit, Direction: opts.Direction, Cursor: opts.Cursor}
+	if err := t.invoke(ctx, grpcapi.FullMethodListGlobalLeaves, &in, &out); err != nil {
+		return GlobalLeafPage{}, err
+	}
+	return GlobalLeafPage{Leaves: out.Leaves, Limit: out.Limit, Direction: out.Direction, NextCursor: out.NextCursor}, nil
+}
+
+func (t *grpcTransport) ListAnchors(ctx context.Context, opts ListPageOptions) (AnchorPage, error) {
+	var out grpcapi.ListAnchorsResponse
+	in := grpcapi.ListAnchorsRequest{Limit: opts.Limit, Direction: opts.Direction, Cursor: opts.Cursor}
+	if err := t.invoke(ctx, grpcapi.FullMethodListAnchors, &in, &out); err != nil {
+		return AnchorPage{}, err
+	}
+	items := make([]AnchorPageItem, 0, len(out.Anchors))
+	for _, item := range out.Anchors {
+		items = append(items, AnchorPageItem{
+			TreeSize: item.TreeSize,
+			Status:   item.Status,
+			Result:   item.Result,
+			Outbox:   item.Outbox,
+		})
+	}
+	return AnchorPage{Anchors: items, Limit: out.Limit, Direction: out.Direction, NextCursor: out.NextCursor}, nil
 }
 
 func (t *grpcTransport) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {

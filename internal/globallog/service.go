@@ -28,12 +28,14 @@ type Store interface {
 	GetGlobalLeafByBatchID(context.Context, string) (model.GlobalLogLeaf, bool, error)
 	ListGlobalLeaves(context.Context) ([]model.GlobalLogLeaf, error)
 	ListGlobalLeavesRange(context.Context, uint64, int) ([]model.GlobalLogLeaf, error)
+	ListGlobalLeavesPage(context.Context, model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error)
 	PutGlobalLogNode(context.Context, model.GlobalLogNode) error
 	GetGlobalLogNode(context.Context, uint64, uint64) (model.GlobalLogNode, bool, error)
 	PutGlobalLogState(context.Context, model.GlobalLogState) error
 	GetGlobalLogState(context.Context) (model.GlobalLogState, bool, error)
 	PutSignedTreeHead(context.Context, model.SignedTreeHead) error
 	GetSignedTreeHead(context.Context, uint64) (model.SignedTreeHead, bool, error)
+	ListSignedTreeHeadsPage(context.Context, model.TreeHeadListOptions) ([]model.SignedTreeHead, error)
 	LatestSignedTreeHead(context.Context) (model.SignedTreeHead, bool, error)
 	PutGlobalLogTile(context.Context, model.GlobalLogTile) error
 	ListGlobalLogTiles(context.Context) ([]model.GlobalLogTile, error)
@@ -170,6 +172,14 @@ func (s *Service) LatestSTH(ctx context.Context) (model.SignedTreeHead, bool, er
 
 func (s *Service) STH(ctx context.Context, treeSize uint64) (model.SignedTreeHead, bool, error) {
 	return s.store.GetSignedTreeHead(ctx, treeSize)
+}
+
+func (s *Service) ListSTHs(ctx context.Context, opts model.TreeHeadListOptions) ([]model.SignedTreeHead, error) {
+	return s.store.ListSignedTreeHeadsPage(ctx, opts)
+}
+
+func (s *Service) ListLeaves(ctx context.Context, opts model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error) {
+	return s.store.ListGlobalLeavesPage(ctx, opts)
 }
 
 func (s *Service) InclusionProof(ctx context.Context, batchID string, treeSize uint64) (model.GlobalLogProof, error) {

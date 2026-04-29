@@ -28,20 +28,25 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("BundleNotFound", func(t *testing.T) { testBundleNotFound(t, newStore) })
 	t.Run("BundleOverwrite", func(t *testing.T) { testBundleOverwrite(t, newStore) })
 	t.Run("RecordIndexListAndFilters", func(t *testing.T) { testRecordIndexListAndFilters(t, newStore) })
+	t.Run("RecordIndexProofLevelPromotes", func(t *testing.T) { testRecordIndexProofLevelPromotes(t, newStore) })
 	t.Run("ManifestRoundTrip", func(t *testing.T) { testManifestRoundTrip(t, newStore) })
 	t.Run("ManifestListIsSorted", func(t *testing.T) { testManifestListIsSorted(t, newStore) })
 	t.Run("ManifestListAfterPaginates", func(t *testing.T) { testManifestListAfterPaginates(t, newStore) })
 	t.Run("RootListIsReverseChrono", func(t *testing.T) { testRootListIsReverseChrono(t, newStore) })
 	t.Run("RootListAcceptsHugeLimit", func(t *testing.T) { testRootListAcceptsHugeLimit(t, newStore) })
 	t.Run("LatestRootSelectsNewest", func(t *testing.T) { testLatestRoot(t, newStore) })
+	t.Run("RootListPagePaginates", func(t *testing.T) { testRootListPagePaginates(t, newStore) })
 	t.Run("CheckpointRoundTrip", func(t *testing.T) { testCheckpointRoundTrip(t, newStore) })
 	t.Run("CheckpointMissing", func(t *testing.T) { testCheckpointMissing(t, newStore) })
 	t.Run("ConcurrentPutBundle", func(t *testing.T) { testConcurrentPutBundle(t, newStore) })
 	t.Run("GlobalLogRoundTrip", func(t *testing.T) { testGlobalLogRoundTrip(t, newStore) })
 	t.Run("GlobalLogPagedStateRoundTrip", func(t *testing.T) { testGlobalLogPagedStateRoundTrip(t, newStore) })
+	t.Run("GlobalLeafListPagePaginates", func(t *testing.T) { testGlobalLeafListPagePaginates(t, newStore) })
 	t.Run("GlobalLogTileRoundTrip", func(t *testing.T) { testGlobalLogTileRoundTrip(t, newStore) })
 	t.Run("GlobalLogTileListAfterPaginates", func(t *testing.T) { testGlobalLogTileListAfterPaginates(t, newStore) })
 	t.Run("STHAnchorEnqueueIsIdempotent", func(t *testing.T) { testSTHAnchorEnqueueIsIdempotent(t, newStore) })
+	t.Run("SignedTreeHeadListPagePaginates", func(t *testing.T) { testSignedTreeHeadListPagePaginates(t, newStore) })
+	t.Run("STHAnchorListPagePaginates", func(t *testing.T) { testSTHAnchorListPagePaginates(t, newStore) })
 	t.Run("STHAnchorListAfterPaginates", func(t *testing.T) { testSTHAnchorListAfterPaginates(t, newStore) })
 	t.Run("STHAnchorListPendingRespectsBackoff", func(t *testing.T) { testSTHAnchorListPendingRespectsBackoff(t, newStore) })
 	t.Run("STHAnchorListPendingIsCommitOrdered", func(t *testing.T) { testSTHAnchorListPendingIsCommitOrdered(t, newStore) })
@@ -183,6 +188,65 @@ func testRecordIndexListAndFilters(t *testing.T, newStore Factory) {
 	}
 	if len(byRange) != 1 || byRange[0].RecordID != "rec-2" {
 		t.Fatalf("range page = %+v", byRange)
+	}
+}
+
+func testRecordIndexProofLevelPromotes(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	bundle := recordBundle("rec-1", "tenant-a", "client-a", "batch-1", 100)
+	if err := store.PutBundle(ctx, bundle); err != nil {
+		t.Fatalf("PutBundle: %v", err)
+	}
+	if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{
+		SchemaVersion: model.SchemaGlobalLogLeaf,
+		BatchID:       "batch-1",
+		BatchRoot:     []byte{1},
+		LeafIndex:     0,
+	}); err != nil {
+		t.Fatalf("PutGlobalLeaf: %v", err)
+	}
+	sth := model.SignedTreeHead{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{1}}
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox,
+		BatchID:       "batch-1",
+		BatchRoot:     model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", BatchRoot: []byte{1}, TreeSize: 1},
+		Status:        model.AnchorStatePending,
+	}); err != nil {
+		t.Fatalf("EnqueueGlobalLog: %v", err)
+	}
+	if err := store.MarkGlobalLogPublished(ctx, "batch-1", sth); err != nil {
+		t.Fatalf("MarkGlobalLogPublished: %v", err)
+	}
+	idx, ok, err := store.GetRecordIndex(ctx, "rec-1")
+	if err != nil || !ok {
+		t.Fatalf("GetRecordIndex L4 ok=%v err=%v", ok, err)
+	}
+	if level := model.RecordIndexProofLevel(idx); level != "L4" {
+		t.Fatalf("proof level after global publish = %s, want L4", level)
+	}
+	if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(1, "ots", 100)); err != nil {
+		t.Fatalf("EnqueueSTHAnchor: %v", err)
+	}
+	if err := store.MarkSTHAnchorPublished(ctx, sthAnchorResult(1, "ots", "anchor-1")); err != nil {
+		t.Fatalf("MarkSTHAnchorPublished: %v", err)
+	}
+	idx, ok, err = store.GetRecordIndex(ctx, "rec-1")
+	if err != nil || !ok {
+		t.Fatalf("GetRecordIndex L5 ok=%v err=%v", ok, err)
+	}
+	if level := model.RecordIndexProofLevel(idx); level != "L5" {
+		t.Fatalf("proof level after anchor publish = %s, want L5", level)
+	}
+	byLevel, err := store.ListRecordIndexes(ctx, model.RecordListOptions{ProofLevel: "L5", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRecordIndexes level: %v", err)
+	}
+	if len(byLevel) != 1 || byLevel[0].RecordID != "rec-1" {
+		t.Fatalf("ListRecordIndexes level page = %+v", byLevel)
 	}
 }
 
@@ -354,6 +418,42 @@ func testLatestRoot(t *testing.T, newStore Factory) {
 	}
 	if got.ClosedAtUnixN != 300 {
 		t.Fatalf("LatestRoot ts = %d, want 300", got.ClosedAtUnixN)
+	}
+}
+
+func testRootListPagePaginates(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	for _, root := range []model.BatchRoot{
+		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", ClosedAtUnixN: 100},
+		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-2", ClosedAtUnixN: 200},
+		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-3", ClosedAtUnixN: 300},
+	} {
+		if err := store.PutRoot(ctx, root); err != nil {
+			t.Fatalf("PutRoot %s: %v", root.BatchID, err)
+		}
+	}
+	first, err := store.ListRootsPage(ctx, model.RootListOptions{Limit: 2, Direction: model.RecordListDirectionDesc})
+	if err != nil {
+		t.Fatalf("ListRootsPage first: %v", err)
+	}
+	if len(first) != 2 || first[0].BatchID != "batch-3" || first[1].BatchID != "batch-2" {
+		t.Fatalf("first roots page = %+v", first)
+	}
+	next, err := store.ListRootsPage(ctx, model.RootListOptions{
+		Limit:              2,
+		Direction:          model.RecordListDirectionDesc,
+		AfterClosedAtUnixN: first[1].ClosedAtUnixN,
+		AfterBatchID:       first[1].BatchID,
+	})
+	if err != nil {
+		t.Fatalf("ListRootsPage next: %v", err)
+	}
+	if len(next) != 1 || next[0].BatchID != "batch-1" {
+		t.Fatalf("next roots page = %+v", next)
 	}
 }
 
@@ -603,6 +703,77 @@ func testGlobalLogPagedStateRoundTrip(t *testing.T, newStore Factory) {
 	}
 }
 
+func testGlobalLeafListPagePaginates(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	for i := uint64(0); i < 3; i++ {
+		if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{
+			SchemaVersion: model.SchemaGlobalLogLeaf,
+			BatchID:       "batch-" + itoa(int(i+1)),
+			LeafIndex:     i,
+			LeafHash:      []byte{byte(i + 1)},
+		}); err != nil {
+			t.Fatalf("PutGlobalLeaf %d: %v", i, err)
+		}
+	}
+	first, err := store.ListGlobalLeavesPage(ctx, model.GlobalLeafListOptions{Limit: 2, Direction: model.RecordListDirectionDesc})
+	if err != nil {
+		t.Fatalf("ListGlobalLeavesPage first: %v", err)
+	}
+	if len(first) != 2 || first[0].LeafIndex != 2 || first[1].LeafIndex != 1 {
+		t.Fatalf("first global leaf page = %+v", first)
+	}
+	next, err := store.ListGlobalLeavesPage(ctx, model.GlobalLeafListOptions{
+		Limit:          2,
+		Direction:      model.RecordListDirectionDesc,
+		AfterLeafIndex: first[1].LeafIndex,
+	})
+	if err != nil {
+		t.Fatalf("ListGlobalLeavesPage next: %v", err)
+	}
+	if len(next) != 1 || next[0].LeafIndex != 0 {
+		t.Fatalf("next global leaf page = %+v", next)
+	}
+}
+
+func testSignedTreeHeadListPagePaginates(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	for _, size := range []uint64{1, 2, 3} {
+		if err := store.PutSignedTreeHead(ctx, model.SignedTreeHead{
+			SchemaVersion: model.SchemaSignedTreeHead,
+			TreeSize:      size,
+			RootHash:      []byte{byte(size)},
+		}); err != nil {
+			t.Fatalf("PutSignedTreeHead %d: %v", size, err)
+		}
+	}
+	first, err := store.ListSignedTreeHeadsPage(ctx, model.TreeHeadListOptions{Limit: 2, Direction: model.RecordListDirectionDesc})
+	if err != nil {
+		t.Fatalf("ListSignedTreeHeadsPage first: %v", err)
+	}
+	if len(first) != 2 || first[0].TreeSize != 3 || first[1].TreeSize != 2 {
+		t.Fatalf("first sth page = %+v", first)
+	}
+	next, err := store.ListSignedTreeHeadsPage(ctx, model.TreeHeadListOptions{
+		Limit:         2,
+		Direction:     model.RecordListDirectionDesc,
+		AfterTreeSize: first[1].TreeSize,
+	})
+	if err != nil {
+		t.Fatalf("ListSignedTreeHeadsPage next: %v", err)
+	}
+	if len(next) != 1 || next[0].TreeSize != 1 {
+		t.Fatalf("next sth page = %+v", next)
+	}
+}
+
 func testGlobalLogTileListAfterPaginates(t *testing.T, newStore Factory) {
 	t.Parallel()
 	store, cleanup := newStore(t)
@@ -677,6 +848,37 @@ func testSTHAnchorEnqueueIsIdempotent(t *testing.T, newStore Factory) {
 	}
 	if got := trusterr.CodeOf(err); got != trusterr.CodeAlreadyExists {
 		t.Fatalf("CodeOf(err) = %s, want %s", got, trusterr.CodeAlreadyExists)
+	}
+}
+
+func testSTHAnchorListPagePaginates(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	for _, size := range []uint64{1, 2, 3} {
+		if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(size, "ots", int64(size))); err != nil {
+			t.Fatalf("EnqueueSTHAnchor %d: %v", size, err)
+		}
+	}
+	first, err := store.ListSTHAnchorsPage(ctx, model.AnchorListOptions{Limit: 2, Direction: model.RecordListDirectionDesc})
+	if err != nil {
+		t.Fatalf("ListSTHAnchorsPage first: %v", err)
+	}
+	if len(first) != 2 || first[0].TreeSize != 3 || first[1].TreeSize != 2 {
+		t.Fatalf("first anchor page = %+v", first)
+	}
+	next, err := store.ListSTHAnchorsPage(ctx, model.AnchorListOptions{
+		Limit:         2,
+		Direction:     model.RecordListDirectionDesc,
+		AfterTreeSize: first[1].TreeSize,
+	})
+	if err != nil {
+		t.Fatalf("ListSTHAnchorsPage next: %v", err)
+	}
+	if len(next) != 1 || next[0].TreeSize != 1 {
+		t.Fatalf("next anchor page = %+v", next)
 	}
 }
 

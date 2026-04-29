@@ -18,11 +18,13 @@ type Engine interface {
 type Store interface {
 	PutBundle(context.Context, model.ProofBundle) error
 	GetBundle(context.Context, string) (model.ProofBundle, error)
+	PutRecordIndex(context.Context, model.RecordIndex) error
 	GetRecordIndex(context.Context, string) (model.RecordIndex, bool, error)
 	ListRecordIndexes(context.Context, model.RecordListOptions) ([]model.RecordIndex, error)
 	PutRoot(context.Context, model.BatchRoot) error
 	ListRoots(context.Context, int) ([]model.BatchRoot, error)
 	ListRootsAfter(context.Context, int64, int) ([]model.BatchRoot, error)
+	ListRootsPage(context.Context, model.RootListOptions) ([]model.BatchRoot, error)
 	LatestRoot(context.Context) (model.BatchRoot, error)
 	PutManifest(context.Context, model.BatchManifest) error
 	GetManifest(context.Context, string) (model.BatchManifest, error)
@@ -191,6 +193,13 @@ func (s *Service) RootsAfter(ctx context.Context, afterClosedAtUnixN int64, limi
 		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "proof store is not configured")
 	}
 	return s.store.ListRootsAfter(ctx, afterClosedAtUnixN, limit)
+}
+
+func (s *Service) RootsPage(ctx context.Context, opts model.RootListOptions) ([]model.BatchRoot, error) {
+	if s.store == nil {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "proof store is not configured")
+	}
+	return s.store.ListRootsPage(ctx, opts)
 }
 
 func (s *Service) LatestRoot(ctx context.Context) (model.BatchRoot, error) {

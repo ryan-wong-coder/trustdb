@@ -21,11 +21,13 @@ import (
 type Store interface {
 	PutBundle(ctx context.Context, bundle model.ProofBundle) error
 	GetBundle(ctx context.Context, recordID string) (model.ProofBundle, error)
+	PutRecordIndex(ctx context.Context, idx model.RecordIndex) error
 	GetRecordIndex(ctx context.Context, recordID string) (model.RecordIndex, bool, error)
 	ListRecordIndexes(ctx context.Context, opts model.RecordListOptions) ([]model.RecordIndex, error)
 	PutRoot(ctx context.Context, root model.BatchRoot) error
 	ListRoots(ctx context.Context, limit int) ([]model.BatchRoot, error)
 	ListRootsAfter(ctx context.Context, afterClosedAtUnixN int64, limit int) ([]model.BatchRoot, error)
+	ListRootsPage(ctx context.Context, opts model.RootListOptions) ([]model.BatchRoot, error)
 	LatestRoot(ctx context.Context) (model.BatchRoot, error)
 	PutManifest(ctx context.Context, manifest model.BatchManifest) error
 	GetManifest(ctx context.Context, batchID string) (model.BatchManifest, error)
@@ -39,6 +41,7 @@ type Store interface {
 	GetGlobalLeafByBatchID(ctx context.Context, batchID string) (model.GlobalLogLeaf, bool, error)
 	ListGlobalLeaves(ctx context.Context) ([]model.GlobalLogLeaf, error)
 	ListGlobalLeavesRange(ctx context.Context, startIndex uint64, limit int) ([]model.GlobalLogLeaf, error)
+	ListGlobalLeavesPage(ctx context.Context, opts model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error)
 	PutGlobalLogNode(ctx context.Context, node model.GlobalLogNode) error
 	GetGlobalLogNode(ctx context.Context, level, startIndex uint64) (model.GlobalLogNode, bool, error)
 	// ListGlobalLogNodesAfter returns nodes in (level,start_index) order.
@@ -50,6 +53,7 @@ type Store interface {
 	PutSignedTreeHead(ctx context.Context, sth model.SignedTreeHead) error
 	GetSignedTreeHead(ctx context.Context, treeSize uint64) (model.SignedTreeHead, bool, error)
 	ListSignedTreeHeadsAfter(ctx context.Context, afterTreeSize uint64, limit int) ([]model.SignedTreeHead, error)
+	ListSignedTreeHeadsPage(ctx context.Context, opts model.TreeHeadListOptions) ([]model.SignedTreeHead, error)
 	LatestSignedTreeHead(ctx context.Context) (model.SignedTreeHead, bool, error)
 	PutGlobalLogTile(ctx context.Context, tile model.GlobalLogTile) error
 	ListGlobalLogTiles(ctx context.Context) ([]model.GlobalLogTile, error)
@@ -73,6 +77,7 @@ type Store interface {
 	ListPendingSTHAnchors(ctx context.Context, nowUnixN int64, limit int) ([]model.STHAnchorOutboxItem, error)
 	ListPublishedSTHAnchors(ctx context.Context, limit int) ([]model.STHAnchorOutboxItem, error)
 	ListSTHAnchorOutboxItemsAfter(ctx context.Context, afterTreeSize uint64, limit int) ([]model.STHAnchorOutboxItem, error)
+	ListSTHAnchorsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error)
 	GetSTHAnchorOutboxItem(ctx context.Context, treeSize uint64) (model.STHAnchorOutboxItem, bool, error)
 	RescheduleSTHAnchor(ctx context.Context, treeSize uint64, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error
 	MarkSTHAnchorPublished(ctx context.Context, result model.STHAnchorResult) error

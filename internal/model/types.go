@@ -184,6 +184,7 @@ type RecordIndex struct {
 	TenantID           string `cbor:"tenant_id,omitempty" json:"tenant_id,omitempty"`
 	ClientID           string `cbor:"client_id,omitempty" json:"client_id,omitempty"`
 	KeyID              string `cbor:"key_id,omitempty" json:"key_id,omitempty"`
+	ProofLevel         string `cbor:"proof_level,omitempty" json:"proof_level,omitempty"`
 	BatchID            string `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
 	BatchLeafIndex     uint64 `cbor:"batch_leaf_index" json:"batch_leaf_index"`
 	BatchClosedAtUnixN int64  `cbor:"batch_closed_at_unix_nano,omitempty" json:"batch_closed_at_unix_nano,omitempty"`
@@ -203,6 +204,7 @@ type RecordListOptions struct {
 	BatchID              string
 	TenantID             string
 	ClientID             string
+	ProofLevel           string
 	Query                string
 	ContentHash          []byte
 	ReceivedFromUnixN    int64
@@ -215,6 +217,31 @@ const (
 	RecordListDirectionAsc  = "asc"
 	RecordListDirectionDesc = "desc"
 )
+
+type RootListOptions struct {
+	Limit              int
+	Direction          string
+	AfterClosedAtUnixN int64
+	AfterBatchID       string
+}
+
+type TreeHeadListOptions struct {
+	Limit         int
+	Direction     string
+	AfterTreeSize uint64
+}
+
+type GlobalLeafListOptions struct {
+	Limit          int
+	Direction      string
+	AfterLeafIndex uint64
+}
+
+type AnchorListOptions struct {
+	Limit         int
+	Direction     string
+	AfterTreeSize uint64
+}
 
 func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 	claim := bundle.SignedClaim.Claim
@@ -247,6 +274,7 @@ func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 		TenantID:           tenantID,
 		ClientID:           clientID,
 		KeyID:              keyID,
+		ProofLevel:         "L3",
 		BatchID:            bundle.CommittedReceipt.BatchID,
 		BatchLeafIndex:     bundle.CommittedReceipt.LeafIndex,
 		BatchClosedAtUnixN: bundle.CommittedReceipt.ClosedAtUnixN,
