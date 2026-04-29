@@ -4,7 +4,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	pdb "github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -110,4 +112,183 @@ trustdb_wal_segments_total 4
 	); err != nil {
 		t.Fatalf("GatherAndCompare() error = %v", err)
 	}
+}
+
+func TestRegisterPebbleMetrics(t *testing.T) {
+	t.Parallel()
+
+	metrics := &pdb.Metrics{
+		Compact: struct {
+			Count             int64
+			DefaultCount      int64
+			DeleteOnlyCount   int64
+			ElisionOnlyCount  int64
+			MoveCount         int64
+			ReadCount         int64
+			RewriteCount      int64
+			MultiLevelCount   int64
+			CounterLevelCount int64
+			EstimatedDebt     uint64
+			InProgressBytes   int64
+			NumInProgress     int64
+			MarkedFiles       int
+			Duration          time.Duration
+		}{
+			Count:           3,
+			EstimatedDebt:   4096,
+			InProgressBytes: 2048,
+			NumInProgress:   1,
+			Duration:        2 * time.Second,
+		},
+		Ingest: struct {
+			Count uint64
+		}{Count: 5},
+		Flush: struct {
+			Count              int64
+			WriteThroughput    pdb.ThroughputMetric
+			NumInProgress      int64
+			AsIngestCount      uint64
+			AsIngestTableCount uint64
+			AsIngestBytes      uint64
+		}{
+			Count:         7,
+			NumInProgress: 1,
+		},
+		MemTable: struct {
+			Size        uint64
+			Count       int64
+			ZombieSize  uint64
+			ZombieCount int64
+		}{
+			Size:       1024,
+			Count:      2,
+			ZombieSize: 128,
+		},
+		Snapshots: struct {
+			Count          int
+			EarliestSeqNum uint64
+			PinnedKeys     uint64
+			PinnedSize     uint64
+		}{
+			Count: 1,
+		},
+		Table: struct {
+			ObsoleteSize      uint64
+			ObsoleteCount     int64
+			ZombieSize        uint64
+			ZombieCount       int64
+			BackingTableCount uint64
+			BackingTableSize  uint64
+		}{
+			ObsoleteSize:      64,
+			ZombieSize:        32,
+			BackingTableCount: 4,
+			BackingTableSize:  8192,
+		},
+		WAL: struct {
+			Files                int64
+			ObsoleteFiles        int64
+			ObsoletePhysicalSize uint64
+			Size                 uint64
+			PhysicalSize         uint64
+			BytesIn              uint64
+			BytesWritten         uint64
+		}{
+			Files:                2,
+			ObsoleteFiles:        1,
+			ObsoletePhysicalSize: 16,
+			Size:                 512,
+			PhysicalSize:         768,
+			BytesIn:              100,
+			BytesWritten:         120,
+		},
+	}
+	metrics.Levels[0].NumFiles = 1
+	metrics.Levels[0].Size = 2048
+	metrics.Levels[0].Score = 1.5
+	metrics.Levels[0].Sublevels = 6
+
+	reg, _ := NewRegistry()
+	enabled, err := RegisterPebbleMetrics(reg, fakePebbleMetricsSource{metrics: metrics})
+	if err != nil {
+		t.Fatalf("RegisterPebbleMetrics() error = %v", err)
+	}
+	if !enabled {
+		t.Fatalf("RegisterPebbleMetrics() enabled = false, want true")
+	}
+
+	expected := `
+# HELP trustdb_pebble_backing_table_size_bytes Total bytes of Pebble backing SSTables.
+# TYPE trustdb_pebble_backing_table_size_bytes gauge
+trustdb_pebble_backing_table_size_bytes 8192
+# HELP trustdb_pebble_compaction_debt_bytes Estimated Pebble compaction debt in bytes.
+# TYPE trustdb_pebble_compaction_debt_bytes gauge
+trustdb_pebble_compaction_debt_bytes 4096
+# HELP trustdb_pebble_compaction_duration_seconds_total Cumulative duration of Pebble compactions since the database was opened.
+# TYPE trustdb_pebble_compaction_duration_seconds_total counter
+trustdb_pebble_compaction_duration_seconds_total 2
+# HELP trustdb_pebble_compactions_total Total number of Pebble compactions since the database was opened.
+# TYPE trustdb_pebble_compactions_total counter
+trustdb_pebble_compactions_total 3
+# HELP trustdb_pebble_disk_space_usage_bytes Approximate on-disk space used by the Pebble database.
+# TYPE trustdb_pebble_disk_space_usage_bytes gauge
+trustdb_pebble_disk_space_usage_bytes 4976
+# HELP trustdb_pebble_flushes_total Total number of Pebble flushes since the database was opened.
+# TYPE trustdb_pebble_flushes_total counter
+trustdb_pebble_flushes_total 7
+# HELP trustdb_pebble_ingestions_total Total number of Pebble ingestions since the database was opened.
+# TYPE trustdb_pebble_ingestions_total counter
+trustdb_pebble_ingestions_total 5
+# HELP trustdb_pebble_level_files Current number of files in each Pebble LSM level.
+# TYPE trustdb_pebble_level_files gauge
+trustdb_pebble_level_files{level="L0"} 1
+# HELP trustdb_pebble_level_size_bytes Current bytes stored in each Pebble LSM level.
+# TYPE trustdb_pebble_level_size_bytes gauge
+trustdb_pebble_level_size_bytes{level="L0"} 2048
+# HELP trustdb_pebble_read_amplification Approximate Pebble read amplification across the LSM tree.
+# TYPE trustdb_pebble_read_amplification gauge
+trustdb_pebble_read_amplification 6
+# HELP trustdb_pebble_wal_bytes_written_total Physical bytes written to the Pebble WAL since the database was opened.
+# TYPE trustdb_pebble_wal_bytes_written_total counter
+trustdb_pebble_wal_bytes_written_total 120
+`
+	src := reg
+	if err := testutil.GatherAndCompare(
+		src,
+		strings.NewReader(expected),
+		"trustdb_pebble_backing_table_size_bytes",
+		"trustdb_pebble_compaction_debt_bytes",
+		"trustdb_pebble_compaction_duration_seconds_total",
+		"trustdb_pebble_compactions_total",
+		"trustdb_pebble_disk_space_usage_bytes",
+		"trustdb_pebble_flushes_total",
+		"trustdb_pebble_ingestions_total",
+		"trustdb_pebble_level_files",
+		"trustdb_pebble_level_size_bytes",
+		"trustdb_pebble_read_amplification",
+		"trustdb_pebble_wal_bytes_written_total",
+	); err != nil {
+		t.Fatalf("GatherAndCompare() error = %v", err)
+	}
+}
+
+func TestRegisterPebbleMetricsSkipsNonPebbleStore(t *testing.T) {
+	t.Parallel()
+
+	reg, _ := NewRegistry()
+	enabled, err := RegisterPebbleMetrics(reg, struct{}{})
+	if err != nil {
+		t.Fatalf("RegisterPebbleMetrics() error = %v", err)
+	}
+	if enabled {
+		t.Fatalf("RegisterPebbleMetrics() enabled = true, want false")
+	}
+}
+
+type fakePebbleMetricsSource struct {
+	metrics *pdb.Metrics
+}
+
+func (f fakePebbleMetricsSource) PebbleMetrics() *pdb.Metrics {
+	return f.metrics
 }

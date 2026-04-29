@@ -256,6 +256,11 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if enabled, err := observability.RegisterPebbleMetrics(reg, proofStore); err != nil {
+				return trusterr.Wrap(trusterr.CodeInternal, "register pebble metrics", err)
+			} else if enabled {
+				rt.logger.Info().Str("path", metaPath).Msg("pebble proofstore metrics enabled")
+			}
 			defer func() {
 				if cerr := proofStore.Close(); cerr != nil {
 					rt.logger.Warn().Err(cerr).Msg("proofstore close failed")
