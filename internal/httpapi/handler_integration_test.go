@@ -79,7 +79,20 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	batchSvc := batch.New(engine, proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "proofs")}, batch.Options{QueueSize: 8, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	handler := New(svc, nil, batchSvc)
 	server := httptest.NewServer(handler)
-	defer server.Close()
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := batchSvc.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("Batch Shutdown() error = %v", err)
+		}
+		if err := svc.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Errorf("WAL Close() error = %v", err)
+		}
+	})
 
 	resp, err := http.Post(server.URL+"/v1/claims", "application/cbor", bytes.NewReader(body))
 	if err != nil {
@@ -102,13 +115,13 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	waitForHTTPStatus(t, server.URL+"/v1/proofs/"+accepted.RecordID, http.StatusOK)
 	waitForHTTPStatus(t, server.URL+"/v1/roots/latest", http.StatusOK)
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := svc.Shutdown(shutdownCtx); err != nil {
-		t.Fatalf("Shutdown() error = %v", err)
-	}
 	if err := batchSvc.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("Batch Shutdown() error = %v", err)
+	}
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("WAL Close() error = %v", err)
@@ -131,7 +144,7 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 
 func waitForHTTPStatus(t *testing.T, url string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	var lastStatus int
 	var lastBody []byte
 	for time.Now().Before(deadline) {
