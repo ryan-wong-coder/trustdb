@@ -42,22 +42,40 @@ const current = computed(() => steps[stepIdx.value])
 const progress = computed(() => ((stepIdx.value + 1) / steps.length) * 100)
 
 // --- Step 2: server config ---------------------------------------
-const serverUrl     = ref(settings.settings.server_url     || 'http://127.0.0.1:8080')
-const serverPubKey  = ref(settings.settings.server_public_key_b64 || '')
-const testingServer = ref(false)
-const serverChecked = ref<null | { ok: boolean; message: string }>(null)
+const serverTransport = ref(settings.settings.server_transport || 'http')
+const serverUrl       = ref(settings.settings.server_url || 'http://127.0.0.1:8080')
+const serverPubKey    = ref(settings.settings.server_public_key_b64 || '')
+const testingServer   = ref(false)
+const serverChecked   = ref<null | { ok: boolean; message: string }>(null)
+
+const TRANSPORTS = [
+  { v: 'http', label: 'HTTP', desc: '默认 REST 接入' },
+  { v: 'grpc', label: 'gRPC', desc: 'SDK 直连 RPC' },
+]
+const serverEndpointHint = computed(() =>
+  serverTransport.value === 'grpc'
+    ? '例如 127.0.0.1:9090；误填 http://host:port 也会自动转成 host:port'
+    : '例如 http://127.0.0.1:8080；也可以填远端 HTTPS',
+)
+const serverEndpointPlaceholder = computed(() =>
+  serverTransport.value === 'grpc' ? '127.0.0.1:9090' : 'http://127.0.0.1:8080',
+)
 
 async function testServer() {
   testingServer.value = true
   serverChecked.value = null
   try {
     // Persist first so api.serverHealth (which reads settings from
-    // the Go store) sees the user's URL instead of whatever was on
-    // disk before the wizard opened.
-    await settings.save({ server_url: serverUrl.value.trim(), server_public_key_b64: serverPubKey.value.trim() })
+    // the Go store) sees the user's transport/endpoint instead of
+    // whatever was on disk before the wizard opened.
+    await settings.save({
+      server_transport: serverTransport.value,
+      server_url: serverUrl.value.trim(),
+      server_public_key_b64: serverPubKey.value.trim(),
+    })
     const h = await api.serverHealth()
     if (h?.ok) {
-      serverChecked.value = { ok: true, message: `服务正常 · ${h.rtt_millis ?? '?'}ms` }
+      serverChecked.value = { ok: true, message: `${(h.transport || serverTransport.value).toUpperCase()} 服务正常 · ${h.rtt_millis ?? '?'}ms` }
     } else {
       serverChecked.value = { ok: false, message: h?.error || '服务未就绪' }
     }
@@ -149,7 +167,11 @@ function finish() {
   // Persist the settings from step 2 one more time in case the user
   // edited them after the connection test succeeded, then remember
   // that the wizard has been seen so it doesn't reopen next launch.
-  settings.save({ server_url: serverUrl.value.trim(), server_public_key_b64: serverPubKey.value.trim() })
+  settings.save({
+    server_transport: serverTransport.value,
+    server_url: serverUrl.value.trim(),
+    server_public_key_b64: serverPubKey.value.trim(),
+  })
   try { localStorage.setItem('trustdb.onboarded', '1') } catch { /* ignore */ }
   emit('close')
 }
@@ -235,8 +257,25 @@ function skip() {
 
           <!-- 2. Server -->
           <div v-else-if="current.key === 'server'" class="space-y-3">
-            <Field label="服务地址" hint="例如 http://127.0.0.1:8080；也可以填远端 HTTPS">
-              <Input v-model="serverUrl" placeholder="http://127.0.0.1:8080" />
+            <Field label="传输协议" hint="HTTP 兼容现有服务；gRPC 用于连接已开启 --grpc-listen 的服务端">
+              <div class="grid grid-cols-2 gap-2">
+                <button
+                  v-for="t in TRANSPORTS"
+                  :key="t.v"
+                  type="button"
+                  class="rounded-[18px] border px-4 py-3 text-left transition-all duration-150"
+                  :class="serverTransport === t.v
+                    ? 'border-accent bg-accent/15 text-ink-50 shadow-[0_0_22px_rgba(0,255,34,0.16)]'
+                    : 'border-white/10 bg-black/20 text-ink-400 hover:border-white/20 hover:text-ink-100'"
+                  @click="serverTransport = t.v"
+                >
+                  <div class="font-display text-[13px] font-black tracking-[0.12em]">{{ t.label }}</div>
+                  <div class="mt-1 text-[11.5px] opacity-75">{{ t.desc }}</div>
+                </button>
+              </div>
+            </Field>
+            <Field :label="serverTransport === 'grpc' ? 'gRPC Target' : '服务地址'" :hint="serverEndpointHint">
+              <Input v-model="serverUrl" :placeholder="serverEndpointPlaceholder" />
             </Field>
             <Field label="服务端公钥（base64）" hint="从 server.pub 复制内容，留空也可以先跳过">
               <Input v-model="serverPubKey" placeholder="Zo46rzMjDyCXRa5-4bSqASte5A0JOLWOJ2mkeKzaCXw" />

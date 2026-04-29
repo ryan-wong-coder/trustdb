@@ -32,11 +32,17 @@ type Identity struct {
 // we can verify responses, and UI preferences.
 type Settings struct {
 	ServerURL       string `json:"server_url"`
+	ServerTransport string `json:"server_transport"`
 	ServerPubKeyB64 string `json:"server_public_key_b64"`
 	DefaultMedia    string `json:"default_media_type"`
 	DefaultEvent    string `json:"default_event_type"`
 	Theme           string `json:"theme"`
 }
+
+const (
+	serverTransportHTTP = "http"
+	serverTransportGRPC = "grpc"
+)
 
 // LocalRecord is everything we remember about a submission we sent
 // from this workstation: enough to show a rich Record detail page
@@ -149,10 +155,11 @@ type store struct {
 
 func defaultSettings() Settings {
 	return Settings{
-		ServerURL:    "http://127.0.0.1:8080",
-		DefaultMedia: "application/octet-stream",
-		DefaultEvent: "file.snapshot",
-		Theme:        "auto",
+		ServerURL:       "http://127.0.0.1:8080",
+		ServerTransport: serverTransportHTTP,
+		DefaultMedia:    "application/octet-stream",
+		DefaultEvent:    "file.snapshot",
+		Theme:           "auto",
 	}
 }
 
@@ -196,8 +203,10 @@ func (s *store) load() error {
 		}
 	}
 	if loaded.Settings.ServerURL == "" {
-		loaded.Settings = defaultSettings()
+		defaults := defaultSettings()
+		loaded.Settings.ServerURL = defaults.ServerURL
 	}
+	loaded.Settings.ServerTransport = normalizeServerTransport(loaded.Settings.ServerTransport)
 	if loaded.Settings.DefaultMedia == "" {
 		loaded.Settings.DefaultMedia = "application/octet-stream"
 	}
@@ -298,6 +307,7 @@ func (s *store) getSettings() Settings {
 func (s *store) setSettings(cfg Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cfg.ServerTransport = normalizeServerTransport(cfg.ServerTransport)
 	if cfg.DefaultMedia == "" {
 		cfg.DefaultMedia = "application/octet-stream"
 	}

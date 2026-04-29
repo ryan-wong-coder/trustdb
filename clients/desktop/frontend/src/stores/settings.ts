@@ -4,6 +4,7 @@ import { api, Settings } from '@/lib/api'
 
 const defaultSettings: Settings = {
   server_url: 'http://127.0.0.1:8080',
+  server_transport: 'http',
   server_public_key_b64: '',
   default_media_type: 'application/octet-stream',
   default_event_type: 'file.snapshot',
@@ -18,7 +19,7 @@ export const useSettings = defineStore('settings', () => {
     loading.value = true
     try {
       const s = await api.getSettings()
-      settings.value = s ?? { ...defaultSettings }
+      settings.value = { ...defaultSettings, ...(s ?? {}) }
       applyTheme(settings.value.theme)
     } finally {
       loading.value = false
@@ -26,7 +27,7 @@ export const useSettings = defineStore('settings', () => {
   }
 
   async function save(partial: Partial<Settings>) {
-    const next = { ...settings.value, ...partial } as Settings
+    const next = { ...defaultSettings, ...settings.value, ...partial } as Settings
     await api.saveSettings(next)
     settings.value = next
     applyTheme(next.theme)
