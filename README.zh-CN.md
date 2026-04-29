@@ -16,6 +16,12 @@ github.com/ryan-wong-coder/trustdb
 
 许可证：AGPL-3.0-only，见 [LICENSE](LICENSE)。
 
+## 桌面客户端
+
+![TrustDB 桌面客户端概览](assets/readme/desktop-overview.png)
+
+Wails + Vue 桌面客户端提供本地身份初始化、HTTP/gRPC 服务配置、文件存证、记录与证明管理、`.sproof` 导出和离线验证能力。
+
 ## 当前功能
 
 - 使用确定性 CBOR 编码 claim、receipt、proof bundle、global-log proof、STH、anchor result 和 `.sproof` 单文件证明。
