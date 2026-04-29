@@ -21,10 +21,14 @@ type Transport interface {
 	SubmitSignedClaim(context.Context, SignedClaim) (SubmitResult, error)
 	GetRecord(context.Context, string) (RecordIndex, error)
 	ListRecords(context.Context, ListRecordsOptions) (RecordPage, error)
+	ListRootsPage(context.Context, ListPageOptions) (RootPage, error)
 	GetProofBundle(context.Context, string) (ProofBundle, error)
 	ListRoots(context.Context, int) ([]BatchRoot, error)
 	LatestRoot(context.Context) (BatchRoot, error)
+	ListSTHs(context.Context, ListPageOptions) (TreeHeadPage, error)
 	GetGlobalProof(context.Context, string) (GlobalLogProof, error)
+	ListGlobalLeaves(context.Context, ListPageOptions) (GlobalLeafPage, error)
+	ListAnchors(context.Context, ListPageOptions) (AnchorPage, error)
 	GetAnchor(context.Context, uint64) (AnchorStatus, error)
 	LatestSTH(context.Context) (SignedTreeHead, error)
 	GetSTH(context.Context, uint64) (SignedTreeHead, error)
@@ -132,8 +136,16 @@ func (c *Client) ListRecords(ctx context.Context, opts ListRecordsOptions) (Reco
 	return c.transport.ListRecords(ctx, opts)
 }
 
+func (c *Client) ListRootsPage(ctx context.Context, opts ListPageOptions) (RootPage, error) {
+	return c.transport.ListRootsPage(ctx, opts)
+}
+
 func (c *Client) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
-	return c.transport.ListRoots(ctx, limit)
+	page, err := c.transport.ListRootsPage(ctx, ListPageOptions{Limit: limit, Direction: RecordListDirectionDesc})
+	if err != nil {
+		return nil, err
+	}
+	return page.Roots, nil
 }
 
 func (c *Client) LatestRoot(ctx context.Context) (BatchRoot, error) {
@@ -146,6 +158,18 @@ func (c *Client) GetProofBundle(ctx context.Context, recordID string) (ProofBund
 
 func (c *Client) GetGlobalProof(ctx context.Context, batchID string) (GlobalLogProof, error) {
 	return c.transport.GetGlobalProof(ctx, batchID)
+}
+
+func (c *Client) ListSTHs(ctx context.Context, opts ListPageOptions) (TreeHeadPage, error) {
+	return c.transport.ListSTHs(ctx, opts)
+}
+
+func (c *Client) ListGlobalLeaves(ctx context.Context, opts ListPageOptions) (GlobalLeafPage, error) {
+	return c.transport.ListGlobalLeaves(ctx, opts)
+}
+
+func (c *Client) ListAnchors(ctx context.Context, opts ListPageOptions) (AnchorPage, error) {
+	return c.transport.ListAnchors(ctx, opts)
 }
 
 func (c *Client) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {

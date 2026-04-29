@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 
 	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
@@ -120,30 +119,36 @@ func (s *Server) ListRoots(ctx context.Context, req *ListRootsRequest) (*ListRoo
 	if s.Batch == nil {
 		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 100
+	direction, err := parseDirection(req.Direction)
+	if err != nil {
+		return nil, toStatusError(err)
 	}
-	if limit > 1000 {
+	opts := model.RootListOptions{Limit: req.Limit, Direction: direction}
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	if opts.Limit > 1000 {
 		return nil, toStatusError(trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000"))
 	}
-	var (
-		roots []model.BatchRoot
-		err   error
-	)
-	if req.After > 0 {
-		roots, err = s.Batch.RootsAfter(ctx, req.After, limit)
-	} else {
-		roots, err = s.Batch.Roots(ctx, limit)
+	if req.Cursor != "" {
+		cursor, err := decodeRootCursor(req.Cursor)
+		if err != nil {
+			return nil, toStatusError(err)
+		}
+		opts.AfterClosedAtUnixN = cursor.ClosedAtUnixN
+		opts.AfterBatchID = cursor.BatchID
+	} else if req.After > 0 {
+		opts.AfterClosedAtUnixN = req.After
 	}
+	roots, err := s.Batch.RootsPage(ctx, opts)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 	next := ""
-	if req.After > 0 && len(roots) == limit {
-		next = strconv.FormatInt(roots[len(roots)-1].ClosedAtUnixN, 10)
+	if len(roots) == opts.Limit {
+		next = encodeRootCursor(roots[len(roots)-1])
 	}
-	return &ListRootsResponse{Roots: roots, Limit: limit, NextCursor: next}, nil
+	return &ListRootsResponse{Roots: roots, Limit: opts.Limit, Direction: opts.Direction, NextCursor: next}, nil
 }
 
 func (s *Server) LatestRoot(ctx context.Context, _ *LatestRootRequest) (*LatestRootResponse, error) {
@@ -155,6 +160,39 @@ func (s *Server) LatestRoot(ctx context.Context, _ *LatestRootRequest) (*LatestR
 		return nil, toStatusError(err)
 	}
 	return &LatestRootResponse{Root: root}, nil
+}
+
+func (s *Server) ListSTHs(ctx context.Context, req *ListSTHsRequest) (*ListSTHsResponse, error) {
+	if s.Global == nil {
+		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+	}
+	direction, err := parseDirection(req.Direction)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	opts := model.TreeHeadListOptions{Limit: req.Limit, Direction: direction}
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	if opts.Limit > 1000 {
+		return nil, toStatusError(trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000"))
+	}
+	if req.Cursor != "" {
+		cursor, err := decodeUint64Cursor(req.Cursor)
+		if err != nil {
+			return nil, toStatusError(err)
+		}
+		opts.AfterTreeSize = cursor.Value
+	}
+	sths, err := s.Global.ListSTHs(ctx, opts)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	next := ""
+	if len(sths) == opts.Limit {
+		next = encodeUint64Cursor(sths[len(sths)-1].TreeSize)
+	}
+	return &ListSTHsResponse{STHs: sths, Limit: opts.Limit, Direction: opts.Direction, NextCursor: next}, nil
 }
 
 func (s *Server) LatestSTH(ctx context.Context, _ *LatestSTHRequest) (*LatestSTHResponse, error) {
@@ -199,6 +237,39 @@ func (s *Server) GetGlobalProof(ctx context.Context, req *GetGlobalProofRequest)
 	return &GetGlobalProofResponse{Proof: proof}, nil
 }
 
+func (s *Server) ListGlobalLeaves(ctx context.Context, req *ListGlobalLeavesRequest) (*ListGlobalLeavesResponse, error) {
+	if s.Global == nil {
+		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+	}
+	direction, err := parseDirection(req.Direction)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	opts := model.GlobalLeafListOptions{Limit: req.Limit, Direction: direction}
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	if opts.Limit > 1000 {
+		return nil, toStatusError(trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000"))
+	}
+	if req.Cursor != "" {
+		cursor, err := decodeUint64Cursor(req.Cursor)
+		if err != nil {
+			return nil, toStatusError(err)
+		}
+		opts.AfterLeafIndex = cursor.Value
+	}
+	leaves, err := s.Global.ListLeaves(ctx, opts)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	next := ""
+	if len(leaves) == opts.Limit {
+		next = encodeUint64Cursor(leaves[len(leaves)-1].LeafIndex)
+	}
+	return &ListGlobalLeavesResponse{Leaves: leaves, Limit: opts.Limit, Direction: opts.Direction, NextCursor: next}, nil
+}
+
 func (s *Server) GetAnchor(ctx context.Context, req *GetAnchorRequest) (*GetAnchorResponse, error) {
 	if s.Anchors == nil {
 		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "anchor service is not configured"))
@@ -217,20 +288,48 @@ func (s *Server) GetAnchor(ctx context.Context, req *GetAnchorRequest) (*GetAnch
 	if !itemOK && !resultOK {
 		return nil, toStatusError(trusterr.New(trusterr.CodeNotFound, "anchor not found for STH"))
 	}
-	resp := &GetAnchorResponse{TreeSize: req.TreeSize, ProofLevel: prooflevel.L5.String()}
-	switch {
-	case resultOK:
-		resp.Status = model.AnchorStatePublished
-		resp.Result = &result
-	case itemOK:
-		resp.Status = item.Status
-	default:
-		resp.Status = "unknown"
+	return anchorEnvelopeResponse(req.TreeSize, item, itemOK, result, resultOK), nil
+}
+
+func (s *Server) ListAnchors(ctx context.Context, req *ListAnchorsRequest) (*ListAnchorsResponse, error) {
+	if s.Anchors == nil {
+		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "anchor service is not configured"))
 	}
-	if itemOK {
-		resp.Outbox = &item
+	direction, err := parseDirection(req.Direction)
+	if err != nil {
+		return nil, toStatusError(err)
 	}
-	return resp, nil
+	opts := model.AnchorListOptions{Limit: req.Limit, Direction: direction}
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	if opts.Limit > 1000 {
+		return nil, toStatusError(trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000"))
+	}
+	if req.Cursor != "" {
+		cursor, err := decodeUint64Cursor(req.Cursor)
+		if err != nil {
+			return nil, toStatusError(err)
+		}
+		opts.AfterTreeSize = cursor.Value
+	}
+	items, err := s.Anchors.Anchors(ctx, opts)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	anchors := make([]GetAnchorResponse, 0, len(items))
+	for _, item := range items {
+		result, resultOK, err := s.Anchors.AnchorResult(ctx, item.TreeSize)
+		if err != nil {
+			return nil, toStatusError(err)
+		}
+		anchors = append(anchors, *anchorEnvelopeResponse(item.TreeSize, item, true, result, resultOK))
+	}
+	next := ""
+	if len(items) == opts.Limit {
+		next = encodeUint64Cursor(items[len(items)-1].TreeSize)
+	}
+	return &ListAnchorsResponse{Anchors: anchors, Limit: opts.Limit, Direction: opts.Direction, NextCursor: next}, nil
 }
 
 func (s *Server) Metrics(ctx context.Context, _ *MetricsRequest) (*MetricsResponse, error) {
@@ -268,9 +367,13 @@ func recordListOptions(req *ListRecordsRequest) (model.RecordListOptions, error)
 		BatchID:           req.BatchID,
 		TenantID:          req.TenantID,
 		ClientID:          req.ClientID,
+		ProofLevel:        model.NormalizedProofLevel(req.ProofLevel),
 		Query:             strings.TrimSpace(req.Query),
 		ReceivedFromUnixN: req.ReceivedFromUnixN,
 		ReceivedToUnixN:   req.ReceivedToUnixN,
+	}
+	if req.ProofLevel != "" && opts.ProofLevel == "" {
+		return model.RecordListOptions{}, trusterr.New(trusterr.CodeInvalidArgument, "level must be one of L1-L5")
 	}
 	if opts.BatchID == "" && strings.HasPrefix(strings.ToLower(opts.Query), "batch-") {
 		opts.BatchID = opts.Query
@@ -353,6 +456,83 @@ func decodeRecordCursor(raw string) (recordCursor, error) {
 		return recordCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
 	}
 	return cursor, nil
+}
+
+type rootCursor struct {
+	ClosedAtUnixN int64  `json:"t"`
+	BatchID       string `json:"b"`
+}
+
+func encodeRootCursor(root model.BatchRoot) string {
+	data, err := json.Marshal(rootCursor{ClosedAtUnixN: root.ClosedAtUnixN, BatchID: root.BatchID})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeRootCursor(raw string) (rootCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return rootCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	var cursor rootCursor
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&cursor); err != nil || cursor.BatchID == "" {
+		return rootCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	return cursor, nil
+}
+
+type uint64Cursor struct {
+	Value uint64 `json:"v"`
+}
+
+func encodeUint64Cursor(value uint64) string {
+	data, err := json.Marshal(uint64Cursor{Value: value})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeUint64Cursor(raw string) (uint64Cursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return uint64Cursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	var cursor uint64Cursor
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&cursor); err != nil {
+		return uint64Cursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	return cursor, nil
+}
+
+func parseDirection(raw string) (string, error) {
+	switch raw {
+	case "":
+		return model.RecordListDirectionDesc, nil
+	case model.RecordListDirectionAsc, model.RecordListDirectionDesc:
+		return raw, nil
+	default:
+		return "", trusterr.New(trusterr.CodeInvalidArgument, "direction must be asc or desc")
+	}
+}
+
+func anchorEnvelopeResponse(treeSize uint64, item model.STHAnchorOutboxItem, itemOK bool, result model.STHAnchorResult, resultOK bool) *GetAnchorResponse {
+	resp := &GetAnchorResponse{TreeSize: treeSize, ProofLevel: prooflevel.L5.String()}
+	switch {
+	case resultOK:
+		resp.Status = model.AnchorStatePublished
+		resp.Result = &result
+	case itemOK:
+		resp.Status = item.Status
+	default:
+		resp.Status = "unknown"
+	}
+	if itemOK {
+		resp.Outbox = &item
+	}
+	return resp
 }
 
 func toStatusError(err error) error {

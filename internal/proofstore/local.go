@@ -29,17 +29,37 @@ func (s LocalStore) PutBundle(ctx context.Context, bundle model.ProofBundle) err
 	if bundle.RecordID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
 	}
-	if existing, ok, err := s.GetRecordIndex(ctx, bundle.RecordID); err != nil {
-		return err
-	} else if ok {
-		s.removeRecordIndex(existing)
-	}
 	path := filepath.Join(s.bundleDir(), safeFileName(bundle.RecordID)+".tdproof")
 	if err := writeCBORAtomic(path, bundle); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "write proof bundle", err)
 	}
-	if err := s.writeRecordIndex(model.RecordIndexFromBundle(bundle)); err != nil {
+	if err := s.PutRecordIndex(ctx, model.RecordIndexFromBundle(bundle)); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "write record index", err)
+	}
+	return nil
+}
+
+func (s LocalStore) PutRecordIndex(ctx context.Context, idx model.RecordIndex) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put record index canceled", err)
+	}
+	if idx.RecordID == "" {
+		return trusterr.New(trusterr.CodeInvalidArgument, "record index record_id is required")
+	}
+	var old model.RecordIndex
+	oldFound := false
+	if existing, ok, err := s.GetRecordIndex(ctx, idx.RecordID); err != nil {
+		return err
+	} else if ok {
+		old = existing
+		oldFound = true
+	}
+	idx.ProofLevel = model.RecordIndexProofLevel(idx)
+	if err := s.writeRecordIndex(idx); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "write record index", err)
+	}
+	if oldFound {
+		s.removeRecordIndexSecondary(old, idx)
 	}
 	return nil
 }
@@ -100,6 +120,8 @@ func (s LocalStore) ListRecordIndexes(ctx context.Context, opts model.RecordList
 		dir = s.recordByStorageTokenDir(model.RecordStorageQueryToken(opts.Query))
 	case opts.BatchID != "":
 		dir = s.recordByBatchDir(opts.BatchID)
+	case opts.ProofLevel != "":
+		dir = s.recordByProofLevelDir(opts.ProofLevel)
 	case opts.TenantID != "":
 		dir = s.recordByTenantDir(opts.TenantID)
 	case opts.ClientID != "":
@@ -246,6 +268,46 @@ func (s LocalStore) ListRootsAfter(ctx context.Context, afterClosedAtUnixN int64
 		if len(roots) >= limit {
 			break
 		}
+	}
+	return roots, nil
+}
+
+func (s LocalStore) ListRootsPage(ctx context.Context, opts model.RootListOptions) ([]model.BatchRoot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list roots page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	entries, err := os.ReadDir(s.rootDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read root directory", err)
+	}
+	roots := make([]model.BatchRoot, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tdroot") {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list roots page canceled", err)
+		}
+		data, err := os.ReadFile(filepath.Join(s.rootDir(), entry.Name()))
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read batch root", err)
+		}
+		var root model.BatchRoot
+		if err := cborx.UnmarshalLimit(data, &root, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode batch root", err)
+		}
+		if !model.BatchRootAfterCursor(root, opts) {
+			continue
+		}
+		roots = append(roots, root)
+	}
+	sortBatchRoots(roots, opts.Direction)
+	if len(roots) > limit {
+		roots = roots[:limit]
 	}
 	return roots, nil
 }
@@ -672,6 +734,46 @@ func (s LocalStore) ListGlobalLeavesRange(ctx context.Context, startIndex uint64
 	return leaves, nil
 }
 
+func (s LocalStore) ListGlobalLeavesPage(ctx context.Context, opts model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global leaves page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	entries, err := os.ReadDir(s.globalLeafDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read global leaf directory", err)
+	}
+	leaves := make([]model.GlobalLogLeaf, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tdgleaf") {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global leaves page canceled", err)
+		}
+		data, err := os.ReadFile(filepath.Join(s.globalLeafDir(), entry.Name()))
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read global log leaf", err)
+		}
+		var leaf model.GlobalLogLeaf
+		if err := cborx.UnmarshalLimit(data, &leaf, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode global log leaf", err)
+		}
+		if !model.Uint64AfterCursor(leaf.LeafIndex, opts.AfterLeafIndex, opts.Direction) {
+			continue
+		}
+		leaves = append(leaves, leaf)
+	}
+	sortGlobalLeaves(leaves, opts.Direction)
+	if len(leaves) > limit {
+		leaves = leaves[:limit]
+	}
+	return leaves, nil
+}
+
 func (s LocalStore) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeHead) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put sth canceled", err)
@@ -731,6 +833,46 @@ func (s LocalStore) ListSignedTreeHeadsAfter(ctx context.Context, afterTreeSize 
 		out = append(out, sth)
 	}
 	return out, nil
+}
+
+func (s LocalStore) ListSignedTreeHeadsPage(ctx context.Context, opts model.TreeHeadListOptions) ([]model.SignedTreeHead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list signed tree heads page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	entries, err := os.ReadDir(s.sthDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read signed tree head directory", err)
+	}
+	sths := make([]model.SignedTreeHead, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tdsth") {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list signed tree heads page canceled", err)
+		}
+		data, err := os.ReadFile(filepath.Join(s.sthDir(), entry.Name()))
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read signed tree head", err)
+		}
+		var sth model.SignedTreeHead
+		if err := cborx.UnmarshalLimit(data, &sth, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode signed tree head", err)
+		}
+		if !model.Uint64AfterCursor(sth.TreeSize, opts.AfterTreeSize, opts.Direction) {
+			continue
+		}
+		sths = append(sths, sth)
+	}
+	sortSignedTreeHeads(sths, opts.Direction)
+	if len(sths) > limit {
+		sths = sths[:limit]
+	}
+	return sths, nil
 }
 
 func (s LocalStore) LatestSignedTreeHead(ctx context.Context) (model.SignedTreeHead, bool, error) {
@@ -988,6 +1130,9 @@ func (s LocalStore) MarkGlobalLogPublished(ctx context.Context, batchID string, 
 	if err := writeCBORAtomic(s.globalOutboxPath(batchID), item); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "update global log outbox item", err)
 	}
+	if err := s.promoteBatchRecords(ctx, batchID, "L4"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1161,6 +1306,46 @@ func (s LocalStore) ListSTHAnchorOutboxItemsAfter(ctx context.Context, afterTree
 	return items, nil
 }
 
+func (s LocalStore) ListSTHAnchorsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchors page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	entries, err := os.ReadDir(s.sthAnchorOutboxDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read sth anchor outbox directory", err)
+	}
+	items := make([]model.STHAnchorOutboxItem, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tdsth-anchor") {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchors page canceled", err)
+		}
+		data, err := os.ReadFile(filepath.Join(s.sthAnchorOutboxDir(), entry.Name()))
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read sth anchor outbox item", err)
+		}
+		var item model.STHAnchorOutboxItem
+		if err := cborx.UnmarshalLimit(data, &item, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode sth anchor outbox item", err)
+		}
+		if !model.Uint64AfterCursor(item.TreeSize, opts.AfterTreeSize, opts.Direction) {
+			continue
+		}
+		items = append(items, item)
+	}
+	sortSTHAnchorsByTreeSize(items, opts.Direction)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
 func (s LocalStore) RescheduleSTHAnchor(ctx context.Context, treeSize uint64, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error {
 	item, ok, err := s.GetSTHAnchorOutboxItem(ctx, treeSize)
 	if err != nil {
@@ -1209,6 +1394,15 @@ func (s LocalStore) MarkSTHAnchorPublished(ctx context.Context, result model.STH
 	item.NextAttemptUnixN = 0
 	if err := writeCBORAtomic(s.sthAnchorOutboxPath(result.TreeSize), item); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "update sth anchor outbox item", err)
+	}
+	leaf, ok, err := s.GetGlobalLeaf(ctx, result.TreeSize-1)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if err := s.promoteBatchRecords(ctx, leaf.BatchID, "L5"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1380,6 +1574,10 @@ func (s LocalStore) recordByBatchDir(batchID string) string {
 	return filepath.Join(s.root(), "records", "by-batch", safeFileName(batchID))
 }
 
+func (s LocalStore) recordByProofLevelDir(level string) string {
+	return filepath.Join(s.root(), "records", "by-proof-level", safeFileName(level))
+}
+
 func (s LocalStore) recordByTenantDir(tenantID string) string {
 	return filepath.Join(s.root(), "records", "by-tenant", safeFileName(tenantID))
 }
@@ -1453,26 +1651,14 @@ func (s LocalStore) writeRecordIndex(idx model.RecordIndex) error {
 	if idx.SchemaVersion == "" {
 		idx.SchemaVersion = model.SchemaRecordIndex
 	}
-	paths := []string{
-		s.recordByIDPath(idx.RecordID),
-		filepath.Join(s.recordByTimeDir(), s.recordIndexName(idx)),
+	// Keep record-by-id continuously readable while secondary indexes are
+	// being promoted (for example L3 -> L4 -> L5). List queries may briefly
+	// observe stale secondary entries, but direct GetRecord lookups should
+	// never see a missing record during index replacement.
+	if err := writeCBORAtomic(s.recordByIDPath(idx.RecordID), idx); err != nil {
+		return err
 	}
-	if idx.BatchID != "" {
-		paths = append(paths, filepath.Join(s.recordByBatchDir(idx.BatchID), s.recordIndexName(idx)))
-	}
-	if idx.TenantID != "" {
-		paths = append(paths, filepath.Join(s.recordByTenantDir(idx.TenantID), s.recordIndexName(idx)))
-	}
-	if idx.ClientID != "" {
-		paths = append(paths, filepath.Join(s.recordByClientDir(idx.ClientID), s.recordIndexName(idx)))
-	}
-	if len(idx.ContentHash) > 0 {
-		paths = append(paths, filepath.Join(s.recordByContentDir(idx.ContentHash), s.recordIndexName(idx)))
-	}
-	for _, token := range model.RecordIndexStorageTokens(idx) {
-		paths = append(paths, filepath.Join(s.recordByStorageTokenDir(token), s.recordIndexName(idx)))
-	}
-	for _, path := range paths {
+	for _, path := range s.recordIndexSecondaryPaths(idx) {
 		if err := writeCBORAtomic(path, idx); err != nil {
 			return err
 		}
@@ -1481,12 +1667,37 @@ func (s LocalStore) writeRecordIndex(idx model.RecordIndex) error {
 }
 
 func (s LocalStore) removeRecordIndex(idx model.RecordIndex) {
+	paths := append([]string{s.recordByIDPath(idx.RecordID)}, s.recordIndexSecondaryPaths(idx)...)
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
+}
+
+func (s LocalStore) removeRecordIndexSecondary(old, next model.RecordIndex) {
+	if old.RecordID == "" {
+		return
+	}
+	keep := make(map[string]struct{}, 8)
+	for _, path := range s.recordIndexSecondaryPaths(next) {
+		keep[path] = struct{}{}
+	}
+	for _, path := range s.recordIndexSecondaryPaths(old) {
+		if _, ok := keep[path]; ok {
+			continue
+		}
+		_ = os.Remove(path)
+	}
+}
+
+func (s LocalStore) recordIndexSecondaryPaths(idx model.RecordIndex) []string {
 	paths := []string{
-		s.recordByIDPath(idx.RecordID),
 		filepath.Join(s.recordByTimeDir(), s.recordIndexName(idx)),
 	}
 	if idx.BatchID != "" {
 		paths = append(paths, filepath.Join(s.recordByBatchDir(idx.BatchID), s.recordIndexName(idx)))
+	}
+	if idx.ProofLevel != "" {
+		paths = append(paths, filepath.Join(s.recordByProofLevelDir(idx.ProofLevel), s.recordIndexName(idx)))
 	}
 	if idx.TenantID != "" {
 		paths = append(paths, filepath.Join(s.recordByTenantDir(idx.TenantID), s.recordIndexName(idx)))
@@ -1500,9 +1711,7 @@ func (s LocalStore) removeRecordIndex(idx model.RecordIndex) {
 	for _, token := range model.RecordIndexStorageTokens(idx) {
 		paths = append(paths, filepath.Join(s.recordByStorageTokenDir(token), s.recordIndexName(idx)))
 	}
-	for _, path := range paths {
-		_ = os.Remove(path)
-	}
+	return paths
 }
 
 func normaliseRecordLimit(limit int) int {
@@ -1515,6 +1724,17 @@ func normaliseRecordLimit(limit int) int {
 	return limit
 }
 
+func sortBatchRoots(roots []model.BatchRoot, direction string) {
+	desc := !strings.EqualFold(direction, model.RecordListDirectionAsc)
+	sort.Slice(roots, func(i, j int) bool {
+		cmp := model.CompareBatchRootPosition(roots[i].ClosedAtUnixN, roots[i].BatchID, roots[j].ClosedAtUnixN, roots[j].BatchID)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
 func sortRecordIndexes(indexes []model.RecordIndex, direction string) {
 	desc := !strings.EqualFold(direction, model.RecordListDirectionAsc)
 	sort.Slice(indexes, func(i, j int) bool {
@@ -1524,6 +1744,76 @@ func sortRecordIndexes(indexes []model.RecordIndex, direction string) {
 		}
 		return cmp < 0
 	})
+}
+
+func sortSignedTreeHeads(sths []model.SignedTreeHead, direction string) {
+	desc := !strings.EqualFold(direction, model.RecordListDirectionAsc)
+	sort.Slice(sths, func(i, j int) bool {
+		cmp := model.CompareUint64Position(sths[i].TreeSize, sths[j].TreeSize)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func sortGlobalLeaves(leaves []model.GlobalLogLeaf, direction string) {
+	desc := !strings.EqualFold(direction, model.RecordListDirectionAsc)
+	sort.Slice(leaves, func(i, j int) bool {
+		cmp := model.CompareUint64Position(leaves[i].LeafIndex, leaves[j].LeafIndex)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func sortSTHAnchorsByTreeSize(items []model.STHAnchorOutboxItem, direction string) {
+	desc := !strings.EqualFold(direction, model.RecordListDirectionAsc)
+	sort.Slice(items, func(i, j int) bool {
+		cmp := model.CompareUint64Position(items[i].TreeSize, items[j].TreeSize)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func (s LocalStore) promoteBatchRecords(ctx context.Context, batchID, proofLevel string) error {
+	if batchID == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(s.recordByBatchDir(batchID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return trusterr.Wrap(trusterr.CodeDataLoss, "read batch record index directory", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tdrecord") {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "promote batch record indexes canceled", err)
+		}
+		data, err := os.ReadFile(filepath.Join(s.recordByBatchDir(batchID), entry.Name()))
+		if err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "read batch record index", err)
+		}
+		var idx model.RecordIndex
+		if err := cborx.UnmarshalLimit(data, &idx, maxStoredObjectBytes); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "decode batch record index", err)
+		}
+		if model.ProofLevelRank(model.RecordIndexProofLevel(idx)) >= model.ProofLevelRank(proofLevel) {
+			continue
+		}
+		idx.ProofLevel = proofLevel
+		if err := s.PutRecordIndex(ctx, idx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func safeFileName(value string) string {

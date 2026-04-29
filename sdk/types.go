@@ -71,14 +71,56 @@ type ListRecordsOptions struct {
 	BatchID           string
 	TenantID          string
 	ClientID          string
+	ProofLevel        string
 	Query             string
 	ContentHashHex    string
 	ReceivedFromUnixN int64
 	ReceivedToUnixN   int64
 }
 
+type ListPageOptions struct {
+	Limit     int
+	Direction string
+	Cursor    string
+}
+
 type RecordPage struct {
 	Records    []RecordIndex
+	Limit      int
+	Direction  string
+	NextCursor string
+}
+
+type RootPage struct {
+	Roots      []BatchRoot
+	Limit      int
+	Direction  string
+	NextCursor string
+}
+
+type TreeHeadPage struct {
+	STHs       []SignedTreeHead
+	Limit      int
+	Direction  string
+	NextCursor string
+}
+
+type GlobalLeafPage struct {
+	Leaves     []model.GlobalLogLeaf
+	Limit      int
+	Direction  string
+	NextCursor string
+}
+
+type AnchorPageItem struct {
+	TreeSize uint64
+	Status   string
+	Result   *STHAnchorResult
+	Outbox   *model.STHAnchorOutboxItem
+}
+
+type AnchorPage struct {
+	Anchors    []AnchorPageItem
 	Limit      int
 	Direction  string
 	NextCursor string

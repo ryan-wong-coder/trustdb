@@ -95,6 +95,7 @@ func (t *httpTransport) ListRecords(ctx context.Context, opts ListRecordsOptions
 	setQuery(values, "batch_id", opts.BatchID)
 	setQuery(values, "tenant_id", opts.TenantID)
 	setQuery(values, "client_id", opts.ClientID)
+	setQuery(values, "level", opts.ProofLevel)
 	setQuery(values, "q", opts.Query)
 	setQuery(values, "content_hash", opts.ContentHashHex)
 	if opts.ReceivedFromUnixN > 0 {
@@ -112,19 +113,57 @@ func (t *httpTransport) ListRecords(ctx context.Context, opts ListRecordsOptions
 	return RecordPage{Records: records, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
 }
 
-func (t *httpTransport) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	values := url.Values{}
-	values.Set("limit", strconv.Itoa(limit))
+func (t *httpTransport) ListRootsPage(ctx context.Context, opts ListPageOptions) (RootPage, error) {
+	values := pageValues(opts)
 	var env rootsEnvelope
 	if err := t.getJSON(ctx, "/v1/roots", values, &env); err != nil {
+		return RootPage{}, err
+	}
+	return RootPage{Roots: env.Roots, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
+}
+
+func (t *httpTransport) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
+	page, err := t.ListRootsPage(ctx, ListPageOptions{Limit: limit, Direction: model.RecordListDirectionDesc})
+	if err != nil {
 		return nil, err
 	}
-	roots := make([]BatchRoot, 0, len(env.Roots))
-	roots = append(roots, env.Roots...)
-	return roots, nil
+	return page.Roots, nil
+}
+
+func (t *httpTransport) ListSTHs(ctx context.Context, opts ListPageOptions) (TreeHeadPage, error) {
+	values := pageValues(opts)
+	var env sthsEnvelope
+	if err := t.getJSON(ctx, "/v1/sth", values, &env); err != nil {
+		return TreeHeadPage{}, err
+	}
+	return TreeHeadPage{STHs: env.STHs, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
+}
+
+func (t *httpTransport) ListGlobalLeaves(ctx context.Context, opts ListPageOptions) (GlobalLeafPage, error) {
+	values := pageValues(opts)
+	var env globalLeavesEnvelope
+	if err := t.getJSON(ctx, "/v1/global-log/leaves", values, &env); err != nil {
+		return GlobalLeafPage{}, err
+	}
+	return GlobalLeafPage{Leaves: env.Leaves, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
+}
+
+func (t *httpTransport) ListAnchors(ctx context.Context, opts ListPageOptions) (AnchorPage, error) {
+	values := pageValues(opts)
+	var env anchorsEnvelope
+	if err := t.getJSON(ctx, "/v1/anchors/sth", values, &env); err != nil {
+		return AnchorPage{}, err
+	}
+	items := make([]AnchorPageItem, 0, len(env.Anchors))
+	for _, item := range env.Anchors {
+		items = append(items, AnchorPageItem{
+			TreeSize: item.TreeSize,
+			Status:   item.Status,
+			Result:   item.Result,
+			Outbox:   item.Outbox,
+		})
+	}
+	return AnchorPage{Anchors: items, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
 }
 
 func (t *httpTransport) LatestRoot(ctx context.Context) (BatchRoot, error) {
@@ -260,6 +299,22 @@ func setQuery(values url.Values, name, value string) {
 	}
 }
 
+func pageValues(opts ListPageOptions) url.Values {
+	values := url.Values{}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	values.Set("limit", strconv.Itoa(limit))
+	direction := opts.Direction
+	if direction == "" {
+		direction = model.RecordListDirectionDesc
+	}
+	values.Set("direction", direction)
+	setQuery(values, "cursor", opts.Cursor)
+	return values
+}
+
 type submitClaimEnvelope struct {
 	RecordID        string          `json:"record_id"`
 	Status          string          `json:"status"`
@@ -285,11 +340,36 @@ type recordsEnvelope struct {
 }
 
 type rootsEnvelope struct {
-	Roots []BatchRoot `json:"roots"`
+	Roots      []BatchRoot `json:"roots"`
+	Limit      int         `json:"limit"`
+	Direction  string      `json:"direction"`
+	NextCursor string      `json:"next_cursor,omitempty"`
 }
 
 type anchorEnvelope struct {
-	TreeSize uint64           `json:"tree_size"`
-	Status   string           `json:"status"`
-	Result   *STHAnchorResult `json:"result,omitempty"`
+	TreeSize uint64                     `json:"tree_size"`
+	Status   string                     `json:"status"`
+	Result   *STHAnchorResult           `json:"result,omitempty"`
+	Outbox   *model.STHAnchorOutboxItem `json:"outbox,omitempty"`
+}
+
+type sthsEnvelope struct {
+	STHs       []SignedTreeHead `json:"sths"`
+	Limit      int              `json:"limit"`
+	Direction  string           `json:"direction"`
+	NextCursor string           `json:"next_cursor,omitempty"`
+}
+
+type globalLeavesEnvelope struct {
+	Leaves     []model.GlobalLogLeaf `json:"leaves"`
+	Limit      int                   `json:"limit"`
+	Direction  string                `json:"direction"`
+	NextCursor string                `json:"next_cursor,omitempty"`
+}
+
+type anchorsEnvelope struct {
+	Anchors    []anchorEnvelope `json:"anchors"`
+	Limit      int              `json:"limit"`
+	Direction  string           `json:"direction"`
+	NextCursor string           `json:"next_cursor,omitempty"`
 }

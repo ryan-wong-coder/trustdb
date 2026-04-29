@@ -34,6 +34,7 @@ const (
 	prefixRecordByID     = "record/by-id/"
 	prefixRecordByTime   = "record/by-time/"
 	prefixRecordByBatch  = "record/by-batch/"
+	prefixRecordByLevel  = "record/by-proof-level/"
 	prefixRecordByTenant = "record/by-tenant/"
 	prefixRecordByClient = "record/by-client/"
 	prefixRecordByHash   = "record/by-content/"
@@ -124,6 +125,9 @@ func recordIndexPrefixes(idx model.RecordIndex) []string {
 	prefixes := []string{prefixRecordByTime}
 	if idx.BatchID != "" {
 		prefixes = append(prefixes, prefixRecordByBatch+recordSecondaryPart(idx.BatchID)+"/")
+	}
+	if idx.ProofLevel != "" {
+		prefixes = append(prefixes, prefixRecordByLevel+recordSecondaryPart(idx.ProofLevel)+"/")
 	}
 	if idx.TenantID != "" {
 		prefixes = append(prefixes, prefixRecordByTenant+recordSecondaryPart(idx.TenantID)+"/")
@@ -217,13 +221,6 @@ func (s *Store) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle", err)
 	}
 	idx := model.RecordIndexFromBundle(bundle)
-	if idx.SchemaVersion == "" {
-		idx.SchemaVersion = model.SchemaRecordIndex
-	}
-	indexData, err := cborx.Marshal(idx)
-	if err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "encode record index", err)
-	}
 	var old model.RecordIndex
 	oldFound, err := s.readCBOR(recordByIDKey(bundle.RecordID), &old)
 	if err != nil {
@@ -231,23 +228,37 @@ func (s *Store) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
 	}
 	batch := s.db.NewBatch()
 	defer batch.Close()
-	if oldFound {
-		for _, key := range recordIndexKeys(old) {
-			if err := batch.Delete(key, nil); err != nil {
-				return trusterr.Wrap(trusterr.CodeDataLoss, "stage old record index delete", err)
-			}
-		}
-	}
 	if err := batch.Set(bundleKey(bundle.RecordID), bundleData, nil); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "stage proof bundle", err)
 	}
-	for _, key := range recordIndexKeys(idx) {
-		if err := batch.Set(key, indexData, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index", err)
-		}
+	if err := s.stageRecordIndexReplace(batch, idx, old, oldFound); err != nil {
+		return err
 	}
 	if err := batch.Commit(pdb.Sync); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "commit proof bundle", err)
+	}
+	return nil
+}
+
+func (s *Store) PutRecordIndex(ctx context.Context, idx model.RecordIndex) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put record index canceled", err)
+	}
+	if idx.RecordID == "" {
+		return trusterr.New(trusterr.CodeInvalidArgument, "record index record_id is required")
+	}
+	var old model.RecordIndex
+	oldFound, err := s.readCBOR(recordByIDKey(idx.RecordID), &old)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "read existing record index", err)
+	}
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	if err := s.stageRecordIndexReplace(batch, idx, old, oldFound); err != nil {
+		return err
+	}
+	if err := batch.Commit(pdb.Sync); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "commit record index", err)
 	}
 	return nil
 }
@@ -451,6 +462,60 @@ func (s *Store) ListRootsAfter(ctx context.Context, afterClosedAtUnixN int64, li
 	}
 	if err := iter.Error(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate roots after", err)
+	}
+	return roots, nil
+}
+
+func (s *Store) ListRootsPage(ctx context.Context, opts model.RootListOptions) ([]model.BatchRoot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list roots page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	lower, upper := rootBounds()
+	iter, err := s.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open root iterator", err)
+	}
+	defer iter.Close()
+
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	hasCursor := opts.AfterClosedAtUnixN != 0 || opts.AfterBatchID != ""
+	var ok bool
+	if desc {
+		if hasCursor {
+			ok = iter.SeekLT(rootKey(opts.AfterClosedAtUnixN, opts.AfterBatchID))
+		} else {
+			ok = iter.Last()
+		}
+	} else if hasCursor {
+		ok = iter.SeekGE(rootKey(opts.AfterClosedAtUnixN, opts.AfterBatchID))
+	} else {
+		ok = iter.First()
+	}
+
+	roots := make([]model.BatchRoot, 0, limit)
+	for ok {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list roots page canceled", err)
+		}
+		if len(roots) >= limit {
+			break
+		}
+		var root model.BatchRoot
+		if err := cborx.UnmarshalLimit(iter.Value(), &root, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode batch root", err)
+		}
+		if model.BatchRootAfterCursor(root, opts) {
+			roots = append(roots, root)
+		}
+		if desc {
+			ok = iter.Prev()
+		} else {
+			ok = iter.Next()
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate roots page", err)
 	}
 	return roots, nil
 }
@@ -906,6 +971,59 @@ func (s *Store) ListGlobalLeavesRange(ctx context.Context, startIndex uint64, li
 	return leaves, nil
 }
 
+func (s *Store) ListGlobalLeavesPage(ctx context.Context, opts model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global leaves page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	lower, upper := prefixBounds(prefixGlobalLeaf)
+	iter, err := s.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open global leaf iterator", err)
+	}
+	defer iter.Close()
+
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	var ok bool
+	if desc {
+		if opts.AfterLeafIndex > 0 {
+			ok = iter.SeekLT(globalLeafKey(opts.AfterLeafIndex))
+		} else {
+			ok = iter.Last()
+		}
+	} else if opts.AfterLeafIndex > 0 {
+		ok = iter.SeekGE(globalLeafKey(opts.AfterLeafIndex))
+	} else {
+		ok = iter.First()
+	}
+
+	leaves := make([]model.GlobalLogLeaf, 0, limit)
+	for ok {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global leaves page canceled", err)
+		}
+		if len(leaves) >= limit {
+			break
+		}
+		var leaf model.GlobalLogLeaf
+		if err := cborx.UnmarshalLimit(iter.Value(), &leaf, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode global log leaf", err)
+		}
+		if model.Uint64AfterCursor(leaf.LeafIndex, opts.AfterLeafIndex, opts.Direction) {
+			leaves = append(leaves, leaf)
+		}
+		if desc {
+			ok = iter.Prev()
+		} else {
+			ok = iter.Next()
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate global leaves page", err)
+	}
+	return leaves, nil
+}
+
 func (s *Store) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeHead) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put sth canceled", err)
@@ -970,6 +1088,59 @@ func (s *Store) ListSignedTreeHeadsAfter(ctx context.Context, afterTreeSize uint
 	}
 	if err := iter.Error(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate sth after", err)
+	}
+	return sths, nil
+}
+
+func (s *Store) ListSignedTreeHeadsPage(ctx context.Context, opts model.TreeHeadListOptions) ([]model.SignedTreeHead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list signed tree heads page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	lower, upper := prefixBounds(prefixSTH)
+	iter, err := s.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open signed tree head iterator", err)
+	}
+	defer iter.Close()
+
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	var ok bool
+	if desc {
+		if opts.AfterTreeSize > 0 {
+			ok = iter.SeekLT(sthKey(opts.AfterTreeSize))
+		} else {
+			ok = iter.Last()
+		}
+	} else if opts.AfterTreeSize > 0 {
+		ok = iter.SeekGE(sthKey(opts.AfterTreeSize))
+	} else {
+		ok = iter.First()
+	}
+
+	sths := make([]model.SignedTreeHead, 0, limit)
+	for ok {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list signed tree heads page canceled", err)
+		}
+		if len(sths) >= limit {
+			break
+		}
+		var sth model.SignedTreeHead
+		if err := cborx.UnmarshalLimit(iter.Value(), &sth, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode signed tree head", err)
+		}
+		if model.Uint64AfterCursor(sth.TreeSize, opts.AfterTreeSize, opts.Direction) {
+			sths = append(sths, sth)
+		}
+		if desc {
+			ok = iter.Prev()
+		} else {
+			ok = iter.Next()
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate signed tree heads page", err)
 	}
 	return sths, nil
 }
@@ -1213,7 +1384,10 @@ func (s *Store) MarkGlobalLogPublished(ctx context.Context, batchID string, sth 
 	item.LastAttemptUnixN = now
 	item.NextAttemptUnixN = 0
 	item.CompletedAtUnixN = now
-	return s.replaceGlobalLogOutbox(ctx, old, item)
+	if err := s.replaceGlobalLogOutbox(ctx, old, item); err != nil {
+		return err
+	}
+	return s.promoteBatchRecords(ctx, batchID, "L4")
 }
 
 func (s *Store) RescheduleGlobalLog(ctx context.Context, batchID string, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error {
@@ -1370,6 +1544,59 @@ func (s *Store) ListSTHAnchorOutboxItemsAfter(ctx context.Context, afterTreeSize
 	return items, nil
 }
 
+func (s *Store) ListSTHAnchorsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchors page canceled", err)
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	lower, upper := prefixBounds(prefixAnchorOutbox)
+	iter, err := s.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open sth anchor outbox iterator", err)
+	}
+	defer iter.Close()
+
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	var ok bool
+	if desc {
+		if opts.AfterTreeSize > 0 {
+			ok = iter.SeekLT(anchorOutboxKey(opts.AfterTreeSize))
+		} else {
+			ok = iter.Last()
+		}
+	} else if opts.AfterTreeSize > 0 {
+		ok = iter.SeekGE(anchorOutboxKey(opts.AfterTreeSize))
+	} else {
+		ok = iter.First()
+	}
+
+	items := make([]model.STHAnchorOutboxItem, 0, limit)
+	for ok {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchors page canceled", err)
+		}
+		if len(items) >= limit {
+			break
+		}
+		var item model.STHAnchorOutboxItem
+		if err := cborx.UnmarshalLimit(iter.Value(), &item, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode sth anchor outbox item", err)
+		}
+		if model.Uint64AfterCursor(item.TreeSize, opts.AfterTreeSize, opts.Direction) {
+			items = append(items, item)
+		}
+		if desc {
+			ok = iter.Prev()
+		} else {
+			ok = iter.Next()
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate sth anchors page", err)
+	}
+	return items, nil
+}
+
 func (s *Store) RescheduleSTHAnchor(ctx context.Context, treeSize uint64, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error {
 	item, ok, err := s.GetSTHAnchorOutboxItem(ctx, treeSize)
 	if err != nil {
@@ -1438,7 +1665,14 @@ func (s *Store) MarkSTHAnchorPublished(ctx context.Context, result model.STHAnch
 	if err := batch.Commit(pdb.Sync); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "commit sth anchor published batch", err)
 	}
-	return nil
+	leaf, ok, err := s.GetGlobalLeaf(ctx, result.TreeSize-1)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	return s.promoteBatchRecords(ctx, leaf.BatchID, "L5")
 }
 
 func (s *Store) MarkSTHAnchorFailed(ctx context.Context, treeSize uint64, lastErrorMessage string) error {
@@ -1515,6 +1749,8 @@ func recordListPrefix(opts model.RecordListOptions) string {
 		return prefixRecordByToken + recordSecondaryPart(model.RecordStorageQueryToken(opts.Query)) + "/"
 	case opts.BatchID != "":
 		return prefixRecordByBatch + recordSecondaryPart(opts.BatchID) + "/"
+	case opts.ProofLevel != "":
+		return prefixRecordByLevel + recordSecondaryPart(opts.ProofLevel) + "/"
 	case opts.TenantID != "":
 		return prefixRecordByTenant + recordSecondaryPart(opts.TenantID) + "/"
 	case opts.ClientID != "":
@@ -1541,6 +1777,30 @@ func recordRangeExhausted(idx model.RecordIndex, opts model.RecordListOptions, d
 	return opts.ReceivedToUnixN > 0 && idx.ReceivedAtUnixN > opts.ReceivedToUnixN
 }
 
+func (s *Store) stageRecordIndexReplace(batch *pdb.Batch, idx, old model.RecordIndex, oldFound bool) error {
+	idx.ProofLevel = model.RecordIndexProofLevel(idx)
+	if idx.SchemaVersion == "" {
+		idx.SchemaVersion = model.SchemaRecordIndex
+	}
+	indexData, err := cborx.Marshal(idx)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "encode record index", err)
+	}
+	if oldFound {
+		for _, key := range recordIndexKeys(old) {
+			if err := batch.Delete(key, nil); err != nil {
+				return trusterr.Wrap(trusterr.CodeDataLoss, "stage old record index delete", err)
+			}
+		}
+	}
+	for _, key := range recordIndexKeys(idx) {
+		if err := batch.Set(key, indexData, nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) replaceGlobalLogOutbox(ctx context.Context, old, next model.GlobalLogOutboxItem) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore update global log outbox canceled", err)
@@ -1564,6 +1824,35 @@ func (s *Store) replaceGlobalLogOutbox(ctx context.Context, old, next model.Glob
 	}
 	if err := batch.Commit(pdb.Sync); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "commit global log outbox update", err)
+	}
+	return nil
+}
+
+func (s *Store) promoteBatchRecords(ctx context.Context, batchID, proofLevel string) error {
+	if batchID == "" {
+		return nil
+	}
+	prefix := prefixRecordByBatch + recordSecondaryPart(batchID) + "/"
+	updates := make([]model.RecordIndex, 0, 16)
+	err := s.scanPrefix(ctx, prefix, func(value []byte) error {
+		var idx model.RecordIndex
+		if err := cborx.UnmarshalLimit(value, &idx, maxStoredObjectBytes); err != nil {
+			return err
+		}
+		if model.ProofLevelRank(model.RecordIndexProofLevel(idx)) >= model.ProofLevelRank(proofLevel) {
+			return nil
+		}
+		idx.ProofLevel = proofLevel
+		updates = append(updates, idx)
+		return nil
+	})
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "scan batch record indexes", err)
+	}
+	for _, idx := range updates {
+		if err := s.PutRecordIndex(ctx, idx); err != nil {
+			return err
+		}
 	}
 	return nil
 }

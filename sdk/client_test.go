@@ -86,6 +86,7 @@ func TestClientListRecordsEncodesQuery(t *testing.T) {
 		if query.Get("limit") != "25" ||
 			query.Get("direction") != "asc" ||
 			query.Get("batch_id") != "batch-1" ||
+			query.Get("level") != "L4" ||
 			query.Get("q") != "hello" {
 			t.Fatalf("query = %s", r.URL.RawQuery)
 		}
@@ -107,10 +108,11 @@ func TestClientListRecordsEncodesQuery(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	page, err := client.ListRecords(context.Background(), ListRecordsOptions{
-		Limit:     25,
-		Direction: RecordListDirectionAsc,
-		BatchID:   "batch-1",
-		Query:     "hello",
+		Limit:      25,
+		Direction:  RecordListDirectionAsc,
+		BatchID:    "batch-1",
+		ProofLevel: "L4",
+		Query:      "hello",
 	})
 	if err != nil {
 		t.Fatalf("ListRecords: %v", err)
@@ -128,14 +130,33 @@ func TestClientOperationalEndpoints(t *testing.T) {
 		case "/healthz":
 			writeJSONForTest(t, w, http.StatusOK, map[string]bool{"ok": true})
 		case "/v1/roots":
-			if r.URL.Query().Get("limit") != "7" {
+			if r.URL.Query().Get("limit") != "7" || r.URL.Query().Get("direction") != "desc" {
 				t.Fatalf("roots query = %s", r.URL.RawQuery)
 			}
 			writeJSONForTest(t, w, http.StatusOK, rootsEnvelope{Roots: []BatchRoot{{
 				SchemaVersion: model.SchemaBatchRoot,
 				BatchID:       "batch-1",
 				TreeSize:      1,
-			}}})
+			}}, Limit: 7, Direction: "desc", NextCursor: "root-next"})
+		case "/v1/sth":
+			writeJSONForTest(t, w, http.StatusOK, sthsEnvelope{
+				STHs:  []SignedTreeHead{{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 4, RootHash: []byte{4}}},
+				Limit: 5, Direction: "desc", NextCursor: "sth-next",
+			})
+		case "/v1/global-log/leaves":
+			writeJSONForTest(t, w, http.StatusOK, globalLeavesEnvelope{
+				Leaves: []model.GlobalLogLeaf{{SchemaVersion: model.SchemaGlobalLogLeaf, BatchID: "batch-1", LeafIndex: 3}},
+				Limit:  5, Direction: "desc", NextCursor: "leaf-next",
+			})
+		case "/v1/anchors/sth":
+			writeJSONForTest(t, w, http.StatusOK, anchorsEnvelope{
+				Anchors: []anchorEnvelope{{
+					TreeSize: 4,
+					Status:   "published",
+					Result:   &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"},
+				}},
+				Limit: 5, Direction: "desc", NextCursor: "anchor-next",
+			})
 		case "/v1/roots/latest":
 			writeJSONForTest(t, w, http.StatusOK, BatchRoot{
 				SchemaVersion: model.SchemaBatchRoot,
@@ -165,12 +186,40 @@ func TestClientOperationalEndpoints(t *testing.T) {
 	if len(roots) != 1 || roots[0].BatchID != "batch-1" {
 		t.Fatalf("roots = %+v", roots)
 	}
+	rootPage, err := client.ListRootsPage(context.Background(), ListPageOptions{Limit: 7, Direction: RecordListDirectionDesc})
+	if err != nil {
+		t.Fatalf("ListRootsPage: %v", err)
+	}
+	if rootPage.NextCursor != "root-next" || len(rootPage.Roots) != 1 {
+		t.Fatalf("root page = %+v", rootPage)
+	}
 	latest, err := client.LatestRoot(context.Background())
 	if err != nil {
 		t.Fatalf("LatestRoot: %v", err)
 	}
 	if latest.BatchID != "batch-latest" {
 		t.Fatalf("latest = %+v", latest)
+	}
+	sths, err := client.ListSTHs(context.Background(), ListPageOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("ListSTHs: %v", err)
+	}
+	if len(sths.STHs) != 1 || sths.NextCursor != "sth-next" {
+		t.Fatalf("sths = %+v", sths)
+	}
+	leaves, err := client.ListGlobalLeaves(context.Background(), ListPageOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("ListGlobalLeaves: %v", err)
+	}
+	if len(leaves.Leaves) != 1 || leaves.NextCursor != "leaf-next" {
+		t.Fatalf("leaves = %+v", leaves)
+	}
+	anchors, err := client.ListAnchors(context.Background(), ListPageOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("ListAnchors: %v", err)
+	}
+	if len(anchors.Anchors) != 1 || anchors.NextCursor != "anchor-next" || anchors.Anchors[0].TreeSize != 4 {
+		t.Fatalf("anchors = %+v", anchors)
 	}
 	metrics, err := client.MetricsRaw(context.Background())
 	if err != nil {

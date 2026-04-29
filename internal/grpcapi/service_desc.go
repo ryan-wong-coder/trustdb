@@ -14,9 +14,12 @@ type TrustDBServiceServer interface {
 	GetProofBundle(context.Context, *GetProofBundleRequest) (*GetProofBundleResponse, error)
 	ListRoots(context.Context, *ListRootsRequest) (*ListRootsResponse, error)
 	LatestRoot(context.Context, *LatestRootRequest) (*LatestRootResponse, error)
+	ListSTHs(context.Context, *ListSTHsRequest) (*ListSTHsResponse, error)
 	LatestSTH(context.Context, *LatestSTHRequest) (*LatestSTHResponse, error)
 	GetSTH(context.Context, *GetSTHRequest) (*GetSTHResponse, error)
+	ListGlobalLeaves(context.Context, *ListGlobalLeavesRequest) (*ListGlobalLeavesResponse, error)
 	GetGlobalProof(context.Context, *GetGlobalProofRequest) (*GetGlobalProofResponse, error)
+	ListAnchors(context.Context, *ListAnchorsRequest) (*ListAnchorsResponse, error)
 	GetAnchor(context.Context, *GetAnchorRequest) (*GetAnchorResponse, error)
 	Metrics(context.Context, *MetricsRequest) (*MetricsResponse, error)
 }
@@ -36,9 +39,12 @@ var TrustDBService_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "GetProofBundle", Handler: _TrustDB_GetProofBundle_Handler},
 		{MethodName: "ListRoots", Handler: _TrustDB_ListRoots_Handler},
 		{MethodName: "LatestRoot", Handler: _TrustDB_LatestRoot_Handler},
+		{MethodName: "ListSTHs", Handler: _TrustDB_ListSTHs_Handler},
 		{MethodName: "LatestSTH", Handler: _TrustDB_LatestSTH_Handler},
 		{MethodName: "GetSTH", Handler: _TrustDB_GetSTH_Handler},
+		{MethodName: "ListGlobalLeaves", Handler: _TrustDB_ListGlobalLeaves_Handler},
 		{MethodName: "GetGlobalProof", Handler: _TrustDB_GetGlobalProof_Handler},
+		{MethodName: "ListAnchors", Handler: _TrustDB_ListAnchors_Handler},
 		{MethodName: "GetAnchor", Handler: _TrustDB_GetAnchor_Handler},
 		{MethodName: "Metrics", Handler: _TrustDB_Metrics_Handler},
 	},
@@ -110,6 +116,12 @@ func _TrustDB_LatestRoot_Handler(srv any, ctx context.Context, dec func(any) err
 	})
 }
 
+func _TrustDB_ListSTHs_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return unaryHandler[ListSTHsRequest](srv, ctx, dec, interceptor, "ListSTHs", func(s TrustDBServiceServer, ctx context.Context, req *ListSTHsRequest) (any, error) {
+		return s.ListSTHs(ctx, req)
+	})
+}
+
 func _TrustDB_LatestSTH_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	return unaryHandler[LatestSTHRequest](srv, ctx, dec, interceptor, "LatestSTH", func(s TrustDBServiceServer, ctx context.Context, req *LatestSTHRequest) (any, error) {
 		return s.LatestSTH(ctx, req)
@@ -122,9 +134,21 @@ func _TrustDB_GetSTH_Handler(srv any, ctx context.Context, dec func(any) error, 
 	})
 }
 
+func _TrustDB_ListGlobalLeaves_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return unaryHandler[ListGlobalLeavesRequest](srv, ctx, dec, interceptor, "ListGlobalLeaves", func(s TrustDBServiceServer, ctx context.Context, req *ListGlobalLeavesRequest) (any, error) {
+		return s.ListGlobalLeaves(ctx, req)
+	})
+}
+
 func _TrustDB_GetGlobalProof_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	return unaryHandler[GetGlobalProofRequest](srv, ctx, dec, interceptor, "GetGlobalProof", func(s TrustDBServiceServer, ctx context.Context, req *GetGlobalProofRequest) (any, error) {
 		return s.GetGlobalProof(ctx, req)
+	})
+}
+
+func _TrustDB_ListAnchors_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return unaryHandler[ListAnchorsRequest](srv, ctx, dec, interceptor, "ListAnchors", func(s TrustDBServiceServer, ctx context.Context, req *ListAnchorsRequest) (any, error) {
+		return s.ListAnchors(ctx, req)
 	})
 }
 

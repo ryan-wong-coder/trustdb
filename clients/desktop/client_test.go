@@ -150,6 +150,29 @@ func TestHTTPClientListRecordIndexesSendsServerSearchFilters(t *testing.T) {
 	}
 }
 
+func TestHTTPClientListRecordIndexesSendsLevelFilter(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/records" {
+			t.Fatalf("path = %s, want /v1/records", r.URL.Path)
+		}
+		if r.URL.Query().Get("level") != "L4" {
+			t.Fatalf("query = %s", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(recordPageResponse{Limit: 50, Direction: "desc"})
+	}))
+	defer srv.Close()
+
+	client, err := newServerClient(serverTransportHTTP, srv.URL)
+	if err != nil {
+		t.Fatalf("newServerClient: %v", err)
+	}
+	if _, err := client.listRecordIndexes(context.Background(), RecordPageOptions{Level: "L4"}); err != nil {
+		t.Fatalf("listRecordIndexes level: %v", err)
+	}
+}
+
 func TestNormalizeGRPCTargetStripsHTTPStyleURL(t *testing.T) {
 	t.Parallel()
 

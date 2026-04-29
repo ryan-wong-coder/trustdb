@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/ryan-wong-coder/trustdb/internal/model"
-	"github.com/ryan-wong-coder/trustdb/internal/prooflevel"
 	"github.com/ryan-wong-coder/trustdb/sdk"
 )
 
@@ -189,6 +188,7 @@ func (c *serverClient) listRecordIndexes(ctx context.Context, opts RecordPageOpt
 		BatchID:        opts.BatchID,
 		TenantID:       opts.TenantID,
 		ClientID:       opts.ClientID,
+		ProofLevel:     opts.Level,
 		Query:          query,
 		ContentHashHex: contentHash,
 	})
@@ -229,10 +229,9 @@ func looksLikeSHA256Hex(query string) bool {
 }
 
 func localRecordFromIndex(idx model.RecordIndex) LocalRecord {
-	proofLevel := prooflevel.L2
+	proofLevel := model.RecordIndexProofLevel(idx)
 	var committed *model.CommittedReceipt
 	if idx.BatchID != "" {
-		proofLevel = prooflevel.L3
 		committed = &model.CommittedReceipt{
 			SchemaVersion: model.SchemaCommittedReceipt,
 			RecordID:      idx.RecordID,
@@ -258,7 +257,7 @@ func localRecordFromIndex(idx model.RecordIndex) LocalRecord {
 		TenantID:         idx.TenantID,
 		ClientID:         idx.ClientID,
 		KeyID:            idx.KeyID,
-		ProofLevel:       proofLevel.String(),
+		ProofLevel:       proofLevel,
 		BatchID:          idx.BatchID,
 		CommittedReceipt: committed,
 	}

@@ -26,8 +26,7 @@ export const useRecords = defineStore('records', () => {
   const pending = computed(() => records.value.filter((r) => r.proof_level !== 'L5'))
   const canUseRemote = computed(() => source.value === 'server')
 
-  function canRemoteQuery(_query: string, level: string) {
-    if (level) return false
+  function canRemoteQuery(_query: string, _level: string) {
     return true
   }
 

@@ -150,6 +150,10 @@ func (grpcTestBatch) RootsAfter(context.Context, int64, int) ([]model.BatchRoot,
 	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-2", TreeSize: 2, ClosedAtUnixN: 20}}, nil
 }
 
+func (grpcTestBatch) RootsPage(context.Context, model.RootListOptions) ([]model.BatchRoot, error) {
+	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", TreeSize: 1, ClosedAtUnixN: 10}}, nil
+}
+
 func (grpcTestBatch) LatestRoot(context.Context) (model.BatchRoot, error) {
 	return model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-latest", TreeSize: 3}, nil
 }

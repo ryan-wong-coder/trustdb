@@ -214,9 +214,9 @@ func TestRecordEndpoints(t *testing.T) {
 
 	batchSvc := &fakeBatchService{
 		records: []model.RecordIndex{
-			{SchemaVersion: model.SchemaRecordIndex, RecordID: "rec-3", TenantID: "tenant-b", BatchID: "batch-2", ReceivedAtUnixN: 300, ContentHash: bytes.Repeat([]byte{3}, 32), StorageURI: "file:///vault/report-final.pdf"},
-			{SchemaVersion: model.SchemaRecordIndex, RecordID: "rec-2", TenantID: "tenant-a", BatchID: "batch-1", ReceivedAtUnixN: 200, ContentHash: bytes.Repeat([]byte{2}, 32), StorageURI: "file:///vault/screenshot-alpha.png"},
-			{SchemaVersion: model.SchemaRecordIndex, RecordID: "rec-1", TenantID: "tenant-a", BatchID: "batch-1", ReceivedAtUnixN: 100, ContentHash: bytes.Repeat([]byte{1}, 32), StorageURI: "file:///vault/notes.txt"},
+			{SchemaVersion: model.SchemaRecordIndex, RecordID: "rec-3", TenantID: "tenant-b", BatchID: "batch-2", ProofLevel: "L5", ReceivedAtUnixN: 300, ContentHash: bytes.Repeat([]byte{3}, 32), StorageURI: "file:///vault/report-final.pdf"},
+			{SchemaVersion: model.SchemaRecordIndex, RecordID: "rec-2", TenantID: "tenant-a", BatchID: "batch-1", ProofLevel: "L4", ReceivedAtUnixN: 200, ContentHash: bytes.Repeat([]byte{2}, 32), StorageURI: "file:///vault/screenshot-alpha.png"},
+			{SchemaVersion: model.SchemaRecordIndex, RecordID: "rec-1", TenantID: "tenant-a", BatchID: "batch-1", ProofLevel: "L3", ReceivedAtUnixN: 100, ContentHash: bytes.Repeat([]byte{1}, 32), StorageURI: "file:///vault/notes.txt"},
 		},
 	}
 	handler := New(nil, nil, batchSvc)
@@ -304,6 +304,89 @@ func TestRecordEndpoints(t *testing.T) {
 	if len(byRange.Records) != 1 || byRange.Records[0].RecordID != "rec-2" {
 		t.Fatalf("range records page = %+v", byRange)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/records?level=L5&limit=10", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("records level status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var byLevel recordsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &byLevel); err != nil {
+		t.Fatalf("decode level records response: %v", err)
+	}
+	if len(byLevel.Records) != 1 || byLevel.Records[0].RecordID != "rec-3" {
+		t.Fatalf("level records page = %+v", byLevel)
+	}
+}
+
+func TestGlobalAndAnchorListEndpoints(t *testing.T) {
+	t.Parallel()
+
+	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, fakeGlobalService{
+		sths: []model.SignedTreeHead{
+			{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 3, RootHash: []byte{3}},
+			{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 2, RootHash: []byte{2}},
+			{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{1}},
+		},
+		leaves: []model.GlobalLogLeaf{
+			{SchemaVersion: model.SchemaGlobalLogLeaf, BatchID: "batch-3", LeafIndex: 2},
+			{SchemaVersion: model.SchemaGlobalLogLeaf, BatchID: "batch-2", LeafIndex: 1},
+			{SchemaVersion: model.SchemaGlobalLogLeaf, BatchID: "batch-1", LeafIndex: 0},
+		},
+	}, fakeAnchorService{
+		items: []model.STHAnchorOutboxItem{
+			{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 3, Status: model.AnchorStatePending},
+			{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 2, Status: model.AnchorStatePublished},
+			{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 1, Status: model.AnchorStatePublished},
+		},
+		results: map[uint64]model.STHAnchorResult{
+			2: {SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, AnchorID: "anchor-2", SinkName: "ots"},
+			1: {SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 1, AnchorID: "anchor-1", SinkName: "ots"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sth?limit=2", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sth list status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var sthsPage sthsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &sthsPage); err != nil {
+		t.Fatalf("decode sth page: %v", err)
+	}
+	if len(sthsPage.STHs) != 2 || sthsPage.STHs[0].TreeSize != 3 || sthsPage.NextCursor == "" {
+		t.Fatalf("sth page = %+v", sthsPage)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/global-log/leaves?limit=2", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("global leaves status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var leavesPage globalLeavesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &leavesPage); err != nil {
+		t.Fatalf("decode leaves page: %v", err)
+	}
+	if len(leavesPage.Leaves) != 2 || leavesPage.Leaves[0].LeafIndex != 2 || leavesPage.NextCursor == "" {
+		t.Fatalf("leaves page = %+v", leavesPage)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth?limit=2", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anchor list status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var anchorsPage anchorsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &anchorsPage); err != nil {
+		t.Fatalf("decode anchor page: %v", err)
+	}
+	if len(anchorsPage.Anchors) != 2 || anchorsPage.Anchors[0].TreeSize != 3 || anchorsPage.NextCursor == "" {
+		t.Fatalf("anchor page = %+v", anchorsPage)
+	}
 }
 
 type processorFunc func(context.Context, model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error)
@@ -390,6 +473,29 @@ func (f *fakeBatchService) RootsAfter(ctx context.Context, afterClosedAtUnixN in
 	return out, nil
 }
 
+func (f *fakeBatchService) RootsPage(ctx context.Context, opts model.RootListOptions) ([]model.BatchRoot, error) {
+	roots := append([]model.BatchRoot(nil), f.roots...)
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	sort.Slice(roots, func(i, j int) bool {
+		cmp := model.CompareBatchRootPosition(roots[i].ClosedAtUnixN, roots[i].BatchID, roots[j].ClosedAtUnixN, roots[j].BatchID)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+	out := make([]model.BatchRoot, 0, opts.Limit)
+	for _, root := range roots {
+		if !model.BatchRootAfterCursor(root, opts) {
+			continue
+		}
+		out = append(out, root)
+		if len(out) >= opts.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeBatchService) LatestRoot(ctx context.Context) (model.BatchRoot, error) {
 	if len(f.roots) == 0 {
 		return model.BatchRoot{}, nil
@@ -401,4 +507,121 @@ func (f *fakeBatchService) enqueuedRecordID() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.enqueued
+}
+
+type fakeGlobalService struct {
+	sths   []model.SignedTreeHead
+	leaves []model.GlobalLogLeaf
+}
+
+func (f fakeGlobalService) LatestSTH(context.Context) (model.SignedTreeHead, bool, error) {
+	if len(f.sths) == 0 {
+		return model.SignedTreeHead{}, false, nil
+	}
+	return f.sths[0], true, nil
+}
+
+func (f fakeGlobalService) STH(_ context.Context, treeSize uint64) (model.SignedTreeHead, bool, error) {
+	for _, sth := range f.sths {
+		if sth.TreeSize == treeSize {
+			return sth, true, nil
+		}
+	}
+	return model.SignedTreeHead{}, false, nil
+}
+
+func (f fakeGlobalService) ListSTHs(_ context.Context, opts model.TreeHeadListOptions) ([]model.SignedTreeHead, error) {
+	sths := append([]model.SignedTreeHead(nil), f.sths...)
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	sort.Slice(sths, func(i, j int) bool {
+		cmp := model.CompareUint64Position(sths[i].TreeSize, sths[j].TreeSize)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+	out := make([]model.SignedTreeHead, 0, opts.Limit)
+	for _, sth := range sths {
+		if !model.Uint64AfterCursor(sth.TreeSize, opts.AfterTreeSize, opts.Direction) {
+			continue
+		}
+		out = append(out, sth)
+		if len(out) >= opts.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f fakeGlobalService) ListLeaves(_ context.Context, opts model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error) {
+	leaves := append([]model.GlobalLogLeaf(nil), f.leaves...)
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	sort.Slice(leaves, func(i, j int) bool {
+		cmp := model.CompareUint64Position(leaves[i].LeafIndex, leaves[j].LeafIndex)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+	out := make([]model.GlobalLogLeaf, 0, opts.Limit)
+	for _, leaf := range leaves {
+		if !model.Uint64AfterCursor(leaf.LeafIndex, opts.AfterLeafIndex, opts.Direction) {
+			continue
+		}
+		out = append(out, leaf)
+		if len(out) >= opts.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f fakeGlobalService) InclusionProof(context.Context, string, uint64) (model.GlobalLogProof, error) {
+	return model.GlobalLogProof{}, nil
+}
+
+func (f fakeGlobalService) ConsistencyProof(context.Context, uint64, uint64) (model.GlobalConsistencyProof, error) {
+	return model.GlobalConsistencyProof{}, nil
+}
+
+type fakeAnchorService struct {
+	items   []model.STHAnchorOutboxItem
+	results map[uint64]model.STHAnchorResult
+}
+
+func (f fakeAnchorService) AnchorResult(_ context.Context, treeSize uint64) (model.STHAnchorResult, bool, error) {
+	result, ok := f.results[treeSize]
+	return result, ok, nil
+}
+
+func (f fakeAnchorService) AnchorStatus(_ context.Context, treeSize uint64) (model.STHAnchorOutboxItem, bool, error) {
+	for _, item := range f.items {
+		if item.TreeSize == treeSize {
+			return item, true, nil
+		}
+	}
+	return model.STHAnchorOutboxItem{}, false, nil
+}
+
+func (f fakeAnchorService) Anchors(_ context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error) {
+	items := append([]model.STHAnchorOutboxItem(nil), f.items...)
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
+	sort.Slice(items, func(i, j int) bool {
+		cmp := model.CompareUint64Position(items[i].TreeSize, items[j].TreeSize)
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+	out := make([]model.STHAnchorOutboxItem, 0, opts.Limit)
+	for _, item := range items {
+		if !model.Uint64AfterCursor(item.TreeSize, opts.AfterTreeSize, opts.Direction) {
+			continue
+		}
+		out = append(out, item)
+		if len(out) >= opts.Limit {
+			break
+		}
+	}
+	return out, nil
 }
