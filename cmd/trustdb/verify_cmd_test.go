@@ -86,8 +86,8 @@ func TestVerifyCmdRemoteAnchor(t *testing.T) {
 }
 
 // TestVerifyCmdRemoteSkipAnchor exercises the same remote flow but
-// with --skip-anchor so the command stops at L3 even though the
-// server has a published anchor available.
+// with --skip-anchor so the command still verifies L4 global-log evidence
+// while ignoring the published L5 anchor.
 func TestVerifyCmdRemoteSkipAnchor(t *testing.T) {
 	ctx := context.Background()
 
@@ -115,8 +115,8 @@ func TestVerifyCmdRemoteSkipAnchor(t *testing.T) {
 	if err := json.Unmarshal(outBuf.Bytes(), &result); err != nil {
 		t.Fatalf("decode output: %v", err)
 	}
-	if !result.Valid || result.ProofLevel != "L3" {
-		t.Fatalf("verify result = %+v, want L3 valid", result)
+	if !result.Valid || result.ProofLevel != "L4" {
+		t.Fatalf("verify result = %+v, want L4 valid", result)
 	}
 }
 
