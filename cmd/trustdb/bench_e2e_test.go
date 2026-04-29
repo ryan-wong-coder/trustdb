@@ -1,0 +1,276 @@
+//go:build e2e
+
+package main
+
+import (
+	"context"
+	"net"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ryan-wong-coder/trustdb/internal/anchor"
+	"github.com/ryan-wong-coder/trustdb/internal/app"
+	"github.com/ryan-wong-coder/trustdb/internal/batch"
+	"github.com/ryan-wong-coder/trustdb/internal/globallog"
+	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
+	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
+	"github.com/ryan-wong-coder/trustdb/internal/ingest"
+	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/observability"
+	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
+	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
+	"github.com/ryan-wong-coder/trustdb/internal/wal"
+	"github.com/ryan-wong-coder/trustdb/sdk"
+	"google.golang.org/grpc"
+)
+
+func TestBenchIngestCollectsPebbleMetricsOverHTTPAndGRPC(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		transport string
+		clientFor func(testing.TB, benchPebbleE2EEnv) *sdk.Client
+	}{
+		{
+			name:      "http",
+			transport: "http",
+			clientFor: func(tb testing.TB, env benchPebbleE2EEnv) *sdk.Client {
+				tb.Helper()
+				client, err := sdk.NewClient(env.httpURL)
+				if err != nil {
+					tb.Fatalf("NewClient: %v", err)
+				}
+				return client
+			},
+		},
+		{
+			name:      "grpc",
+			transport: "grpc",
+			clientFor: func(tb testing.TB, env benchPebbleE2EEnv) *sdk.Client {
+				tb.Helper()
+				client, err := sdk.NewGRPCClient(env.grpcTarget)
+				if err != nil {
+					tb.Fatalf("NewGRPCClient: %v", err)
+				}
+				return client
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			env := newBenchPebbleE2EEnv(t)
+			client := tt.clientFor(t, env)
+			defer client.Close()
+
+			result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
+				Endpoint:      client.BaseURL(),
+				Transport:     tt.transport,
+				Identity:      env.identity,
+				Count:         4,
+				Concurrency:   2,
+				PayloadBytes:  512,
+				ProgressEvery: 0,
+				Samples:       2,
+				ProofLevel:    sdk.ProofLevelL5,
+				ProofTimeout:  10 * time.Second,
+				Settle:        250 * time.Millisecond,
+				EventType:     "bench.e2e",
+				Source:        "bench-pebble-e2e",
+			})
+			if err != nil {
+				t.Fatalf("runBenchIngest: %v", err)
+			}
+			if result.Submitted != 4 {
+				t.Fatalf("submitted = %d, want 4", result.Submitted)
+			}
+			if result.ProofSamples.Samples == 0 || result.ProofSamples.Ready == 0 {
+				t.Fatalf("proof summary = %+v, want samples and ready > 0", result.ProofSamples)
+			}
+			if len(result.Metrics) == 0 {
+				t.Fatalf("metrics diff is empty")
+			}
+
+			rawMetrics, err := client.MetricsRaw(context.Background())
+			if err != nil {
+				t.Fatalf("MetricsRaw: %v", err)
+			}
+			if !strings.Contains(rawMetrics, "trustdb_pebble_wal_bytes_written_total") {
+				t.Fatalf("metrics endpoint missing pebble WAL metric")
+			}
+
+			walBytesWritten := mustFindBenchMetric(t, result.Metrics, "trustdb_pebble_wal_bytes_written_total")
+			if walBytesWritten.After <= 0 || walBytesWritten.Delta <= 0 {
+				t.Fatalf("wal bytes written metric = %+v, want after/delta > 0", walBytesWritten)
+			}
+
+			walSize := mustFindBenchMetric(t, result.Metrics, "trustdb_pebble_wal_size_bytes")
+			if walSize.After <= 0 {
+				t.Fatalf("wal size metric = %+v, want after > 0", walSize)
+			}
+
+			if _, ok := findBenchMetric(result.Metrics, "trustdb_pebble_memtable_size_bytes"); !ok {
+				t.Fatalf("result metrics missing pebble memtable size entry")
+			}
+		})
+	}
+}
+
+type benchPebbleE2EEnv struct {
+	httpURL    string
+	grpcTarget string
+	identity   sdk.Identity
+}
+
+func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
+	t.Helper()
+
+	clientPub, clientPriv, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key client: %v", err)
+	}
+	_, serverPriv, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key server: %v", err)
+	}
+
+	tmp := t.TempDir()
+	writer, _, err := openWALWriterWithOptions(filepath.Join(tmp, "wal"), wal.Options{})
+	if err != nil {
+		t.Fatalf("openWALWriterWithOptions: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+
+	reg, metrics := observability.NewRegistry()
+	engine := app.LocalEngine{
+		ServerID:         "server-bench-pebble-e2e",
+		ServerKeyID:      "server-key",
+		ClientPublicKey:  clientPub,
+		ServerPrivateKey: serverPriv,
+		WAL:              writer,
+		Idempotency:      app.NewIdempotencyIndex(),
+		Now:              func() time.Time { return time.Now().UTC() },
+	}
+	store, err := proofstore.Open(proofstore.Config{
+		Kind: proofstore.BackendPebble,
+		Path: filepath.Join(tmp, "pebble"),
+	})
+	if err != nil {
+		t.Fatalf("proofstore.Open(pebble): %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if enabled, err := observability.RegisterPebbleMetrics(reg, store); err != nil {
+		t.Fatalf("RegisterPebbleMetrics: %v", err)
+	} else if !enabled {
+		t.Fatalf("RegisterPebbleMetrics enabled = false, want true")
+	}
+
+	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 16, Workers: 2}, metrics)
+	t.Cleanup(func() { _ = ingestSvc.Shutdown(context.Background()) })
+
+	anchorSvc, err := anchor.NewService(anchor.Config{
+		Sink:         anchor.NewNoopSink(),
+		Store:        store,
+		Metrics:      metrics,
+		PollInterval: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("anchor.NewService: %v", err)
+	}
+	anchorSvc.Start(context.Background())
+	t.Cleanup(anchorSvc.Stop)
+
+	rt := &runtimeConfig{logger: silentLogger()}
+	globalSvc, err := globallog.New(globallog.Options{
+		Store:      store,
+		LogID:      engine.ServerID,
+		KeyID:      engine.ServerKeyID,
+		PrivateKey: serverPriv,
+	})
+	if err != nil {
+		t.Fatalf("globallog.New: %v", err)
+	}
+	globalOutbox := globallog.NewOutboxWorker(globallog.OutboxConfig{
+		Store:        store,
+		Global:       globalSvc,
+		PollInterval: 20 * time.Millisecond,
+		OnSTH: func(ctx context.Context, sth model.SignedTreeHead) {
+			enqueueSTHAnchor(ctx, rt, store, anchorSvc, sth)
+		},
+	})
+	globalOutbox.Start(context.Background())
+	t.Cleanup(globalOutbox.Stop)
+
+	batchSvc := batch.New(engine, store, batch.Options{
+		QueueSize:        16,
+		MaxRecords:       1,
+		MaxDelay:         20 * time.Millisecond,
+		OnBatchCommitted: newGlobalLogEnqueueHook(rt, store, globalOutbox),
+	}, metrics)
+	t.Cleanup(func() { _ = batchSvc.Shutdown(context.Background()) })
+
+	metricsHandler := observability.Handler(reg)
+	anchorAPI := anchor.NewAPI(store)
+	httpServer := httptest.NewServer(httpapi.NewWithGlobalAndAnchors(ingestSvc, metricsHandler, batchSvc, globalSvc, anchorAPI))
+	t.Cleanup(httpServer.Close)
+
+	grpcListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen grpc: %v", err)
+	}
+	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(grpcapi.MaxMessageBytes),
+		grpc.MaxSendMsgSize(grpcapi.MaxMessageBytes),
+	)
+	grpcapi.RegisterTrustDBServiceServer(grpcServer, grpcapi.NewServer(ingestSvc, batchSvc, globalSvc, anchorAPI, metricsHandler))
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- grpcServer.Serve(grpcListener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = grpcListener.Close()
+		select {
+		case err := <-serveErr:
+			if err != nil && err != grpc.ErrServerStopped {
+				t.Fatalf("grpc serve: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("grpc server did not stop")
+		}
+	})
+
+	return benchPebbleE2EEnv{
+		httpURL:    httpServer.URL,
+		grpcTarget: grpcListener.Addr().String(),
+		identity: sdk.Identity{
+			TenantID:   "tenant-bench-e2e",
+			ClientID:   "client-bench-e2e",
+			KeyID:      "client-key",
+			PrivateKey: clientPriv,
+		},
+	}
+}
+
+func mustFindBenchMetric(t *testing.T, metrics []benchMetricDelta, name string) benchMetricDelta {
+	t.Helper()
+	metric, ok := findBenchMetric(metrics, name)
+	if !ok {
+		t.Fatalf("metric %q not found in %+v", name, metrics)
+	}
+	return metric
+}
+
+func findBenchMetric(metrics []benchMetricDelta, name string) (benchMetricDelta, bool) {
+	for _, metric := range metrics {
+		if metric.Name == name {
+			return metric, true
+		}
+	}
+	return benchMetricDelta{}, false
+}
