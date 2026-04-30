@@ -196,7 +196,7 @@ Important configuration groups:
 | Group | Purpose |
 | --- | --- |
 | `paths` | Data, key registry, WAL, object, and proof directories. |
-| `metastore` / `metastore_path` | Proofstore backend selection: `file` or `pebble`; `tikv` is reserved for the planned native TiKV backend and currently fails fast instead of using a local cache. |
+| `metastore` / `metastore_path` | Proofstore backend selection: `file`, `pebble`, or experimental `tikv`; for TiKV, `metastore_path` may provide comma-separated PD endpoints. |
 | `wal` | Fsync strategy and group-commit interval. |
 | `server` | HTTP listen address, optional gRPC listen address, queue size, workers, and timeouts. |
 | `batch` | Batch queue, max records, and max delay. |

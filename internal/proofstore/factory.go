@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	pebblestore "github.com/ryan-wong-coder/trustdb/internal/proofstore/pebble"
+	tikvstore "github.com/ryan-wong-coder/trustdb/internal/proofstore/tikv"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
@@ -52,7 +53,15 @@ func Open(cfg Config) (Store, error) {
 		if !hasTiKVPDAddress(cfg) {
 			return nil, trusterr.New(trusterr.CodeInvalidArgument, "tikv proofstore requires at least one PD endpoint")
 		}
-		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "tikv proofstore backend is not implemented yet")
+		return tikvstore.OpenWithOptions(tikvstore.Options{
+			PDAddresses:                  cfg.TiKVPDAddresses,
+			PDAddressText:                cfg.Path,
+			Keyspace:                     cfg.TiKVKeyspace,
+			RecordIndexMode:              cfg.RecordIndexMode,
+			ArtifactSyncMode:             cfg.ArtifactSyncMode,
+			IndexStorageTokens:           cfg.IndexStorageTokens,
+			IndexStorageTokensConfigured: cfg.IndexStorageTokensConfigured,
+		})
 	default:
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown proofstore backend: "+string(cfg.Kind))
 	}

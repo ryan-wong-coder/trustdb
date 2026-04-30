@@ -532,7 +532,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().IntVar(&walKeepSegments, "wal-keep-segments", 0, "after checkpoint advance, keep this many segments older than the checkpoint-covered segment (directory mode; 0 = only retain the active segment + checkpoint-covered one)")
 	cmd.Flags().StringVar(&walFsyncMode, "wal-fsync-mode", "", "WAL fsync mode: strict, group (production default), or batch")
 	cmd.Flags().StringVar(&walGroupCommitIntervalText, "wal-group-commit-interval", "", "WAL group fsync interval when --wal-fsync-mode=group (default 10ms)")
-	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default), pebble, or tikv (experimental, not implemented)")
+	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default), pebble, or tikv (experimental)")
 	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path (defaults to --proof-dir; for tikv, accepts comma-separated PD endpoints)")
 	cmd.Flags().StringVar(&proofstoreTiKVPDText, "proofstore-tikv-pd-endpoints", "", "comma-separated TiKV PD endpoints for the tikv proofstore backend")
 	cmd.Flags().StringVar(&proofstoreTiKVKeyspace, "proofstore-tikv-keyspace", "", "TiKV keyspace for the tikv proofstore backend")

@@ -21,13 +21,10 @@ func TestNormalizePDAddresses(t *testing.T) {
 	}
 }
 
-func TestOpenWithOptionsFailsUntilNativeStoreExists(t *testing.T) {
+func TestOpenWithOptionsRequiresPDEndpoints(t *testing.T) {
 	t.Parallel()
 
 	if _, err := OpenWithOptions(Options{}); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
 		t.Fatalf("OpenWithOptions without endpoints error code = %s, want %s", trusterr.CodeOf(err), trusterr.CodeInvalidArgument)
-	}
-	if _, err := OpenWithOptions(Options{PDAddressText: "127.0.0.1:2379"}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("OpenWithOptions error code = %s, want %s", trusterr.CodeOf(err), trusterr.CodeFailedPrecondition)
 	}
 }

@@ -13,7 +13,7 @@ TrustDB 单机路径：`ingest` → WAL → `batch` → proofstore（file/Pebble
 ### 1. TiKV 作为完整 proofstore / KV 后端
 
 - TiKV **不是**旁路元数据目录或仅索引服务，而是可选的 **proofstore 后端**，需实现与 file/Pebble 相同的 `proofstore.Store` 契约（含 `CommitGlobalLogAppend`、`BatchArtifactWriter` 等）。
-- 配置通过 `metastore: tikv` 与 PD 地址等参数选择（见 `internal/config` 与 `internal/proofstore/factory.go`）。当前代码只保留配置与包边界，原生 TiKV proofstore 未完成前，`metastore=tikv` 必须显式启动失败，不能退化为本地临时缓存。
+- 配置通过 `metastore: tikv` 与 PD 地址等参数选择（见 `internal/config` 与 `internal/proofstore/factory.go`）。TiKV 后端必须连接原生 TiKV proofstore，不能退化为本地临时缓存。
 - 值编码与 Pebble/file 一致：确定性 CBOR + 与 Pebble 相同的 bundle 信封语义，便于备份与迁移。
 
 ### 2. 存算分离
