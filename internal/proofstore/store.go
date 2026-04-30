@@ -60,6 +60,10 @@ type Store interface {
 	// ListGlobalLogTilesAfter follows the same cursor convention as
 	// ListGlobalLogNodesAfter.
 	ListGlobalLogTilesAfter(ctx context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogTile, error)
+	// CommitGlobalLogAppend persists one complete Global Log append as a
+	// single semantic unit. Backends with transaction support should commit
+	// leaf indexes, subtree nodes, latest state, and STH atomically.
+	CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error
 
 	// Global-log append outbox. Batch commit writes these items durably; a
 	// separate worker appends them to the global transparency log and then

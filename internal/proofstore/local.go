@@ -793,6 +793,41 @@ func (s LocalStore) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeH
 	return nil
 }
 
+func (s LocalStore) CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore commit global log append canceled", err)
+	}
+	if entry.Leaf.BatchID == "" {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append leaf batch_id is required")
+	}
+	if entry.STH.TreeSize == 0 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append STH tree_size is required")
+	}
+	if entry.Leaf.LeafIndex != entry.STH.TreeSize-1 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append STH tree_size must match leaf index")
+	}
+	if entry.State.TreeSize != entry.STH.TreeSize {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append state and STH tree_size must match")
+	}
+	for _, node := range entry.Nodes {
+		if node.Width == 0 {
+			return trusterr.New(trusterr.CodeInvalidArgument, "global log append node width is required")
+		}
+	}
+	if err := s.PutGlobalLeaf(ctx, entry.Leaf); err != nil {
+		return err
+	}
+	for _, node := range entry.Nodes {
+		if err := s.PutGlobalLogNode(ctx, node); err != nil {
+			return err
+		}
+	}
+	if err := s.PutGlobalLogState(ctx, entry.State); err != nil {
+		return err
+	}
+	return s.PutSignedTreeHead(ctx, entry.STH)
+}
+
 func (s LocalStore) GetSignedTreeHead(ctx context.Context, treeSize uint64) (model.SignedTreeHead, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.SignedTreeHead{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get sth canceled", err)

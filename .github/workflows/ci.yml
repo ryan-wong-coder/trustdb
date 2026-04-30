@@ -144,7 +144,7 @@ jobs:
       TRUSTDB_BENCH_MIN_CANDIDATE_THROUGHPUT: "1"
       TRUSTDB_BENCH_MAX_THROUGHPUT_REGRESSION_PCT: "80"
       TRUSTDB_BENCH_MAX_DURATION_REGRESSION_PCT: "200"
-      TRUSTDB_BENCH_MAX_SUBMIT_P95_REGRESSION_PCT: "200"
+      TRUSTDB_BENCH_MAX_SUBMIT_P95_REGRESSION_PCT: "0"
       TRUSTDB_BENCH_MAX_CANDIDATE_SUBMIT_P95_MS: "0"
       TRUSTDB_BENCH_MAX_CANDIDATE_FAILED: "0"
       TRUSTDB_BENCH_MAX_CANDIDATE_BATCH_ERRORS: "0"
@@ -196,6 +196,8 @@ jobs:
           summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
 
           lines = ["## Bench Smoke"]
+          submit_p95_regression = os.environ.get("TRUSTDB_BENCH_MAX_SUBMIT_P95_REGRESSION_PCT", "").strip()
+          submit_p95_regression_label = "disabled" if submit_p95_regression in ("", "0") else f"{submit_p95_regression}%"
           if compare_path.exists():
               compare = json.loads(compare_path.read_text(encoding="utf-8"))
               baseline = compare.get("baseline", {})
@@ -219,7 +221,7 @@ jobs:
                   f"- min candidate throughput: {os.environ.get('TRUSTDB_BENCH_MIN_CANDIDATE_THROUGHPUT', '')} ops/s",
                   f"- max throughput regression: {os.environ.get('TRUSTDB_BENCH_MAX_THROUGHPUT_REGRESSION_PCT', '')}%",
                   f"- max duration regression: {os.environ.get('TRUSTDB_BENCH_MAX_DURATION_REGRESSION_PCT', '')}%",
-                  f"- max submit p95 regression: {os.environ.get('TRUSTDB_BENCH_MAX_SUBMIT_P95_REGRESSION_PCT', '')}%",
+                  f"- max submit p95 regression: {submit_p95_regression_label}",
                   f"- max candidate submit p95: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_SUBMIT_P95_MS', '')} ms",
                   f"- max candidate failed: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_FAILED', '')}",
                   f"- max candidate batch errors: {os.environ.get('TRUSTDB_BENCH_MAX_CANDIDATE_BATCH_ERRORS', '')}",

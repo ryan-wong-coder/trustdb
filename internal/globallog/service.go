@@ -39,6 +39,7 @@ type Store interface {
 	LatestSignedTreeHead(context.Context) (model.SignedTreeHead, bool, error)
 	PutGlobalLogTile(context.Context, model.GlobalLogTile) error
 	ListGlobalLogTiles(context.Context) ([]model.GlobalLogTile, error)
+	CommitGlobalLogAppend(context.Context, model.GlobalLogAppend) error
 }
 
 type Service struct {
@@ -121,6 +122,7 @@ func (s *Service) AppendBatchRoot(ctx context.Context, root model.BatchRoot) (mo
 		if found {
 			return sth, nil
 		}
+		return model.SignedTreeHead{}, trusterr.New(trusterr.CodeDataLoss, "global log leaf exists without matching signed tree head")
 	}
 
 	state, err := s.loadState(ctx)
@@ -141,26 +143,20 @@ func (s *Service) AppendBatchRoot(ctx context.Context, root model.BatchRoot) (mo
 		return model.SignedTreeHead{}, trusterr.Wrap(trusterr.CodeInternal, "hash global log leaf", err)
 	}
 	leaf.LeafHash = hash
-	if err := s.store.PutGlobalLeaf(ctx, leaf); err != nil {
-		return model.SignedTreeHead{}, err
-	}
 	nextState, nodes, err := s.appendState(state, leaf)
 	if err != nil {
-		return model.SignedTreeHead{}, err
-	}
-	for _, node := range nodes {
-		if err := s.store.PutGlobalLogNode(ctx, node); err != nil {
-			return model.SignedTreeHead{}, err
-		}
-	}
-	if err := s.store.PutGlobalLogState(ctx, nextState); err != nil {
 		return model.SignedTreeHead{}, err
 	}
 	sth, err := s.signSTHFromState(nextState)
 	if err != nil {
 		return model.SignedTreeHead{}, err
 	}
-	if err := s.store.PutSignedTreeHead(ctx, sth); err != nil {
+	if err := s.store.CommitGlobalLogAppend(ctx, model.GlobalLogAppend{
+		Leaf:  leaf,
+		Nodes: nodes,
+		State: nextState,
+		STH:   sth,
+	}); err != nil {
 		return model.SignedTreeHead{}, err
 	}
 	return sth, nil

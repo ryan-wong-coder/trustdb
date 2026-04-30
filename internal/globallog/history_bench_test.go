@@ -334,6 +334,10 @@ func (s *countingGlobalStore) PutGlobalLeaf(ctx context.Context, leaf model.Glob
 	return s.base.PutGlobalLeaf(ctx, leaf)
 }
 
+func (s *countingGlobalStore) CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error {
+	return s.base.CommitGlobalLogAppend(ctx, entry)
+}
+
 func (s *countingGlobalStore) GetGlobalLeaf(ctx context.Context, index uint64) (model.GlobalLogLeaf, bool, error) {
 	s.leafReads.Add(1)
 	return s.base.GetGlobalLeaf(ctx, index)
@@ -437,6 +441,28 @@ func (s *memoryGlobalStore) PutGlobalLeaf(ctx context.Context, leaf model.Global
 	leaf = cloneGlobalLogLeaf(leaf)
 	s.leaves[leaf.LeafIndex] = leaf
 	s.leavesByBatch[leaf.BatchID] = leaf
+	return nil
+}
+
+func (s *memoryGlobalStore) CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "memory global log append canceled", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	leaf := cloneGlobalLogLeaf(entry.Leaf)
+	s.leaves[leaf.LeafIndex] = leaf
+	s.leavesByBatch[leaf.BatchID] = leaf
+	for _, node := range entry.Nodes {
+		s.nodes[globalNodeKey{level: node.Level, start: node.StartIndex}] = cloneGlobalLogNode(node)
+	}
+	s.state = cloneGlobalLogState(entry.State)
+	s.hasState = true
+	sth := cloneSignedTreeHead(entry.STH)
+	s.sths[sth.TreeSize] = sth
+	if sth.TreeSize > s.latestSTH {
+		s.latestSTH = sth.TreeSize
+	}
 	return nil
 }
 

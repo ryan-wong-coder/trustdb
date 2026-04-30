@@ -1053,6 +1053,94 @@ func (s *Store) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeHead)
 	return nil
 }
 
+func (s *Store) CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore commit global log append canceled", err)
+	}
+	if entry.Leaf.BatchID == "" {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append leaf batch_id is required")
+	}
+	if entry.STH.TreeSize == 0 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append STH tree_size is required")
+	}
+	if entry.Leaf.LeafIndex != entry.STH.TreeSize-1 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append STH tree_size must match leaf index")
+	}
+	if entry.State.TreeSize != entry.STH.TreeSize {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log append state and STH tree_size must match")
+	}
+	for _, node := range entry.Nodes {
+		if node.Width == 0 {
+			return trusterr.New(trusterr.CodeInvalidArgument, "global log append node width is required")
+		}
+	}
+	if entry.Leaf.SchemaVersion == "" {
+		entry.Leaf.SchemaVersion = model.SchemaGlobalLogLeaf
+	}
+	if entry.Leaf.AppendedAtUnixN == 0 {
+		entry.Leaf.AppendedAtUnixN = time.Now().UTC().UnixNano()
+	}
+	if entry.State.SchemaVersion == "" {
+		entry.State.SchemaVersion = model.SchemaGlobalLogState
+	}
+	if entry.State.UpdatedAtUnixN == 0 {
+		entry.State.UpdatedAtUnixN = time.Now().UTC().UnixNano()
+	}
+	if entry.STH.SchemaVersion == "" {
+		entry.STH.SchemaVersion = model.SchemaSignedTreeHead
+	}
+	if entry.STH.TimestampUnixN == 0 {
+		entry.STH.TimestampUnixN = time.Now().UTC().UnixNano()
+	}
+
+	leafData, err := cborx.Marshal(entry.Leaf)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "encode global log append leaf", err)
+	}
+	stateData, err := cborx.Marshal(entry.State)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "encode global log append state", err)
+	}
+	sthData, err := cborx.Marshal(entry.STH)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "encode global log append STH", err)
+	}
+
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	if err := batch.Set(globalLeafKey(entry.Leaf.LeafIndex), leafData, nil); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log append leaf", err)
+	}
+	if err := batch.Set(globalBatchKey(entry.Leaf.BatchID), leafData, nil); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log append leaf batch index", err)
+	}
+	for _, node := range entry.Nodes {
+		if node.SchemaVersion == "" {
+			node.SchemaVersion = model.SchemaGlobalLogNode
+		}
+		if node.CreatedAtUnixN == 0 {
+			node.CreatedAtUnixN = time.Now().UTC().UnixNano()
+		}
+		nodeData, err := cborx.Marshal(node)
+		if err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "encode global log append node", err)
+		}
+		if err := batch.Set(globalNodeKey(node.Level, node.StartIndex), nodeData, nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log append node", err)
+		}
+	}
+	if err := batch.Set([]byte(globalStateKey), stateData, nil); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log append state", err)
+	}
+	if err := batch.Set(sthKey(entry.STH.TreeSize), sthData, nil); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log append STH", err)
+	}
+	if err := batch.Commit(pdb.Sync); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "commit global log append", err)
+	}
+	return nil
+}
+
 func (s *Store) GetSignedTreeHead(ctx context.Context, treeSize uint64) (model.SignedTreeHead, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.SignedTreeHead{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get sth canceled", err)
