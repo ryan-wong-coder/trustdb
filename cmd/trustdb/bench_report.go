@@ -13,24 +13,30 @@ import (
 )
 
 const (
-	benchIngestReportSchema  = "trustdb.bench.ingest.v1"
-	benchCompareReportSchema = "trustdb.bench.compare.v2"
+	benchIngestReportSchema   = "trustdb.bench.ingest.v3"
+	benchIngestReportSchemaV1 = "trustdb.bench.ingest.v1"
+	benchIngestReportSchemaV2 = "trustdb.bench.ingest.v2"
+	benchCompareReportSchema  = "trustdb.bench.compare.v2"
 )
 
 type benchCompareConfig struct {
-	BaselinePath               string
-	CandidatePath              string
-	OutputFormat               string
-	MinCandidateThroughput     float64
-	MaxThroughputRegressionPct float64
-	MaxDurationRegressionPct   float64
-	MaxSubmitP95RegressionPct  float64
-	MaxCandidateSubmitP95Ms    float64
-	MaxCandidateFailed         int
-	MaxCandidateBatchErrors    int
-	MaxCandidateQueryFailed    int
-	MaxCandidateProofTimeouts  int
-	MaxCandidateProofFailed    int
+	BaselinePath                     string
+	CandidatePath                    string
+	OutputFormat                     string
+	MinCandidateThroughput           float64
+	MaxThroughputRegressionPct       float64
+	MinCandidateSubmitThroughput     float64
+	MaxSubmitThroughputRegressionPct float64
+	MaxDurationRegressionPct         float64
+	MaxSubmitP95RegressionPct        float64
+	MaxCandidateSubmitP95Ms          float64
+	MaxCandidateFailed               int
+	MaxCandidateBatchErrors          int
+	MaxCandidateQueryFailed          int
+	MaxCandidateImmediateQueryFailed int
+	MaxCandidatePostProofQueryFailed int
+	MaxCandidateProofTimeouts        int
+	MaxCandidateProofFailed          int
 }
 
 type benchCompareResult struct {
@@ -45,33 +51,41 @@ type benchCompareResult struct {
 }
 
 type benchCompareMetadata struct {
-	SchemaVersion    string  `json:"schema_version"`
-	Endpoint         string  `json:"endpoint"`
-	Transport        string  `json:"transport"`
-	Count            int     `json:"count"`
-	Concurrency      int     `json:"concurrency"`
-	PayloadBytes     int     `json:"payload_bytes"`
-	Submitted        int     `json:"submitted"`
-	Failed           int     `json:"failed"`
-	BatchErrors      int     `json:"batch_errors"`
-	DurationSeconds  float64 `json:"duration_seconds"`
-	ThroughputPerSec float64 `json:"throughput_per_sec"`
+	SchemaVersion          string  `json:"schema_version"`
+	Endpoint               string  `json:"endpoint"`
+	Transport              string  `json:"transport"`
+	Count                  int     `json:"count"`
+	Concurrency            int     `json:"concurrency"`
+	PayloadBytes           int     `json:"payload_bytes"`
+	Submitted              int     `json:"submitted"`
+	Failed                 int     `json:"failed"`
+	BatchErrors            int     `json:"batch_errors"`
+	DurationSeconds        float64 `json:"duration_seconds"`
+	ThroughputPerSec       float64 `json:"throughput_per_sec"`
+	SubmitDurationSeconds  float64 `json:"submit_duration_seconds,omitempty"`
+	SubmitThroughputPerSec float64 `json:"submit_throughput_per_sec,omitempty"`
 }
 
 type benchCompareSummary struct {
-	Submitted        benchNumberComparison `json:"submitted"`
-	Failed           benchNumberComparison `json:"failed"`
-	BatchErrors      benchNumberComparison `json:"batch_errors"`
-	DurationSeconds  benchNumberComparison `json:"duration_seconds"`
-	ThroughputPerSec benchNumberComparison `json:"throughput_per_sec"`
-	SubmitAvgMs      benchNumberComparison `json:"submit_avg_ms"`
-	SubmitP95Ms      benchNumberComparison `json:"submit_p95_ms"`
-	SubmitP99Ms      benchNumberComparison `json:"submit_p99_ms"`
-	QueryReady       benchNumberComparison `json:"query_ready"`
-	QueryFailed      benchNumberComparison `json:"query_failed"`
-	ProofReady       benchNumberComparison `json:"proof_ready"`
-	ProofTimeouts    benchNumberComparison `json:"proof_timeouts"`
-	ProofFailed      benchNumberComparison `json:"proof_failed"`
+	Submitted              benchNumberComparison `json:"submitted"`
+	Failed                 benchNumberComparison `json:"failed"`
+	BatchErrors            benchNumberComparison `json:"batch_errors"`
+	DurationSeconds        benchNumberComparison `json:"duration_seconds"`
+	ThroughputPerSec       benchNumberComparison `json:"throughput_per_sec"`
+	SubmitDurationSeconds  benchNumberComparison `json:"submit_duration_seconds"`
+	SubmitThroughputPerSec benchNumberComparison `json:"submit_throughput_per_sec"`
+	SubmitAvgMs            benchNumberComparison `json:"submit_avg_ms"`
+	SubmitP95Ms            benchNumberComparison `json:"submit_p95_ms"`
+	SubmitP99Ms            benchNumberComparison `json:"submit_p99_ms"`
+	QueryReady             benchNumberComparison `json:"query_ready"`
+	QueryFailed            benchNumberComparison `json:"query_failed"`
+	ImmediateQueryReady    benchNumberComparison `json:"immediate_query_ready"`
+	ImmediateQueryFailed   benchNumberComparison `json:"immediate_query_failed"`
+	PostProofQueryReady    benchNumberComparison `json:"post_proof_query_ready"`
+	PostProofQueryFailed   benchNumberComparison `json:"post_proof_query_failed"`
+	ProofReady             benchNumberComparison `json:"proof_ready"`
+	ProofTimeouts          benchNumberComparison `json:"proof_timeouts"`
+	ProofFailed            benchNumberComparison `json:"proof_failed"`
 }
 
 type benchNumberComparison struct {
@@ -153,12 +167,16 @@ func newBenchCompareCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().StringVar(&cfg.OutputFormat, "output", "text", "output format: text or json")
 	cmd.Flags().Float64Var(&cfg.MinCandidateThroughput, "min-candidate-throughput", 0, "fail if candidate throughput_per_sec is lower than this value")
 	cmd.Flags().Float64Var(&cfg.MaxThroughputRegressionPct, "max-throughput-regression-pct", 0, "fail if candidate throughput regresses more than this percentage versus baseline")
+	cmd.Flags().Float64Var(&cfg.MinCandidateSubmitThroughput, "min-candidate-submit-throughput", 0, "fail if candidate submit_throughput_per_sec is lower than this value")
+	cmd.Flags().Float64Var(&cfg.MaxSubmitThroughputRegressionPct, "max-submit-throughput-regression-pct", 0, "fail if candidate submit throughput regresses more than this percentage versus baseline")
 	cmd.Flags().Float64Var(&cfg.MaxDurationRegressionPct, "max-duration-regression-pct", 0, "fail if candidate duration_seconds increases more than this percentage versus baseline")
 	cmd.Flags().Float64Var(&cfg.MaxSubmitP95RegressionPct, "max-submit-p95-regression-pct", 0, "fail if candidate submit_p95_ms increases more than this percentage versus baseline")
 	cmd.Flags().Float64Var(&cfg.MaxCandidateSubmitP95Ms, "max-candidate-submit-p95-ms", 0, "fail if candidate submit_p95_ms exceeds this absolute value")
 	cmd.Flags().IntVar(&cfg.MaxCandidateFailed, "max-candidate-failed", 0, "fail if candidate failed submissions exceeds this value")
 	cmd.Flags().IntVar(&cfg.MaxCandidateBatchErrors, "max-candidate-batch-errors", 0, "fail if candidate batch_errors exceeds this value")
-	cmd.Flags().IntVar(&cfg.MaxCandidateQueryFailed, "max-candidate-query-failed", 0, "fail if candidate query_failed exceeds this value")
+	cmd.Flags().IntVar(&cfg.MaxCandidateQueryFailed, "max-candidate-query-failed", 0, "legacy alias for --max-candidate-immediate-query-failed")
+	cmd.Flags().IntVar(&cfg.MaxCandidateImmediateQueryFailed, "max-candidate-immediate-query-failed", 0, "fail if candidate immediate_query_failed exceeds this value")
+	cmd.Flags().IntVar(&cfg.MaxCandidatePostProofQueryFailed, "max-candidate-post-proof-query-failed", 0, "fail if candidate post_proof_query_failed exceeds this value")
 	cmd.Flags().IntVar(&cfg.MaxCandidateProofTimeouts, "max-candidate-proof-timeouts", 0, "fail if candidate proof_timeouts exceeds this value")
 	cmd.Flags().IntVar(&cfg.MaxCandidateProofFailed, "max-candidate-proof-failed", 0, "fail if candidate proof_failed exceeds this value")
 	return cmd
@@ -192,19 +210,12 @@ func readBenchIngestReportFile(path string) (benchIngestResult, error) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return benchIngestResult{}, err
 	}
-	if result.SchemaVersion == "" {
-		result.SchemaVersion = benchIngestReportSchema
-	}
-	return result, nil
+	return normalizeBenchIngestResult(result), nil
 }
 
 func compareBenchIngestResults(baselinePath, candidatePath string, baseline, candidate benchIngestResult) benchCompareResult {
-	if baseline.SchemaVersion == "" {
-		baseline.SchemaVersion = benchIngestReportSchema
-	}
-	if candidate.SchemaVersion == "" {
-		candidate.SchemaVersion = benchIngestReportSchema
-	}
+	baseline = normalizeBenchIngestResult(baseline)
+	candidate = normalizeBenchIngestResult(candidate)
 	return benchCompareResult{
 		SchemaVersion: benchCompareReportSchema,
 		BaselinePath:  baselinePath,
@@ -212,38 +223,78 @@ func compareBenchIngestResults(baselinePath, candidatePath string, baseline, can
 		Baseline:      benchCompareMetadataFromResult(baseline),
 		Candidate:     benchCompareMetadataFromResult(candidate),
 		Summary: benchCompareSummary{
-			Submitted:        benchNumberDelta(float64(baseline.Submitted), float64(candidate.Submitted)),
-			Failed:           benchNumberDelta(float64(baseline.Failed), float64(candidate.Failed)),
-			BatchErrors:      benchNumberDelta(float64(baseline.BatchErrors), float64(candidate.BatchErrors)),
-			DurationSeconds:  benchNumberDelta(baseline.DurationSeconds, candidate.DurationSeconds),
-			ThroughputPerSec: benchNumberDelta(baseline.ThroughputPerSec, candidate.ThroughputPerSec),
-			SubmitAvgMs:      benchNumberDelta(baseline.SubmitLatency.AvgMs, candidate.SubmitLatency.AvgMs),
-			SubmitP95Ms:      benchNumberDelta(baseline.SubmitLatency.P95Ms, candidate.SubmitLatency.P95Ms),
-			SubmitP99Ms:      benchNumberDelta(baseline.SubmitLatency.P99Ms, candidate.SubmitLatency.P99Ms),
-			QueryReady:       benchNumberDelta(float64(baseline.QuerySamples.Ready), float64(candidate.QuerySamples.Ready)),
-			QueryFailed:      benchNumberDelta(float64(baseline.QuerySamples.Failed), float64(candidate.QuerySamples.Failed)),
-			ProofReady:       benchNumberDelta(float64(baseline.ProofSamples.Ready), float64(candidate.ProofSamples.Ready)),
-			ProofTimeouts:    benchNumberDelta(float64(baseline.ProofSamples.Timeouts), float64(candidate.ProofSamples.Timeouts)),
-			ProofFailed:      benchNumberDelta(float64(baseline.ProofSamples.Failed), float64(candidate.ProofSamples.Failed)),
+			Submitted:              benchNumberDelta(float64(baseline.Submitted), float64(candidate.Submitted)),
+			Failed:                 benchNumberDelta(float64(baseline.Failed), float64(candidate.Failed)),
+			BatchErrors:            benchNumberDelta(float64(baseline.BatchErrors), float64(candidate.BatchErrors)),
+			DurationSeconds:        benchNumberDelta(baseline.DurationSeconds, candidate.DurationSeconds),
+			ThroughputPerSec:       benchNumberDelta(baseline.ThroughputPerSec, candidate.ThroughputPerSec),
+			SubmitDurationSeconds:  benchNumberDelta(baseline.SubmitDurationSeconds, candidate.SubmitDurationSeconds),
+			SubmitThroughputPerSec: benchNumberDelta(baseline.SubmitThroughputPerSec, candidate.SubmitThroughputPerSec),
+			SubmitAvgMs:            benchNumberDelta(baseline.SubmitLatency.AvgMs, candidate.SubmitLatency.AvgMs),
+			SubmitP95Ms:            benchNumberDelta(baseline.SubmitLatency.P95Ms, candidate.SubmitLatency.P95Ms),
+			SubmitP99Ms:            benchNumberDelta(baseline.SubmitLatency.P99Ms, candidate.SubmitLatency.P99Ms),
+			QueryReady:             benchNumberDelta(float64(baseline.QuerySamples.Ready), float64(candidate.QuerySamples.Ready)),
+			QueryFailed:            benchNumberDelta(float64(baseline.QuerySamples.Failed), float64(candidate.QuerySamples.Failed)),
+			ImmediateQueryReady:    benchNumberDelta(float64(baseline.ImmediateQuerySamples.Ready), float64(candidate.ImmediateQuerySamples.Ready)),
+			ImmediateQueryFailed:   benchNumberDelta(float64(baseline.ImmediateQuerySamples.Failed), float64(candidate.ImmediateQuerySamples.Failed)),
+			PostProofQueryReady:    benchNumberDelta(float64(baseline.PostProofQuerySamples.Ready), float64(candidate.PostProofQuerySamples.Ready)),
+			PostProofQueryFailed:   benchNumberDelta(float64(baseline.PostProofQuerySamples.Failed), float64(candidate.PostProofQuerySamples.Failed)),
+			ProofReady:             benchNumberDelta(float64(baseline.ProofSamples.Ready), float64(candidate.ProofSamples.Ready)),
+			ProofTimeouts:          benchNumberDelta(float64(baseline.ProofSamples.Timeouts), float64(candidate.ProofSamples.Timeouts)),
+			ProofFailed:            benchNumberDelta(float64(baseline.ProofSamples.Failed), float64(candidate.ProofSamples.Failed)),
 		},
 		Metrics: compareBenchMetricDeltas(baseline.Metrics, candidate.Metrics),
 	}
 }
 
 func benchCompareMetadataFromResult(result benchIngestResult) benchCompareMetadata {
+	result = normalizeBenchIngestResult(result)
 	return benchCompareMetadata{
-		SchemaVersion:    result.SchemaVersion,
-		Endpoint:         result.Endpoint,
-		Transport:        result.Transport,
-		Count:            result.Count,
-		Concurrency:      result.Concurrency,
-		PayloadBytes:     result.PayloadBytes,
-		Submitted:        result.Submitted,
-		Failed:           result.Failed,
-		BatchErrors:      result.BatchErrors,
-		DurationSeconds:  result.DurationSeconds,
-		ThroughputPerSec: result.ThroughputPerSec,
+		SchemaVersion:          result.SchemaVersion,
+		Endpoint:               result.Endpoint,
+		Transport:              result.Transport,
+		Count:                  result.Count,
+		Concurrency:            result.Concurrency,
+		PayloadBytes:           result.PayloadBytes,
+		Submitted:              result.Submitted,
+		Failed:                 result.Failed,
+		BatchErrors:            result.BatchErrors,
+		DurationSeconds:        result.DurationSeconds,
+		ThroughputPerSec:       result.ThroughputPerSec,
+		SubmitDurationSeconds:  result.SubmitDurationSeconds,
+		SubmitThroughputPerSec: result.SubmitThroughputPerSec,
 	}
+}
+
+func normalizeBenchIngestResult(result benchIngestResult) benchIngestResult {
+	if result.SchemaVersion == "" {
+		result.SchemaVersion = benchIngestReportSchema
+	}
+	if result.SubmitThroughputPerSec == 0 {
+		if result.SubmitDurationSeconds > 0 {
+			result.SubmitThroughputPerSec = float64(result.Submitted) / result.SubmitDurationSeconds
+		} else {
+			result.SubmitThroughputPerSec = result.ThroughputPerSec
+		}
+	}
+	if result.SubmitDurationSeconds == 0 && result.SubmitThroughputPerSec > 0 {
+		result.SubmitDurationSeconds = float64(result.Submitted) / result.SubmitThroughputPerSec
+	}
+	if result.ImmediateQuerySamples.Samples == 0 &&
+		(result.QuerySamples.Samples > 0 || result.QuerySamples.Ready > 0 || result.QuerySamples.Failed > 0) {
+		result.ImmediateQuerySamples = result.QuerySamples
+	}
+	if result.QuerySamples.Samples == 0 &&
+		(result.ImmediateQuerySamples.Samples > 0 || result.ImmediateQuerySamples.Ready > 0 || result.ImmediateQuerySamples.Failed > 0) {
+		result.QuerySamples = result.ImmediateQuerySamples
+	}
+	if result.ImmediateQueryDurationSeconds == 0 && result.QueryDurationSeconds > 0 {
+		result.ImmediateQueryDurationSeconds = result.QueryDurationSeconds
+	}
+	if result.QueryDurationSeconds == 0 && result.ImmediateQueryDurationSeconds > 0 {
+		result.QueryDurationSeconds = result.ImmediateQueryDurationSeconds
+	}
+	return result
 }
 
 func compareBenchMetricDeltas(baseline, candidate []benchMetricDelta) []benchMetricComparison {
@@ -317,11 +368,17 @@ func writeBenchCompareText(w io.Writer, result benchCompareResult) {
 	writeBenchComparisonLine(w, "batch_errors", result.Summary.BatchErrors, 0)
 	writeBenchComparisonLine(w, "duration_seconds", result.Summary.DurationSeconds, 3)
 	writeBenchComparisonLine(w, "throughput_per_sec", result.Summary.ThroughputPerSec, 2)
+	writeBenchComparisonLine(w, "submit_duration_seconds", result.Summary.SubmitDurationSeconds, 3)
+	writeBenchComparisonLine(w, "submit_throughput_per_sec", result.Summary.SubmitThroughputPerSec, 2)
 	writeBenchComparisonLine(w, "submit_avg_ms", result.Summary.SubmitAvgMs, 2)
 	writeBenchComparisonLine(w, "submit_p95_ms", result.Summary.SubmitP95Ms, 2)
 	writeBenchComparisonLine(w, "submit_p99_ms", result.Summary.SubmitP99Ms, 2)
 	writeBenchComparisonLine(w, "query_ready", result.Summary.QueryReady, 0)
 	writeBenchComparisonLine(w, "query_failed", result.Summary.QueryFailed, 0)
+	writeBenchComparisonLine(w, "immediate_query_ready", result.Summary.ImmediateQueryReady, 0)
+	writeBenchComparisonLine(w, "immediate_query_failed", result.Summary.ImmediateQueryFailed, 0)
+	writeBenchComparisonLine(w, "post_proof_query_ready", result.Summary.PostProofQueryReady, 0)
+	writeBenchComparisonLine(w, "post_proof_query_failed", result.Summary.PostProofQueryFailed, 0)
 	writeBenchComparisonLine(w, "proof_ready", result.Summary.ProofReady, 0)
 	writeBenchComparisonLine(w, "proof_timeouts", result.Summary.ProofTimeouts, 0)
 	writeBenchComparisonLine(w, "proof_failed", result.Summary.ProofFailed, 0)
@@ -434,6 +491,12 @@ func evaluateBenchCompareAssertions(cmd *cobra.Command, cfg benchCompareConfig, 
 	} else if cmd.Flags().Changed("max-throughput-regression-pct") {
 		addMax("max-throughput-regression-pct", "throughput_regression_pct", 0, cfg.MaxThroughputRegressionPct, "pct")
 	}
+	addMin("min-candidate-submit-throughput", "candidate_submit_throughput_per_sec", result.Candidate.SubmitThroughputPerSec, cfg.MinCandidateSubmitThroughput, "ops/s")
+	if delta := result.Summary.SubmitThroughputPerSec.DeltaPct; delta != nil {
+		addMax("max-submit-throughput-regression-pct", "submit_throughput_regression_pct", math.Max(0, -*delta), cfg.MaxSubmitThroughputRegressionPct, "pct")
+	} else if cmd.Flags().Changed("max-submit-throughput-regression-pct") {
+		addMax("max-submit-throughput-regression-pct", "submit_throughput_regression_pct", 0, cfg.MaxSubmitThroughputRegressionPct, "pct")
+	}
 	if delta := result.Summary.DurationSeconds.DeltaPct; delta != nil {
 		addMax("max-duration-regression-pct", "duration_regression_pct", math.Max(0, *delta), cfg.MaxDurationRegressionPct, "pct")
 	} else if cmd.Flags().Changed("max-duration-regression-pct") {
@@ -447,7 +510,9 @@ func evaluateBenchCompareAssertions(cmd *cobra.Command, cfg benchCompareConfig, 
 	addMax("max-candidate-submit-p95-ms", "candidate_submit_p95_ms", result.Summary.SubmitP95Ms.Candidate, cfg.MaxCandidateSubmitP95Ms, "ms")
 	addMax("max-candidate-failed", "candidate_failed", float64(result.Candidate.Failed), float64(cfg.MaxCandidateFailed), "count")
 	addMax("max-candidate-batch-errors", "candidate_batch_errors", float64(result.Candidate.BatchErrors), float64(cfg.MaxCandidateBatchErrors), "count")
-	addMax("max-candidate-query-failed", "candidate_query_failed", result.Summary.QueryFailed.Candidate, float64(cfg.MaxCandidateQueryFailed), "count")
+	addMax("max-candidate-query-failed", "candidate_immediate_query_failed", result.Summary.ImmediateQueryFailed.Candidate, float64(cfg.MaxCandidateQueryFailed), "count")
+	addMax("max-candidate-immediate-query-failed", "candidate_immediate_query_failed", result.Summary.ImmediateQueryFailed.Candidate, float64(cfg.MaxCandidateImmediateQueryFailed), "count")
+	addMax("max-candidate-post-proof-query-failed", "candidate_post_proof_query_failed", result.Summary.PostProofQueryFailed.Candidate, float64(cfg.MaxCandidatePostProofQueryFailed), "count")
 	addMax("max-candidate-proof-timeouts", "candidate_proof_timeouts", result.Summary.ProofTimeouts.Candidate, float64(cfg.MaxCandidateProofTimeouts), "count")
 	addMax("max-candidate-proof-failed", "candidate_proof_failed", result.Summary.ProofFailed.Candidate, float64(cfg.MaxCandidateProofFailed), "count")
 

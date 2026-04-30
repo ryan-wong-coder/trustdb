@@ -190,6 +190,12 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 						rt.logger.Warn().Err(err).Str("wal", walPath).Msg("wal segment metric refresh failed")
 					}
 				},
+				OnAppend: func(mode string, d time.Duration) {
+					metrics.WALAppendLatency.WithLabelValues(mode).Observe(d.Seconds())
+				},
+				OnFsync: func(mode string, d time.Duration) {
+					metrics.WALFsyncLatency.WithLabelValues(mode).Observe(d.Seconds())
+				},
 			}
 			writer, walMode, err := openWALWriterWithOptions(walPath, walOpts)
 			if err != nil {
@@ -846,7 +852,7 @@ func openWALWriterWithOptions(walPath string, opts wal.Options) (*wal.Writer, st
 		// Existing regular file: keep legacy single-file semantics even
 		// if the operator set --wal-max-segment-bytes (it has no effect
 		// here; they must migrate to a directory to enable rotation).
-		w, oerr := wal.OpenWriter(walPath, 1)
+		w, oerr := wal.OpenWriterWithOptions(walPath, 1, opts)
 		return w, "file", oerr
 	case errors.Is(err, os.ErrNotExist):
 		// Heuristic for fresh paths: a path ending in .wal is treated
@@ -854,7 +860,7 @@ func openWALWriterWithOptions(walPath string, opts wal.Options) (*wal.Writer, st
 		// configs and e2e fixtures; anything else (directory-looking
 		// names like "./wal" or "trustdb-wal") becomes a directory.
 		if strings.HasSuffix(strings.ToLower(walPath), ".wal") {
-			w, oerr := wal.OpenWriter(walPath, 1)
+			w, oerr := wal.OpenWriterWithOptions(walPath, 1, opts)
 			return w, "file", oerr
 		}
 		w, oerr := wal.OpenDirWriter(walPath, opts)

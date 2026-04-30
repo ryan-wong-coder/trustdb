@@ -95,3 +95,11 @@ type Store interface {
 // value and pointer receivers on LocalStore resolve through the method
 // set of the pointer, so we pin the pointer form here.
 var _ Store = (*LocalStore)(nil)
+
+// BatchArtifactWriter is an optional fast path for stores that can persist all
+// proof bundles, record indexes, and the batch root in chunked transactional
+// writes. Callers must still write the prepared/committed manifest around this
+// operation; the method only replaces the per-record PutBundle loop.
+type BatchArtifactWriter interface {
+	PutBatchArtifacts(ctx context.Context, bundles []model.ProofBundle, root model.BatchRoot) error
+}

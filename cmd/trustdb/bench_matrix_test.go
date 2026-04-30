@@ -147,17 +147,20 @@ func TestRunBenchMatrixWritesReportsAndSummary(t *testing.T) {
 	result, err := runBenchMatrix(context.Background(), &runtimeConfig{}, cfg, matrix, func(_ context.Context, caseCfg benchIngestConfig) (benchIngestResult, error) {
 		seen = append(seen, caseCfg)
 		return benchIngestResult{
-			SchemaVersion:    benchIngestReportSchema,
-			Endpoint:         caseCfg.Endpoint,
-			Transport:        caseCfg.Transport,
-			Count:            caseCfg.Count,
-			Concurrency:      caseCfg.Concurrency,
-			PayloadBytes:     caseCfg.PayloadBytes,
-			Submitted:        caseCfg.Count,
-			Failed:           caseCfg.Concurrency - 1,
-			ThroughputPerSec: float64(caseCfg.Count * caseCfg.Concurrency),
-			SubmitLatency:    benchLatencySummary{P95Ms: float64(caseCfg.PayloadBytes) / 10},
-			ProofSamples:     benchProofSummary{Samples: caseCfg.Samples, TargetLevel: caseCfg.ProofLevel, Ready: caseCfg.Samples},
+			SchemaVersion:          benchIngestReportSchema,
+			Endpoint:               caseCfg.Endpoint,
+			Transport:              caseCfg.Transport,
+			Count:                  caseCfg.Count,
+			Concurrency:            caseCfg.Concurrency,
+			PayloadBytes:           caseCfg.PayloadBytes,
+			Submitted:              caseCfg.Count,
+			Failed:                 caseCfg.Concurrency - 1,
+			ThroughputPerSec:       float64(caseCfg.Count * caseCfg.Concurrency),
+			SubmitThroughputPerSec: float64(caseCfg.Count * caseCfg.Concurrency * 2),
+			SubmitLatency:          benchLatencySummary{P95Ms: float64(caseCfg.PayloadBytes) / 10},
+			ImmediateQuerySamples:  benchQuerySummary{Samples: caseCfg.Samples, Failed: caseCfg.Concurrency - 1},
+			PostProofQuerySamples:  benchQuerySummary{Samples: caseCfg.Samples, Ready: caseCfg.Samples},
+			ProofSamples:           benchProofSummary{Samples: caseCfg.Samples, TargetLevel: caseCfg.ProofLevel, Ready: caseCfg.Samples, Timeouts: caseCfg.Concurrency - 1},
 		}, nil
 	})
 	if err != nil {
@@ -180,8 +183,14 @@ func TestRunBenchMatrixWritesReportsAndSummary(t *testing.T) {
 	if result.Summary.CaseCount != 2 || result.Summary.TotalSubmitted != 10 || result.Summary.TotalFailed != 3 {
 		t.Fatalf("summary counts = %+v", result.Summary)
 	}
+	if result.Summary.TotalImmediateQueryFailed != 3 || result.Summary.TotalPostProofQueryFailed != 0 || result.Summary.TotalProofTimeouts != 3 {
+		t.Fatalf("summary split query/proof counts = %+v", result.Summary)
+	}
 	if result.Summary.FastestCaseName != "large grpc" || result.Summary.FastestThroughputPerSec != 18 {
 		t.Fatalf("summary fastest = %+v", result.Summary)
+	}
+	if result.Summary.FastestSubmitCaseName != "large grpc" || result.Summary.FastestSubmitThroughputPerSec != 36 {
+		t.Fatalf("summary fastest submit = %+v", result.Summary)
 	}
 	if result.Summary.SlowestSubmitP95CaseName != "large grpc" || result.Summary.SlowestSubmitP95Ms != 102.4 {
 		t.Fatalf("summary slowest = %+v", result.Summary)
@@ -237,24 +246,37 @@ func TestWriteBenchMatrixText(t *testing.T) {
 					Failed:           0,
 					ThroughputPerSec: 8.5,
 					SubmitLatency:    benchLatencySummary{P95Ms: 12},
+					ImmediateQuerySamples: benchQuerySummary{
+						Samples: 2,
+						Failed:  1,
+					},
+					PostProofQuerySamples: benchQuerySummary{
+						Samples: 1,
+						Ready:   1,
+					},
+					ProofSamples: benchProofSummary{Timeouts: 1},
 				},
 			},
 		},
 		Summary: benchMatrixSummary{
-			CaseCount:                1,
-			TotalSubmitted:           4,
-			AverageThroughputPerSec:  8.5,
-			FastestCaseName:          "small",
-			FastestThroughputPerSec:  8.5,
-			SlowestSubmitP95CaseName: "small",
-			SlowestSubmitP95Ms:       12,
+			CaseCount:                 1,
+			TotalSubmitted:            4,
+			TotalImmediateQueryFailed: 1,
+			TotalProofTimeouts:        1,
+			AverageThroughputPerSec:   8.5,
+			FastestCaseName:           "small",
+			FastestThroughputPerSec:   8.5,
+			SlowestSubmitP95CaseName:  "small",
+			SlowestSubmitP95Ms:        12,
 		},
 	})
 	text := out.String()
 	for _, want := range []string{
 		"matrix_file: matrix.json",
 		"transport: grpc",
-		"small count=4 concurrency=2 payload_bytes=256 submitted=4 failed=0 throughput_per_sec=8.50 submit_p95_ms=12.00 report_file=reports/01-small.json",
+		"small count=4 concurrency=2 payload_bytes=256 submitted=4 failed=0 throughput_per_sec=8.50 submit_p95_ms=12.00 immediate_query_failed=1 post_proof_query_failed=0 proof_timeouts=1 report_file=reports/01-small.json",
+		"total_immediate_query_failed: 1",
+		"total_post_proof_query_failed: 0",
 		"average_throughput_per_sec: 8.50",
 		"fastest_case: small (8.50/s)",
 	} {

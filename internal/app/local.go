@@ -210,13 +210,11 @@ func (e LocalEngine) CommitBatch(batchID string, closedAt time.Time, signed []mo
 		closedAt = e.now()
 	}
 	closedAt = closedAt.UTC()
+	root := tree.Root()
+	proofs := tree.Proofs()
 	bundles := make([]model.ProofBundle, len(records))
 	for i := range records {
 		leaf, err := tree.LeafHash(i)
-		if err != nil {
-			return nil, err
-		}
-		path, err := tree.Proof(i)
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +225,7 @@ func (e LocalEngine) CommitBatch(batchID string, closedAt time.Time, signed []mo
 			BatchID:       batchID,
 			LeafIndex:     uint64(i),
 			LeafHash:      leaf,
-			BatchRoot:     tree.Root(),
+			BatchRoot:     append([]byte(nil), root...),
 			ClosedAtUnixN: closedAt.UnixNano(),
 		}
 		committed, err = receipt.SignCommitted(committed, e.ServerKeyID, e.ServerPrivateKey)
@@ -245,7 +243,7 @@ func (e LocalEngine) CommitBatch(batchID string, closedAt time.Time, signed []mo
 				TreeAlg:   model.DefaultMerkleTreeAlg,
 				LeafIndex: uint64(i),
 				TreeSize:  uint64(len(records)),
-				AuditPath: path,
+				AuditPath: proofs[i],
 			},
 		}
 	}

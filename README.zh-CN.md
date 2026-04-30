@@ -16,6 +16,13 @@ github.com/ryan-wong-coder/trustdb
 
 许可证：AGPL-3.0-only，见 [LICENSE](LICENSE)。
 
+## 性能测试报告
+
+优化后的单机 CVM 性能测试报告提供中英文两份：
+
+- [TrustDB 优化后单机性能测试报告](docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md)
+- [TrustDB Optimized Single-Node Performance Report](docs/performance/trustdb-performance-report-2026-04-30.en.md)
+
 ## 桌面客户端
 
 ![TrustDB 桌面客户端概览](assets/readme/desktop-overview.png)

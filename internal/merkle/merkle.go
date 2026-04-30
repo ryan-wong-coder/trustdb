@@ -11,51 +11,60 @@ import (
 )
 
 type Tree struct {
-	leafHashes [][]byte
-	root       []byte
+	leafHashes [][sha256.Size]byte
+	root       [sha256.Size]byte
+	nodes      map[nodeRange][sha256.Size]byte
 }
 
 func Build(records []model.ServerRecord) (Tree, error) {
 	if len(records) == 0 {
 		return Tree{}, errors.New("merkle: cannot build empty tree")
 	}
-	leaves := make([][]byte, len(records))
+	leaves := make([][sha256.Size]byte, len(records))
 	for i := range records {
-		leaf, err := HashLeaf(records[i])
+		leaf, err := hashLeafArray(records[i])
 		if err != nil {
 			return Tree{}, fmt.Errorf("merkle: hash leaf %d: %w", i, err)
 		}
 		leaves[i] = leaf
 	}
-	return Tree{
-		leafHashes: leaves,
-		root:       treeHash(leaves),
-	}, nil
+	return buildFromLeafHashes(leaves), nil
 }
 
 func HashLeaf(record model.ServerRecord) ([]byte, error) {
-	b, err := cborx.Marshal(record)
+	leaf, err := hashLeafArray(record)
 	if err != nil {
 		return nil, err
+	}
+	return cloneHash(leaf), nil
+}
+
+func hashLeafArray(record model.ServerRecord) ([sha256.Size]byte, error) {
+	b, err := cborx.Marshal(record)
+	if err != nil {
+		return [sha256.Size]byte{}, err
 	}
 	h := sha256.New()
 	h.Write([]byte{0})
 	h.Write(b)
-	return h.Sum(nil), nil
+	var out [sha256.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out, nil
 }
 
 func RootFromLeaves(leaves [][]byte) ([]byte, error) {
 	if len(leaves) == 0 {
 		return nil, errors.New("merkle: empty leaves")
 	}
-	copied := make([][]byte, len(leaves))
+	copied := make([][sha256.Size]byte, len(leaves))
 	for i := range leaves {
 		if len(leaves[i]) != sha256.Size {
 			return nil, fmt.Errorf("merkle: leaf %d has size %d", i, len(leaves[i]))
 		}
-		copied[i] = append([]byte(nil), leaves[i]...)
+		copy(copied[i][:], leaves[i])
 	}
-	return treeHash(copied), nil
+	tree := buildFromLeafHashes(copied)
+	return tree.Root(), nil
 }
 
 func AuditPathFromLeaves(leaves [][]byte, index uint64) ([][]byte, error) {
@@ -65,42 +74,50 @@ func AuditPathFromLeaves(leaves [][]byte, index uint64) ([][]byte, error) {
 	if index >= uint64(len(leaves)) {
 		return nil, fmt.Errorf("merkle: leaf index out of range: %d", index)
 	}
-	copied := make([][]byte, len(leaves))
+	copied := make([][sha256.Size]byte, len(leaves))
 	for i := range leaves {
 		if len(leaves[i]) != sha256.Size {
 			return nil, fmt.Errorf("merkle: leaf %d has size %d", i, len(leaves[i]))
 		}
-		copied[i] = append([]byte(nil), leaves[i]...)
+		copy(copied[i][:], leaves[i])
 	}
-	path := auditPath(copied, int(index))
-	out := make([][]byte, len(path))
-	for i := range path {
-		out[i] = append([]byte(nil), path[i]...)
-	}
-	return out, nil
+	tree := buildFromLeafHashes(copied)
+	return tree.Proof(int(index))
 }
 
 func (t Tree) Root() []byte {
-	return append([]byte(nil), t.root...)
+	return cloneHash(t.root)
 }
 
 func (t Tree) LeafHash(index int) ([]byte, error) {
 	if index < 0 || index >= len(t.leafHashes) {
 		return nil, fmt.Errorf("merkle: leaf index out of range: %d", index)
 	}
-	return append([]byte(nil), t.leafHashes[index]...), nil
+	return cloneHash(t.leafHashes[index]), nil
 }
 
 func (t Tree) Proof(index int) ([][]byte, error) {
 	if index < 0 || index >= len(t.leafHashes) {
 		return nil, fmt.Errorf("merkle: leaf index out of range: %d", index)
 	}
-	path := auditPath(t.leafHashes, index)
+	path := t.auditPath(index)
 	out := make([][]byte, len(path))
 	for i := range path {
-		out[i] = append([]byte(nil), path[i]...)
+		out[i] = cloneHash(path[i])
 	}
 	return out, nil
+}
+
+func (t Tree) Proofs() [][][]byte {
+	out := make([][][]byte, len(t.leafHashes))
+	for i := range t.leafHashes {
+		path := t.auditPath(i)
+		out[i] = make([][]byte, len(path))
+		for j := range path {
+			out[i][j] = cloneHash(path[j])
+		}
+	}
+	return out
 }
 
 func Verify(leafHash []byte, index, treeSize uint64, auditPath [][]byte, root []byte) bool {
@@ -122,28 +139,55 @@ func HashNode(left, right []byte) ([]byte, error) {
 	if len(right) != sha256.Size {
 		return nil, fmt.Errorf("merkle: right node has size %d", len(right))
 	}
-	return hashNode(left, right), nil
+	leftHash := bytesToHash(left)
+	rightHash := bytesToHash(right)
+	node := hashNode(leftHash, rightHash)
+	return cloneHash(node), nil
 }
 
-func treeHash(hashes [][]byte) []byte {
-	if len(hashes) == 1 {
-		return append([]byte(nil), hashes[0]...)
-	}
-	k := largestPowerOfTwoLessThan(len(hashes))
-	return hashNode(treeHash(hashes[:k]), treeHash(hashes[k:]))
+type nodeRange struct {
+	start int
+	size  int
 }
 
-func auditPath(hashes [][]byte, index int) [][]byte {
-	if len(hashes) == 1 {
-		return nil
+func buildFromLeafHashes(leaves [][sha256.Size]byte) Tree {
+	nodes := make(map[nodeRange][sha256.Size]byte, len(leaves)*2)
+	root := buildRange(leaves, nodes, 0, len(leaves))
+	return Tree{leafHashes: leaves, root: root, nodes: nodes}
+}
+
+func buildRange(leaves [][sha256.Size]byte, nodes map[nodeRange][sha256.Size]byte, start, size int) [sha256.Size]byte {
+	key := nodeRange{start: start, size: size}
+	if size == 1 {
+		nodes[key] = leaves[start]
+		return leaves[start]
 	}
-	k := largestPowerOfTwoLessThan(len(hashes))
+	k := largestPowerOfTwoLessThan(size)
+	left := buildRange(leaves, nodes, start, k)
+	right := buildRange(leaves, nodes, start+k, size-k)
+	out := hashNode(left, right)
+	nodes[key] = out
+	return out
+}
+
+func (t Tree) auditPath(index int) [][sha256.Size]byte {
+	path := make([][sha256.Size]byte, 0, merklePathLen(len(t.leafHashes)))
+	t.appendAuditPath(&path, 0, len(t.leafHashes), index)
+	return path
+}
+
+func (t Tree) appendAuditPath(path *[][sha256.Size]byte, start, size, index int) {
+	if size == 1 {
+		return
+	}
+	k := largestPowerOfTwoLessThan(size)
 	if index < k {
-		path := auditPath(hashes[:k], index)
-		return append(path, treeHash(hashes[k:]))
+		t.appendAuditPath(path, start, k, index)
+		*path = append(*path, t.nodes[nodeRange{start: start + k, size: size - k}])
+		return
 	}
-	path := auditPath(hashes[k:], index-k)
-	return append(path, treeHash(hashes[:k]))
+	t.appendAuditPath(path, start+k, size-k, index-k)
+	*path = append(*path, t.nodes[nodeRange{start: start, size: k}])
 }
 
 func rebuild(leafHash []byte, index, treeSize int, path [][]byte, pos *int) ([]byte, bool) {
@@ -164,7 +208,7 @@ func rebuild(leafHash []byte, index, treeSize int, path [][]byte, pos *int) ([]b
 		if len(right) != sha256.Size {
 			return nil, false
 		}
-		return hashNode(left, right), true
+		return hashNodeBytes(left, right), true
 	}
 	right, ok := rebuild(leafHash, index-k, treeSize-k, path, pos)
 	if !ok {
@@ -175,15 +219,41 @@ func rebuild(leafHash []byte, index, treeSize int, path [][]byte, pos *int) ([]b
 	if len(left) != sha256.Size {
 		return nil, false
 	}
-	return hashNode(left, right), true
+	return hashNodeBytes(left, right), true
 }
 
-func hashNode(left, right []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte{1})
-	h.Write(left)
-	h.Write(right)
-	return h.Sum(nil)
+func hashNodeBytes(left, right []byte) []byte {
+	leftHash := bytesToHash(left)
+	rightHash := bytesToHash(right)
+	node := hashNode(leftHash, rightHash)
+	return cloneHash(node)
+}
+
+func hashNode(left, right [sha256.Size]byte) [sha256.Size]byte {
+	var buf [1 + sha256.Size*2]byte
+	buf[0] = 1
+	copy(buf[1:1+sha256.Size], left[:])
+	copy(buf[1+sha256.Size:], right[:])
+	return sha256.Sum256(buf[:])
+}
+
+func bytesToHash(in []byte) [sha256.Size]byte {
+	var out [sha256.Size]byte
+	copy(out[:], in)
+	return out
+}
+
+func cloneHash(in [sha256.Size]byte) []byte {
+	out := make([]byte, sha256.Size)
+	copy(out, in[:])
+	return out
+}
+
+func merklePathLen(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	return 1 + merklePathLen(largestPowerOfTwoLessThan(n))
 }
 
 func largestPowerOfTwoLessThan(n int) int {

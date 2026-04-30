@@ -25,6 +25,7 @@ type Factory func(t *testing.T) (proofstore.Store, func())
 func RunConformance(t *testing.T, newStore Factory) {
 	t.Helper()
 	t.Run("BundleRoundTrip", func(t *testing.T) { testBundleRoundTrip(t, newStore) })
+	t.Run("BatchArtifactsOptional", func(t *testing.T) { testBatchArtifactsOptional(t, newStore) })
 	t.Run("BundleNotFound", func(t *testing.T) { testBundleNotFound(t, newStore) })
 	t.Run("BundleOverwrite", func(t *testing.T) { testBundleOverwrite(t, newStore) })
 	t.Run("RecordIndexListAndFilters", func(t *testing.T) { testRecordIndexListAndFilters(t, newStore) })
@@ -59,6 +60,56 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("STHAnchorMarkFailed", func(t *testing.T) { testSTHAnchorMarkFailed(t, newStore) })
 	t.Run("STHAnchorRescheduleKeepsPending", func(t *testing.T) { testSTHAnchorRescheduleKeepsPending(t, newStore) })
 	t.Run("STHAnchorMissing", func(t *testing.T) { testSTHAnchorMissing(t, newStore) })
+}
+
+func testBatchArtifactsOptional(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	writer, ok := store.(proofstore.BatchArtifactWriter)
+	if !ok {
+		t.Skip("store does not implement BatchArtifactWriter")
+	}
+	ctx := context.Background()
+	bundles := []model.ProofBundle{
+		recordBundle("bulk-rec-1", "tenant-a", "client-a", "bulk-batch", 100),
+		recordBundle("bulk-rec-2", "tenant-a", "client-b", "bulk-batch", 200),
+	}
+	root := model.BatchRoot{
+		SchemaVersion: model.SchemaBatchRoot,
+		BatchID:       "bulk-batch",
+		BatchRoot:     []byte{1, 2, 3},
+		TreeSize:      uint64(len(bundles)),
+		ClosedAtUnixN: 500,
+	}
+	for i := 0; i < 2; i++ {
+		if err := writer.PutBatchArtifacts(ctx, bundles, root); err != nil {
+			t.Fatalf("PutBatchArtifacts attempt %d: %v", i+1, err)
+		}
+	}
+	for _, bundle := range bundles {
+		got, err := store.GetBundle(ctx, bundle.RecordID)
+		if err != nil {
+			t.Fatalf("GetBundle %s: %v", bundle.RecordID, err)
+		}
+		if got.RecordID != bundle.RecordID {
+			t.Fatalf("GetBundle %s = %+v", bundle.RecordID, got)
+		}
+		idx, ok, err := store.GetRecordIndex(ctx, bundle.RecordID)
+		if err != nil || !ok {
+			t.Fatalf("GetRecordIndex %s ok=%v err=%v", bundle.RecordID, ok, err)
+		}
+		if idx.BatchID != root.BatchID || model.RecordIndexProofLevel(idx) != "L3" {
+			t.Fatalf("RecordIndex %s = %+v", bundle.RecordID, idx)
+		}
+	}
+	gotRoot, err := store.LatestRoot(ctx)
+	if err != nil {
+		t.Fatalf("LatestRoot: %v", err)
+	}
+	if gotRoot.BatchID != root.BatchID || gotRoot.TreeSize != root.TreeSize {
+		t.Fatalf("LatestRoot = %+v, want %+v", gotRoot, root)
+	}
 }
 
 func testBundleRoundTrip(t *testing.T, newStore Factory) {
