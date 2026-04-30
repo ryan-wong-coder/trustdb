@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -167,6 +168,7 @@ func NewWithGlobalAndAnchors(
 }
 
 func buildMux(h Handler) http.Handler {
+	h = normalizeHandler(h)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/claims", h.submitClaim)
@@ -191,6 +193,32 @@ func buildMux(h Handler) http.Handler {
 		mux.Handle("GET /metrics", h.Metrics)
 	}
 	return mux
+}
+
+func normalizeHandler(h Handler) Handler {
+	if isTypedNil(h.Batch) {
+		h.Batch = nil
+	}
+	if isTypedNil(h.Global) {
+		h.Global = nil
+	}
+	if isTypedNil(h.Anchors) {
+		h.Anchors = nil
+	}
+	return h
+}
+
+func isTypedNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 func (h Handler) health(w http.ResponseWriter, r *http.Request) {

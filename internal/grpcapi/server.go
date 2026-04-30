@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 
 	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
@@ -35,7 +36,26 @@ func NewServer(
 	anchorSvc httpapi.AnchorService,
 	metrics http.Handler,
 ) *Server {
+	if isTypedNil(globalSvc) {
+		globalSvc = nil
+	}
+	if isTypedNil(anchorSvc) {
+		anchorSvc = nil
+	}
 	return &Server{Ingest: ingestSvc, Batch: batchSvc, Global: globalSvc, Anchors: anchorSvc, MetricsHandler: metrics}
+}
+
+func isTypedNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 func (s *Server) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
