@@ -281,6 +281,8 @@ func (s *OtsSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.
 	}
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		NodeID:           sth.NodeID,
+		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,
 		SinkName:         s.Name(),
 		AnchorID:         DeterministicOtsAnchorID(sth),

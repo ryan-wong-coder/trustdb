@@ -33,6 +33,8 @@ func New(bundle model.ProofBundle, opts Options) (model.SingleProof, error) {
 		FormatVersion:   FormatVersion,
 		RecordID:        bundle.RecordID,
 		ProofBundle:     bundle,
+		NodeID:          bundle.NodeID,
+		LogID:           bundle.LogID,
 		GlobalProof:     opts.GlobalProof,
 		AnchorResult:    opts.AnchorResult,
 		ExportedAtUnixN: opts.ExportedAtUnixN,
@@ -79,6 +81,12 @@ func Validate(proof model.SingleProof) error {
 			proof.RecordID,
 			proof.ProofBundle.RecordID,
 		)
+	}
+	if proof.NodeID != "" && proof.ProofBundle.NodeID != "" && proof.NodeID != proof.ProofBundle.NodeID {
+		return fmt.Errorf("sproof: node_id mismatch: envelope=%s proof_bundle=%s", proof.NodeID, proof.ProofBundle.NodeID)
+	}
+	if proof.LogID != "" && proof.ProofBundle.LogID != "" && proof.LogID != proof.ProofBundle.LogID {
+		return fmt.Errorf("sproof: log_id mismatch: envelope=%s proof_bundle=%s", proof.LogID, proof.ProofBundle.LogID)
 	}
 	if proof.ProofLevel != "" && proof.ProofLevel != Level(proof).String() {
 		return fmt.Errorf("sproof: proof_level=%s does not match embedded evidence level=%s",

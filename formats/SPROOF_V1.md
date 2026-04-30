@@ -8,7 +8,7 @@
 - 顶层 schema：`trustdb.sproof.v1`。
 - 顶层 format_version：`1`。
 - 最大解码大小：16 MiB。
-- 兼容性：v1 固定后，新增破坏性字段必须提升 schema 或 format_version。
+- 兼容性：v1 固定后，新增破坏性字段必须提升 schema 或 format_version；可选只读来源字段使用 `omitempty`，旧文件不包含这些字段仍合法。
 - 安全边界：文件里的 `proof_level` 只是导出时的提示，验证器必须重新计算实际等级。
 
 ## 顶层结构
@@ -19,6 +19,8 @@
 | `format_version` | uint | 是 | 当前固定为 `1`。 |
 | `record_id` | string | 是 | 冗余索引字段，必须等于 `proof_bundle.record_id`。 |
 | `proof_level` | string | 是 | 导出时可达到的最高等级提示，当前为 `L3`、`L4` 或 `L5`。验证时必须重算。 |
+| `node_id` | string | 否 | 产生证明的计算节点提示；存在时必须与 `proof_bundle.node_id` 一致。 |
+| `log_id` | string | 否 | 产生 L4/L5 材料的节点本地 Global Log 提示；存在时必须与 `proof_bundle.log_id` 一致。 |
 | `proof_bundle` | `ProofBundle` | 是 | L1-L3 必需证明材料。 |
 | `global_proof` | `GlobalLogProof` | 否 | L4 材料，证明 batch root 已进入 Global Log 的某个 STH。 |
 | `anchor_result` | `STHAnchorResult` | 否 | L5 材料，证明对应 STH/global root 已被外部 anchor。 |
@@ -45,11 +47,12 @@
 2. 检查 `schema_version == trustdb.sproof.v1`。
 3. 检查 `format_version == 1`。
 4. 检查 `record_id == proof_bundle.record_id`。
-5. 检查 `proof_level` 与内嵌证据重新计算出的等级一致。
-6. 用原始内容文件、客户端公钥、服务端公钥验证 `ProofBundle`，得到 L3。
-7. 如果存在 `global_proof`，验证 batch root 到 STH 的 Global Log inclusion proof，成功后得到 L4。
-8. 如果存在 `anchor_result`，验证它与 `global_proof.sth` 的 `tree_size`、`root_hash` 和 sink 约束一致，成功后得到 L5。
-9. 最终输出以重新计算结果为准，不信任文件里的 `proof_level`。
+5. 如果顶层 `node_id` / `log_id` 与 `proof_bundle` 同名字段同时存在，必须一致。
+6. 检查 `proof_level` 与内嵌证据重新计算出的等级一致。
+7. 用原始内容文件、客户端公钥、服务端公钥验证 `ProofBundle`，得到 L3。
+8. 如果存在 `global_proof`，验证 batch root 到 STH 的 Global Log inclusion proof，成功后得到 L4；`global_proof`、STH 与 `proof_bundle` 中同时存在的 `node_id` / `log_id` 必须一致。
+9. 如果存在 `anchor_result`，验证它与 `global_proof.sth` 的 `tree_size`、`root_hash`、来源字段和 sink 约束一致，成功后得到 L5。
+10. 最终输出以重新计算结果为准，不信任文件里的 `proof_level`。
 
 ## CLI
 

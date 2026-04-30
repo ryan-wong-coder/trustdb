@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
@@ -72,6 +73,57 @@ func TestClientSubmitSignedClaim(t *testing.T) {
 	}
 	if result.RecordID != "tr1record" || result.ProofLevel != ProofLevelL2 || !result.BatchEnqueued {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestLoadBalancedClientFailsOver(t *testing.T) {
+	t.Parallel()
+
+	var primaryHits atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/claims" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
+			RecordID:      "tr1record",
+			Status:        "accepted",
+			ProofLevel:    ProofLevelL2,
+			BatchEnqueued: true,
+			ServerRecord: ServerRecord{
+				SchemaVersion: model.SchemaServerRecord,
+				RecordID:      "tr1record",
+			},
+			AcceptedReceipt: AcceptedReceipt{
+				SchemaVersion: model.SchemaAcceptedReceipt,
+				RecordID:      "tr1record",
+				Status:        "accepted",
+			},
+		})
+	}))
+	defer secondary.Close()
+
+	client, err := NewLoadBalancedClient(
+		[]string{primary.URL, secondary.URL},
+		LoadBalanceOptions{Mode: LoadBalanceFailover},
+	)
+	if err != nil {
+		t.Fatalf("NewLoadBalancedClient: %v", err)
+	}
+	result, err := client.SubmitSignedClaim(context.Background(), SignedClaim{SchemaVersion: model.SchemaSignedClaim})
+	if err != nil {
+		t.Fatalf("SubmitSignedClaim: %v", err)
+	}
+	if result.RecordID != "tr1record" {
+		t.Fatalf("result = %+v", result)
+	}
+	if primaryHits.Load() == 0 {
+		t.Fatal("primary endpoint was not attempted")
 	}
 }
 

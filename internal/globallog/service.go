@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/bits"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,7 @@ type Store interface {
 type Service struct {
 	mu         sync.Mutex
 	store      Store
+	nodeID     string
 	logID      string
 	keyID      string
 	privateKey ed25519.PrivateKey
@@ -53,6 +55,7 @@ type Service struct {
 
 type Options struct {
 	Store      Store
+	NodeID     string
 	LogID      string
 	KeyID      string
 	PrivateKey ed25519.PrivateKey
@@ -73,12 +76,14 @@ func New(opts Options) (*Service, error) {
 	if clock == nil {
 		clock = func() time.Time { return time.Now().UTC() }
 	}
-	logID := opts.LogID
+	logID := strings.TrimSpace(opts.LogID)
 	if logID == "" {
 		logID = "trustdb-global-log"
 	}
+	nodeID := strings.TrimSpace(opts.NodeID)
 	return &Service{
 		store:      opts.Store,
+		nodeID:     nodeID,
 		logID:      logID,
 		keyID:      opts.KeyID,
 		privateKey: opts.PrivateKey,
@@ -124,6 +129,14 @@ func (s *Service) AppendBatchRoot(ctx context.Context, root model.BatchRoot) (mo
 		}
 		return model.SignedTreeHead{}, trusterr.New(trusterr.CodeDataLoss, "global log leaf exists without matching signed tree head")
 	}
+	nodeID := strings.TrimSpace(root.NodeID)
+	if nodeID == "" {
+		nodeID = s.nodeID
+	}
+	logID := strings.TrimSpace(root.LogID)
+	if logID == "" {
+		logID = s.logID
+	}
 
 	state, err := s.loadState(ctx)
 	if err != nil {
@@ -131,6 +144,8 @@ func (s *Service) AppendBatchRoot(ctx context.Context, root model.BatchRoot) (mo
 	}
 	leaf := model.GlobalLogLeaf{
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		NodeID:             nodeID,
+		LogID:              logID,
 		BatchID:            root.BatchID,
 		BatchRoot:          append([]byte(nil), root.BatchRoot...),
 		BatchTreeSize:      root.TreeSize,
@@ -212,6 +227,8 @@ func (s *Service) InclusionProof(ctx context.Context, batchID string, treeSize u
 	}
 	return model.GlobalLogProof{
 		SchemaVersion: model.SchemaGlobalLogProof,
+		NodeID:        leaf.NodeID,
+		LogID:         leaf.LogID,
 		BatchID:       batchID,
 		LeafIndex:     leaf.LeafIndex,
 		LeafHash:      append([]byte(nil), leaf.LeafHash...),
@@ -332,6 +349,7 @@ func (s *Service) signSTH(leaves []model.GlobalLogLeaf) (model.SignedTreeHead, e
 		TreeSize:       uint64(len(leaves)),
 		RootHash:       root,
 		TimestampUnixN: s.clock().UTC().UnixNano(),
+		NodeID:         s.nodeID,
 		LogID:          s.logID,
 	}
 	payloadSTH := sth
@@ -361,6 +379,7 @@ func (s *Service) signSTHFromState(state model.GlobalLogState) (model.SignedTree
 		TreeSize:       state.TreeSize,
 		RootHash:       append([]byte(nil), state.RootHash...),
 		TimestampUnixN: s.clock().UTC().UnixNano(),
+		NodeID:         s.nodeID,
 		LogID:          s.logID,
 	}
 	payloadSTH := sth

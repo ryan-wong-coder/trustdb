@@ -30,6 +30,12 @@ func TestDefaultYAMLIsStructured(t *testing.T) {
 	if Default().Proofstore.RecordIndexMode != "full" {
 		t.Fatalf("default proofstore.record_index_mode = %q, want full", Default().Proofstore.RecordIndexMode)
 	}
+	if Default().GlobalLog.LogID != "trustdb-global-log" {
+		t.Fatalf("default global_log.log_id = %q, want trustdb-global-log", Default().GlobalLog.LogID)
+	}
+	if Default().Proofstore.TiKVPDAddresses != nil {
+		t.Fatalf("default proofstore.tikv_pd_endpoints = %#v, want nil", Default().Proofstore.TiKVPDAddresses)
+	}
 }
 
 func TestValidateRejectsInvalidLogConfig(t *testing.T) {

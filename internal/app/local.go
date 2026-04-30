@@ -17,7 +17,9 @@ import (
 )
 
 type LocalEngine struct {
-	ServerID         string
+	ServerID string
+	// LogID scopes batch and transparency-log identifiers for this compute node (shared proofstore).
+	LogID            string
 	ServerKeyID      string
 	ClientPublicKey  ed25519.PublicKey
 	ClientKeys       ClientKeyResolver
@@ -210,6 +212,8 @@ func (e LocalEngine) CommitBatchIndexes(batchID string, closedAt time.Time, sign
 	root := model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       batchID,
+		NodeID:        e.ServerID,
+		LogID:         e.LogID,
 		BatchRoot:     append([]byte(nil), bundles[0].CommittedReceipt.BatchRoot...),
 		TreeSize:      uint64(len(bundles)),
 		ClosedAtUnixN: bundles[0].CommittedReceipt.ClosedAtUnixN,
@@ -253,6 +257,8 @@ func (e LocalEngine) commitBatch(batchID string, closedAt time.Time, signed []mo
 			LeafHash:      leaf,
 			BatchRoot:     append([]byte(nil), root...),
 			ClosedAtUnixN: closedAt.UnixNano(),
+			NodeID:        e.ServerID,
+			LogID:         e.LogID,
 		}
 		committed, err = receipt.SignCommitted(committed, e.ServerKeyID, e.ServerPrivateKey)
 		if err != nil {
@@ -261,6 +267,8 @@ func (e LocalEngine) commitBatch(batchID string, closedAt time.Time, signed []mo
 		bundles[i] = model.ProofBundle{
 			SchemaVersion:    model.SchemaProofBundle,
 			RecordID:         records[i].RecordID,
+			NodeID:           e.ServerID,
+			LogID:            e.LogID,
 			SignedClaim:      signed[i],
 			ServerRecord:     records[i],
 			AcceptedReceipt:  accepted[i],

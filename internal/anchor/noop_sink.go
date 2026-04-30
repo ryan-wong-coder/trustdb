@@ -36,6 +36,8 @@ func (NoopSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.ST
 	}
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		NodeID:           sth.NodeID,
+		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,
 		SinkName:         NoopSinkName,
 		AnchorID:         DeterministicNoopAnchorID(sth),

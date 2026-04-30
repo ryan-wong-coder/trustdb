@@ -132,15 +132,19 @@ type AcceptedReceipt struct {
 }
 
 type CommittedReceipt struct {
-	SchemaVersion string    `cbor:"schema_version" json:"schema_version"`
-	RecordID      string    `cbor:"record_id" json:"record_id"`
-	Status        string    `cbor:"status" json:"status"`
-	BatchID       string    `cbor:"batch_id" json:"batch_id"`
-	LeafIndex     uint64    `cbor:"leaf_index" json:"leaf_index"`
-	LeafHash      []byte    `cbor:"leaf_hash" json:"leaf_hash"`
-	BatchRoot     []byte    `cbor:"batch_root" json:"batch_root"`
-	ClosedAtUnixN int64     `cbor:"batch_closed_at_unix_nano" json:"batch_closed_at_unix_nano"`
-	ServerSig     Signature `cbor:"server_signature" json:"server_signature"`
+	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
+	RecordID      string `cbor:"record_id" json:"record_id"`
+	Status        string `cbor:"status" json:"status"`
+	BatchID       string `cbor:"batch_id" json:"batch_id"`
+	LeafIndex     uint64 `cbor:"leaf_index" json:"leaf_index"`
+	LeafHash      []byte `cbor:"leaf_hash" json:"leaf_hash"`
+	BatchRoot     []byte `cbor:"batch_root" json:"batch_root"`
+	ClosedAtUnixN int64  `cbor:"batch_closed_at_unix_nano" json:"batch_closed_at_unix_nano"`
+	// NodeID identifies the compute node that issued this receipt (same meaning as AcceptedReceipt.ServerID).
+	NodeID string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	// LogID scopes batch/STH identifiers to a node-local transparency log.
+	LogID     string    `cbor:"log_id,omitempty" json:"log_id,omitempty"`
+	ServerSig Signature `cbor:"server_signature" json:"server_signature"`
 }
 
 type BatchProof struct {
@@ -151,8 +155,11 @@ type BatchProof struct {
 }
 
 type ProofBundle struct {
-	SchemaVersion    string           `cbor:"schema_version" json:"schema_version"`
-	RecordID         string           `cbor:"record_id" json:"record_id"`
+	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
+	RecordID      string `cbor:"record_id" json:"record_id"`
+	// NodeID is the compute node identity (mirrors AcceptedReceipt.ServerID when populated).
+	NodeID           string           `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID            string           `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	SignedClaim      SignedClaim      `cbor:"signed_claim" json:"signed_claim"`
 	ServerRecord     ServerRecord     `cbor:"server_record" json:"server_record"`
 	AcceptedReceipt  AcceptedReceipt  `cbor:"accepted_receipt" json:"accepted_receipt"`
@@ -165,10 +172,13 @@ type ProofBundle struct {
 // optional L5 STHAnchorResult so auditors can verify the strongest currently
 // available level without juggling multiple files.
 type SingleProof struct {
-	SchemaVersion   string           `cbor:"schema_version" json:"schema_version"`
-	FormatVersion   uint64           `cbor:"format_version" json:"format_version"`
-	RecordID        string           `cbor:"record_id" json:"record_id"`
-	ProofLevel      string           `cbor:"proof_level" json:"proof_level"`
+	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
+	FormatVersion uint64 `cbor:"format_version" json:"format_version"`
+	RecordID      string `cbor:"record_id" json:"record_id"`
+	ProofLevel    string `cbor:"proof_level" json:"proof_level"`
+	// NodeID and LogID duplicate proof_bundle hints for lightweight clients (optional).
+	NodeID          string           `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID           string           `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	ProofBundle     ProofBundle      `cbor:"proof_bundle" json:"proof_bundle"`
 	GlobalProof     *GlobalLogProof  `cbor:"global_proof,omitempty" json:"global_proof,omitempty"`
 	AnchorResult    *STHAnchorResult `cbor:"anchor_result,omitempty" json:"anchor_result,omitempty"`
@@ -181,6 +191,8 @@ type SingleProof struct {
 type RecordIndex struct {
 	SchemaVersion      string `cbor:"schema_version" json:"schema_version"`
 	RecordID           string `cbor:"record_id" json:"record_id"`
+	NodeID             string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID              string `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	TenantID           string `cbor:"tenant_id,omitempty" json:"tenant_id,omitempty"`
 	ClientID           string `cbor:"client_id,omitempty" json:"client_id,omitempty"`
 	KeyID              string `cbor:"key_id,omitempty" json:"key_id,omitempty"`
@@ -271,6 +283,8 @@ func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 	return RecordIndex{
 		SchemaVersion:      SchemaRecordIndex,
 		RecordID:           bundle.RecordID,
+		NodeID:             bundle.NodeID,
+		LogID:              bundle.LogID,
 		TenantID:           tenantID,
 		ClientID:           clientID,
 		KeyID:              keyID,
@@ -292,6 +306,8 @@ func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 type BatchRoot struct {
 	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
 	BatchID       string `cbor:"batch_id" json:"batch_id"`
+	NodeID        string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID         string `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	BatchRoot     []byte `cbor:"batch_root" json:"batch_root"`
 	TreeSize      uint64 `cbor:"tree_size" json:"tree_size"`
 	ClosedAtUnixN int64  `cbor:"closed_at_unix_nano" json:"closed_at_unix_nano"`
@@ -321,6 +337,8 @@ type WALCheckpoint struct {
 type BatchManifest struct {
 	SchemaVersion    string   `cbor:"schema_version" json:"schema_version"`
 	BatchID          string   `cbor:"batch_id" json:"batch_id"`
+	NodeID           string   `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID            string   `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	State            string   `cbor:"state" json:"state"`
 	TreeAlg          string   `cbor:"tree_alg" json:"tree_alg"`
 	TreeSize         uint64   `cbor:"tree_size" json:"tree_size"`
@@ -337,6 +355,8 @@ type BatchManifest struct {
 // SignedTreeHead.
 type GlobalLogLeaf struct {
 	SchemaVersion      string `cbor:"schema_version" json:"schema_version"`
+	NodeID             string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID              string `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	BatchID            string `cbor:"batch_id" json:"batch_id"`
 	BatchRoot          []byte `cbor:"batch_root" json:"batch_root"`
 	BatchTreeSize      uint64 `cbor:"batch_tree_size" json:"batch_tree_size"`
@@ -377,6 +397,7 @@ type SignedTreeHead struct {
 	TreeSize       uint64    `cbor:"tree_size" json:"tree_size"`
 	RootHash       []byte    `cbor:"root_hash" json:"root_hash"`
 	TimestampUnixN int64     `cbor:"timestamp_unix_nano" json:"timestamp_unix_nano"`
+	NodeID         string    `cbor:"node_id,omitempty" json:"node_id,omitempty"`
 	LogID          string    `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	Signature      Signature `cbor:"signature" json:"signature"`
 }
@@ -403,6 +424,8 @@ type GlobalConsistencyProof struct {
 // the target STH when callers request historical continuity.
 type GlobalLogProof struct {
 	SchemaVersion string                 `cbor:"schema_version" json:"schema_version"`
+	NodeID        string                 `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID         string                 `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	BatchID       string                 `cbor:"batch_id" json:"batch_id"`
 	LeafIndex     uint64                 `cbor:"leaf_index" json:"leaf_index"`
 	LeafHash      []byte                 `cbor:"leaf_hash" json:"leaf_hash"`
@@ -474,6 +497,8 @@ type STHAnchorOutboxItem struct {
 // root. AnchorID identifies the external artefact and Proof is sink-specific.
 type STHAnchorResult struct {
 	SchemaVersion    string         `cbor:"schema_version" json:"schema_version"`
+	NodeID           string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID            string         `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	TreeSize         uint64         `cbor:"tree_size" json:"tree_size"`
 	SinkName         string         `cbor:"sink_name" json:"sink_name"`
 	AnchorID         string         `cbor:"anchor_id" json:"anchor_id"`
