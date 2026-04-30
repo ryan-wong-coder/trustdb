@@ -167,6 +167,18 @@ jobs:
           TRUSTDB_BENCH_ARTIFACT_DIR: ${{ github.workspace }}/bench-smoke-artifacts
         run: go test -count=1 -mod=readonly -tags=e2e ./cmd/trustdb -run TestBenchCIArtifactFlow
 
+      - name: Run global log history proof bench smoke
+        env:
+          TRUSTDB_BENCH_ARTIFACT_DIR: ${{ github.workspace }}/bench-smoke-artifacts
+          TRUSTDB_GLOBAL_LOG_BENCH_TREE_SIZE: "2048"
+        run: |
+          mkdir -p "$TRUSTDB_BENCH_ARTIFACT_DIR"
+          go test -count=1 -mod=readonly ./internal/globallog \
+            -run TestGlobalLogHistoryProofReadCountsStayLogarithmic \
+            -bench BenchmarkGlobalLogHistoryProofsLargeTree \
+            -benchmem \
+            -benchtime=1x | tee "$TRUSTDB_BENCH_ARTIFACT_DIR/global-log-history-bench.txt"
+
       - name: Write bench summary
         shell: bash
         env:
@@ -180,6 +192,7 @@ jobs:
           root = Path(os.environ["TRUSTDB_BENCH_ARTIFACT_DIR"])
           compare_path = root / "compare.json"
           matrix_path = root / "matrix" / "matrix-summary.json"
+          global_log_bench_path = root / "global-log-history-bench.txt"
           summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
 
           lines = ["## Bench Smoke"]
@@ -225,6 +238,22 @@ jobs:
                   f"- average throughput: {summary.get('average_throughput_per_sec', 0):.2f} ops/s",
                   f"- fastest case: {summary.get('fastest_case_name', '')}",
               ])
+          if global_log_bench_path.exists():
+              bench_lines = [
+                  line.strip()
+                  for line in global_log_bench_path.read_text(encoding="utf-8").splitlines()
+                  if line.startswith("BenchmarkGlobalLogHistoryProofsLargeTree/")
+              ]
+              lines.extend([
+                  "",
+                  "### Global Log History",
+                  f"- benchmark smoke lines: {len(bench_lines)}",
+                  f"- artifact: {global_log_bench_path.name}",
+              ])
+              for line in bench_lines[:6]:
+                  fields = line.split()
+                  if len(fields) >= 5:
+                      lines.append(f"- {fields[0]}: {fields[2]} ns/op, {fields[4]} B/op")
           summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
 

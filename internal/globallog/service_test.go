@@ -3,8 +3,6 @@ package globallog
 import (
 	"bytes"
 	"context"
-	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,11 +14,16 @@ import (
 
 func newTestService(t testing.TB) (*Service, proofstore.LocalStore) {
 	t.Helper()
+	store := proofstore.LocalStore{Root: t.TempDir()}
+	return newTestServiceForStore(t, store), store
+}
+
+func newTestServiceForStore(t testing.TB, store Store) *Service {
+	t.Helper()
 	_, priv, err := trustcrypto.GenerateEd25519Key()
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
-	store := proofstore.LocalStore{Root: t.TempDir()}
 	svc, err := New(Options{
 		Store:      store,
 		LogID:      "test-log",
@@ -31,7 +34,7 @@ func newTestService(t testing.TB) (*Service, proofstore.LocalStore) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return svc, store
+	return svc
 }
 
 func batchRoot(id string, seed byte) model.BatchRoot {
@@ -183,15 +186,10 @@ func leafHashesForReferenceTest(ctx context.Context, store Store, treeSize uint6
 func TestConsistencyProofUsesIndexedNodesInsteadOfFullLeafScan(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	svc, store := newTestService(t)
 	const treeSize = 512
-	for i := 1; i <= treeSize; i++ {
-		if _, err := svc.AppendBatchRoot(ctx, batchRoot("b"+strconv.Itoa(i), byte(i%255+1))); err != nil {
-			t.Fatalf("AppendBatchRoot(%d): %v", i, err)
-		}
-	}
+	fixture := newGlobalLogBenchFixture(t, treeSize)
 
-	counting := &countingGlobalStore{LocalStore: store}
+	counting := newCountingGlobalStore(fixture.store)
 	reader, err := NewReader(counting)
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -203,35 +201,22 @@ func TestConsistencyProofUsesIndexedNodesInsteadOfFullLeafScan(t *testing.T) {
 	if len(proof.AuditPath) == 0 {
 		t.Fatal("expected non-empty consistency path")
 	}
-	if got := counting.leafReads.Load(); got > 8 {
-		t.Fatalf("ConsistencyProof read %d leaves for tree_size=%d; want indexed-node path, not a full scan", got, treeSize)
+	counts := counting.Snapshot()
+	if got := counts.TotalProofTreeReads(); got > 16 {
+		t.Fatalf("ConsistencyProof read %d proof tree nodes/leaves for tree_size=%d; want indexed-node path, not a full scan", got, treeSize)
 	}
 }
 
 func BenchmarkConsistencyProofLargeTree(b *testing.B) {
 	ctx := context.Background()
-	svc, _ := newTestService(b)
-	const treeSize = 8192
-	for i := 1; i <= treeSize; i++ {
-		if _, err := svc.AppendBatchRoot(ctx, batchRoot("bench-"+strconv.Itoa(i), byte(i%255+1))); err != nil {
-			b.Fatalf("AppendBatchRoot(%d): %v", i, err)
-		}
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := svc.ConsistencyProof(ctx, 4096, treeSize); err != nil {
+	treeSize := benchmarkGlobalLogTreeSize(b)
+	fixture := newGlobalLogBenchFixture(b, treeSize)
+	counting := newCountingGlobalStore(fixture.store)
+	reader := mustNewReader(b, counting)
+	from := treeSize / 2
+	runGlobalLogBenchmark(b, counting, func() {
+		if _, err := reader.ConsistencyProof(ctx, from, treeSize); err != nil {
 			b.Fatalf("ConsistencyProof: %v", err)
 		}
-	}
-}
-
-type countingGlobalStore struct {
-	proofstore.LocalStore
-	leafReads atomic.Int64
-}
-
-func (s *countingGlobalStore) GetGlobalLeaf(ctx context.Context, index uint64) (model.GlobalLogLeaf, bool, error) {
-	s.leafReads.Add(1)
-	return s.LocalStore.GetGlobalLeaf(ctx, index)
+	})
 }
