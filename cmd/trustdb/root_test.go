@@ -54,6 +54,8 @@ func TestConfigInitAndShow(t *testing.T) {
 func TestConfigEnvOverride(t *testing.T) {
 	t.Setenv("TRUSTDB_TENANT", "tenant-from-env")
 	t.Setenv("TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS", "false")
+	t.Setenv("TRUSTDB_BATCH_PROOF_MODE", "async")
+	t.Setenv("TRUSTDB_PROOFSTORE_ARTIFACT_SYNC_MODE", "batch")
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -76,12 +78,43 @@ func TestConfigEnvOverride(t *testing.T) {
 	if identity["tenant"] != "tenant-from-env" {
 		t.Fatalf("identity.tenant = %v", identity["tenant"])
 	}
+	batch, ok := cfg["batch"].(map[string]any)
+	if !ok {
+		t.Fatalf("batch is not an object: %#v", cfg["batch"])
+	}
+	if batch["proof_mode"] != "async" {
+		t.Fatalf("batch.proof_mode = %v", batch["proof_mode"])
+	}
 	proofstore, ok := cfg["proofstore"].(map[string]any)
 	if !ok {
 		t.Fatalf("proofstore is not an object: %#v", cfg["proofstore"])
 	}
-	if proofstore["index_storage_tokens"] != false {
-		t.Fatalf("proofstore.index_storage_tokens = %v", proofstore["index_storage_tokens"])
+	if proofstore["record_index_mode"] != "no_storage_tokens" {
+		t.Fatalf("proofstore.record_index_mode = %v", proofstore["record_index_mode"])
+	}
+	if proofstore["artifact_sync_mode"] != "batch" {
+		t.Fatalf("proofstore.artifact_sync_mode = %v", proofstore["artifact_sync_mode"])
+	}
+}
+
+func TestConfigRecordIndexModeEnvTakesPriorityOverLegacyAlias(t *testing.T) {
+	t.Setenv("TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS", "false")
+	t.Setenv("TRUSTDB_PROOFSTORE_RECORD_INDEX_MODE", "time_only")
+
+	var out, errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{"config", "show"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config show error = %v stderr=%s", err, errOut.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("config show output is not json: %q err=%v", out.String(), err)
+	}
+	cfg := got["config"].(map[string]any)
+	proofstore := cfg["proofstore"].(map[string]any)
+	if proofstore["record_index_mode"] != "time_only" {
+		t.Fatalf("proofstore.record_index_mode = %v", proofstore["record_index_mode"])
 	}
 }
 
@@ -90,12 +123,47 @@ func TestServeAcceptsProofstoreIndexStorageTokensFlag(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"serve", "--proofstore-index-storage-tokens=false", "--help"})
+	cmd.SetArgs([]string{"serve", "--proofstore-index-storage-tokens=false", "--batch-proof-mode=async", "--proofstore-record-index-mode=time_only", "--proofstore-artifact-sync-mode=batch", "--help"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("serve help error = %v stderr=%s", err, errOut.String())
 	}
 	if !bytes.Contains(out.Bytes(), []byte("--proofstore-index-storage-tokens")) {
 		t.Fatalf("serve help missing proofstore token flag: %s", out.String())
+	}
+	for _, flag := range [][]byte{[]byte("--batch-proof-mode"), []byte("--proofstore-record-index-mode"), []byte("--proofstore-artifact-sync-mode")} {
+		if !bytes.Contains(out.Bytes(), flag) {
+			t.Fatalf("serve help missing %s: %s", flag, out.String())
+		}
+	}
+}
+
+func TestValidateSemanticModes(t *testing.T) {
+	t.Parallel()
+
+	if got := normalizeSemanticProofMode(""); got != "inline" {
+		t.Fatalf("normalize empty proof mode = %q", got)
+	}
+	if got := normalizeSemanticRecordIndexMode(""); got != "full" {
+		t.Fatalf("normalize empty record index mode = %q", got)
+	}
+	if got := normalizeSemanticArtifactSyncMode(""); got != "chunk" {
+		t.Fatalf("normalize empty artifact sync mode = %q", got)
+	}
+	if err := validateSemanticModes("async", "time_only", "batch"); err != nil {
+		t.Fatalf("validate semantic modes: %v", err)
+	}
+	for _, tc := range []struct {
+		proof    string
+		index    string
+		artifact string
+	}{
+		{proof: "later", index: "full", artifact: "chunk"},
+		{proof: "inline", index: "none", artifact: "chunk"},
+		{proof: "inline", index: "full", artifact: "never"},
+	} {
+		if err := validateSemanticModes(tc.proof, tc.index, tc.artifact); err == nil {
+			t.Fatalf("validateSemanticModes(%+v) = nil, want error", tc)
+		}
 	}
 }
 

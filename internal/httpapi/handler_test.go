@@ -389,6 +389,26 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 	}
 }
 
+func TestGlobalRoutesAreNotRegisteredWithoutGlobalService(t *testing.T) {
+	t.Parallel()
+
+	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, nil, nil)
+	for _, path := range []string{
+		"/v1/sth/latest",
+		"/v1/sth",
+		"/v1/global-log/leaves",
+		"/v1/global-log/inclusion/batch-1",
+		"/v1/global-log/consistency?from=1&to=2",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404 body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 type processorFunc func(context.Context, model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error)
 
 func (f processorFunc) Submit(ctx context.Context, signed model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error) {

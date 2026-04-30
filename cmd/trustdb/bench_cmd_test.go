@@ -151,6 +151,45 @@ func TestRunBenchIngestSplitsImmediateAndPostProofQueries(t *testing.T) {
 	}
 }
 
+func TestRunBenchIngestSeparatesDisabledProofLevel(t *testing.T) {
+	t.Parallel()
+
+	_, priv, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key() error = %v", err)
+	}
+	client, err := sdk.NewClientWithTransport(&fakeBenchTransport{})
+	if err != nil {
+		t.Fatalf("NewClientWithTransport() error = %v", err)
+	}
+
+	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
+		Endpoint:      "bench://fake",
+		Transport:     "http",
+		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Count:         1,
+		Concurrency:   1,
+		PayloadBytes:  128,
+		ProgressEvery: 0,
+		Samples:       1,
+		ProofLevel:    sdk.ProofLevelL4,
+		MaxProofLevel: sdk.ProofLevelL3,
+		ProofTimeout:  10 * time.Millisecond,
+		Settle:        0,
+		EventType:     "bench.synthetic",
+		Source:        "bench-test",
+	})
+	if err != nil {
+		t.Fatalf("runBenchIngest() error = %v", err)
+	}
+	if result.ProofSamples.Disabled != 1 || result.ProofSamples.Ready != 0 || result.ProofSamples.Timeouts != 0 {
+		t.Fatalf("proof samples = %+v", result.ProofSamples)
+	}
+	if result.PostProofQuerySamples.Samples != 0 {
+		t.Fatalf("post-proof query samples = %+v", result.PostProofQuerySamples)
+	}
+}
+
 func TestWriteBenchIngestText(t *testing.T) {
 	t.Parallel()
 

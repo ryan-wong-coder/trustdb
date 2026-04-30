@@ -22,6 +22,8 @@ const (
 type Config struct {
 	Kind                         Backend
 	Path                         string
+	RecordIndexMode              string
+	ArtifactSyncMode             string
 	IndexStorageTokens           bool
 	IndexStorageTokensConfigured bool
 }
@@ -37,10 +39,12 @@ func Open(cfg Config) (Store, error) {
 	case "", BackendFile:
 		return &LocalStore{Root: cfg.Path}, nil
 	case BackendPebble:
-		if cfg.IndexStorageTokensConfigured {
-			return pebblestore.OpenWithOptions(cfg.Path, pebblestore.Options{IndexStorageTokens: cfg.IndexStorageTokens})
-		}
-		return pebblestore.Open(cfg.Path)
+		return pebblestore.OpenWithOptions(cfg.Path, pebblestore.Options{
+			RecordIndexMode:              cfg.RecordIndexMode,
+			ArtifactSyncMode:             cfg.ArtifactSyncMode,
+			IndexStorageTokens:           cfg.IndexStorageTokens,
+			IndexStorageTokensConfigured: cfg.IndexStorageTokensConfigured,
+		})
 	default:
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown proofstore backend: "+string(cfg.Kind))
 	}

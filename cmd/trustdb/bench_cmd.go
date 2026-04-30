@@ -83,6 +83,12 @@ func newBenchIngestCommand(rt *runtimeConfig) *cobra.Command {
 			default:
 				return usageError("bench ingest --proof-level must be L3, L4, or L5")
 			}
+			cfg.MaxProofLevel = strings.ToUpper(strings.TrimSpace(cfg.MaxProofLevel))
+			switch cfg.MaxProofLevel {
+			case "", sdk.ProofLevelL3, sdk.ProofLevelL4, sdk.ProofLevelL5:
+			default:
+				return usageError("bench ingest --max-proof-level must be L3, L4, or L5")
+			}
 			if cfg.ProofTimeout <= 0 {
 				return usageError("bench ingest --proof-timeout must be > 0")
 			}
@@ -137,34 +143,49 @@ func newBenchIngestCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().DurationVar(&cfg.Settle, "settle", 3*time.Second, "extra settle time before final metric snapshot")
 	cmd.Flags().StringVar(&cfg.EventType, "event-type", "bench.synthetic", "metadata.event_type for synthetic claims")
 	cmd.Flags().StringVar(&cfg.Source, "source", "trustdb-bench", "metadata.source for synthetic claims")
+	cmd.Flags().StringVar(&cfg.SemanticProfile, "semantic-profile", "", "semantic profile label to record in the report")
+	cmd.Flags().StringVar(&cfg.DurabilityProfile, "durability-profile", "", "durability profile label to record in the report")
+	cmd.Flags().StringVar(&cfg.ProofMode, "proof-mode", "", "server proof materialization mode label to record in the report")
+	cmd.Flags().StringVar(&cfg.RecordIndexMode, "record-index-mode", "", "server record index mode label to record in the report")
+	cmd.Flags().StringVar(&cfg.MaxProofLevel, "max-proof-level", "", "highest enabled proof level label to record in the report")
 	cmd.Flags().StringVar(&cfg.OutputFormat, "output", "json", "output format: json or text")
 	cmd.Flags().StringVar(&cfg.ReportFile, "report-file", "", "optional JSON report path to persist the ingest benchmark result")
 	return cmd
 }
 
 type benchIngestConfig struct {
-	Endpoint       string
-	Transport      string
-	PrivateKeyPath string
-	Identity       sdk.Identity
-	Count          int
-	Concurrency    int
-	PayloadBytes   int
-	ProgressEvery  int
-	Samples        int
-	ProofLevel     string
-	ProofTimeout   time.Duration
-	Settle         time.Duration
-	EventType      string
-	Source         string
-	OutputFormat   string
-	ReportFile     string
+	Endpoint          string
+	Transport         string
+	PrivateKeyPath    string
+	Identity          sdk.Identity
+	Count             int
+	Concurrency       int
+	PayloadBytes      int
+	ProgressEvery     int
+	Samples           int
+	ProofLevel        string
+	ProofTimeout      time.Duration
+	Settle            time.Duration
+	EventType         string
+	Source            string
+	SemanticProfile   string
+	DurabilityProfile string
+	ProofMode         string
+	RecordIndexMode   string
+	MaxProofLevel     string
+	OutputFormat      string
+	ReportFile        string
 }
 
 type benchIngestResult struct {
 	SchemaVersion                 string              `json:"schema_version"`
 	Endpoint                      string              `json:"endpoint"`
 	Transport                     string              `json:"transport"`
+	SemanticProfile               string              `json:"semantic_profile,omitempty"`
+	DurabilityProfile             string              `json:"durability_profile,omitempty"`
+	ProofMode                     string              `json:"proof_mode,omitempty"`
+	RecordIndexMode               string              `json:"record_index_mode,omitempty"`
+	MaxProofLevel                 string              `json:"max_proof_level,omitempty"`
 	Count                         int                 `json:"count"`
 	Concurrency                   int                 `json:"concurrency"`
 	PayloadBytes                  int                 `json:"payload_bytes"`
@@ -213,6 +234,7 @@ type benchProofSummary struct {
 	Samples     int                 `json:"samples"`
 	TargetLevel string              `json:"target_level"`
 	Ready       int                 `json:"ready"`
+	Disabled    int                 `json:"disabled,omitempty"`
 	Timeouts    int                 `json:"timeouts"`
 	Failed      int                 `json:"failed"`
 	Latency     benchLatencySummary `json:"latency"`
@@ -366,6 +388,7 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 	proofReady := 0
 	proofFailed := 0
 	proofTimeouts := 0
+	proofDisabled := 0
 	var immediateQueryDuration time.Duration
 	var postProofQueryDuration time.Duration
 	var proofWaitDuration time.Duration
@@ -386,6 +409,10 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 		}
 
 		if cfg.ProofLevel == "" {
+			continue
+		}
+		if cfg.MaxProofLevel != "" && benchProofLevelRank(cfg.ProofLevel) > benchProofLevelRank(cfg.MaxProofLevel) {
+			proofDisabled++
 			continue
 		}
 		proofStart := time.Now()
@@ -446,6 +473,11 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 		SchemaVersion:                 benchIngestReportSchema,
 		Endpoint:                      cfg.Endpoint,
 		Transport:                     cfg.Transport,
+		SemanticProfile:               cfg.SemanticProfile,
+		DurabilityProfile:             cfg.DurabilityProfile,
+		ProofMode:                     cfg.ProofMode,
+		RecordIndexMode:               cfg.RecordIndexMode,
+		MaxProofLevel:                 cfg.MaxProofLevel,
 		Count:                         cfg.Count,
 		Concurrency:                   cfg.Concurrency,
 		PayloadBytes:                  cfg.PayloadBytes,
@@ -465,7 +497,7 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 		QuerySamples:                  benchQuerySummary{Samples: len(samples), Ready: immediateQueryReady, Failed: immediateQueryFailed, Latency: immediateQueryStats.Summary()},
 		ImmediateQuerySamples:         benchQuerySummary{Samples: len(samples), Ready: immediateQueryReady, Failed: immediateQueryFailed, Latency: immediateQueryStats.Summary()},
 		PostProofQuerySamples:         benchQuerySummary{Samples: postProofQuerySamples, Ready: postProofQueryReady, Failed: postProofQueryFailed, Latency: postProofQueryStats.Summary()},
-		ProofSamples:                  benchProofSummary{Samples: len(samples), TargetLevel: cfg.ProofLevel, Ready: proofReady, Timeouts: proofTimeouts, Failed: proofFailed, Latency: proofStats.Summary()},
+		ProofSamples:                  benchProofSummary{Samples: len(samples), TargetLevel: cfg.ProofLevel, Ready: proofReady, Disabled: proofDisabled, Timeouts: proofTimeouts, Failed: proofFailed, Latency: proofStats.Summary()},
 		Metrics:                       diffBenchMetrics(beforeMetrics, afterMetrics),
 		ErrorSamples:                  errorSamples,
 		Records:                       samples,
@@ -524,6 +556,19 @@ func benchProofReachedLevel(proof sdk.SingleProof, level string) bool {
 	}
 }
 
+func benchProofLevelRank(level string) int {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case sdk.ProofLevelL3:
+		return 3
+	case sdk.ProofLevelL4:
+		return 4
+	case sdk.ProofLevelL5:
+		return 5
+	default:
+		return 0
+	}
+}
+
 func fillBenchPayload(buf []byte, seq int) {
 	seed := uint64(seq+1) * 0x9e3779b97f4a7c15
 	for i := range buf {
@@ -550,6 +595,7 @@ var benchMetricPrefixes = []string{
 	"trustdb_batch_stage_latency_seconds",
 	"trustdb_batch_size_records",
 	"trustdb_merkle_build_latency_seconds",
+	"trustdb_semantic_profile_info",
 	"trustdb_anchor_published_total",
 	"trustdb_anchor_attempts_total",
 	"trustdb_anchor_pending_total",
@@ -760,6 +806,21 @@ func durationMillis(d time.Duration) float64 {
 func writeBenchIngestText(w io.Writer, result benchIngestResult) {
 	fmt.Fprintf(w, "endpoint: %s\n", result.Endpoint)
 	fmt.Fprintf(w, "transport: %s\n", result.Transport)
+	if result.SemanticProfile != "" {
+		fmt.Fprintf(w, "semantic_profile: %s\n", result.SemanticProfile)
+	}
+	if result.DurabilityProfile != "" {
+		fmt.Fprintf(w, "durability_profile: %s\n", result.DurabilityProfile)
+	}
+	if result.ProofMode != "" {
+		fmt.Fprintf(w, "proof_mode: %s\n", result.ProofMode)
+	}
+	if result.RecordIndexMode != "" {
+		fmt.Fprintf(w, "record_index_mode: %s\n", result.RecordIndexMode)
+	}
+	if result.MaxProofLevel != "" {
+		fmt.Fprintf(w, "max_proof_level: %s\n", result.MaxProofLevel)
+	}
 	fmt.Fprintf(w, "count: %d\n", result.Count)
 	fmt.Fprintf(w, "concurrency: %d\n", result.Concurrency)
 	fmt.Fprintf(w, "payload_bytes: %d\n", result.PayloadBytes)
@@ -797,10 +858,11 @@ func writeBenchIngestText(w io.Writer, result benchIngestResult) {
 		result.PostProofQuerySamples.Latency.AvgMs,
 		result.PostProofQuerySamples.Latency.P95Ms,
 	)
-	fmt.Fprintf(w, "proof_samples: total=%d target=%s ready=%d timeouts=%d failed=%d avg_ms=%.2f p95_ms=%.2f\n",
+	fmt.Fprintf(w, "proof_samples: total=%d target=%s ready=%d disabled=%d timeouts=%d failed=%d avg_ms=%.2f p95_ms=%.2f\n",
 		result.ProofSamples.Samples,
 		result.ProofSamples.TargetLevel,
 		result.ProofSamples.Ready,
+		result.ProofSamples.Disabled,
 		result.ProofSamples.Timeouts,
 		result.ProofSamples.Failed,
 		result.ProofSamples.Latency.AvgMs,

@@ -126,13 +126,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("batch.queue_size", defaults.Batch.QueueSize)
 	v.SetDefault("batch.max_records", defaults.Batch.MaxRecords)
 	v.SetDefault("batch.max_delay", defaults.Batch.MaxDelay)
+	v.SetDefault("batch.proof_mode", defaults.Batch.ProofMode)
 	v.SetDefault("global_log.enabled", defaults.GlobalLog.Enabled)
 	v.SetDefault("anchor.scope", defaults.Anchor.Scope)
 	v.SetDefault("anchor.max_delay", defaults.Anchor.MaxDelay)
 	v.SetDefault("history.tile_size", defaults.History.TileSize)
 	v.SetDefault("history.hot_window_leaves", defaults.History.HotWindowLeaves)
 	v.SetDefault("backup.compression", defaults.Backup.Compression)
-	v.SetDefault("proofstore.index_storage_tokens", defaults.Proofstore.IndexStorageTokens)
+	v.SetDefault("proofstore.artifact_sync_mode", defaults.Proofstore.ArtifactSyncMode)
+	v.SetDefault("proofstore.record_index_mode", defaults.Proofstore.RecordIndexMode)
+	v.SetDefault("proofstore.index_storage_tokens", true)
 	v.SetDefault("log.level", defaults.Log.Level)
 	v.SetDefault("log.format", defaults.Log.Format)
 	v.SetDefault("log.output", defaults.Log.Output)
@@ -187,12 +190,15 @@ func setDefaults(v *viper.Viper) {
 	bindEnv(v, "batch.queue_size", "TRUSTDB_BATCH_QUEUE_SIZE")
 	bindEnv(v, "batch.max_records", "TRUSTDB_BATCH_MAX_RECORDS")
 	bindEnv(v, "batch.max_delay", "TRUSTDB_BATCH_MAX_DELAY")
+	bindEnv(v, "batch.proof_mode", "TRUSTDB_BATCH_PROOF_MODE")
 	bindEnv(v, "global_log.enabled", "TRUSTDB_GLOBAL_LOG_ENABLED")
 	bindEnv(v, "anchor.scope", "TRUSTDB_ANCHOR_SCOPE")
 	bindEnv(v, "anchor.max_delay", "TRUSTDB_ANCHOR_MAX_DELAY")
 	bindEnv(v, "history.tile_size", "TRUSTDB_HISTORY_TILE_SIZE")
 	bindEnv(v, "history.hot_window_leaves", "TRUSTDB_HISTORY_HOT_WINDOW_LEAVES")
 	bindEnv(v, "backup.compression", "TRUSTDB_BACKUP_COMPRESSION")
+	bindEnv(v, "proofstore.artifact_sync_mode", "TRUSTDB_PROOFSTORE_ARTIFACT_SYNC_MODE")
+	bindEnv(v, "proofstore.record_index_mode", "TRUSTDB_PROOFSTORE_RECORD_INDEX_MODE")
 	bindEnv(v, "proofstore.index_storage_tokens", "TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS")
 	bindEnv(v, "log.level", "TRUSTDB_LOG_LEVEL")
 	bindEnv(v, "log.format", "TRUSTDB_LOG_FORMAT")
@@ -296,6 +302,7 @@ func loadConfig(v *viper.Viper) trustconfig.Config {
 			QueueSize:  v.GetInt("batch.queue_size"),
 			MaxRecords: v.GetInt("batch.max_records"),
 			MaxDelay:   v.GetString("batch.max_delay"),
+			ProofMode:  v.GetString("batch.proof_mode"),
 		},
 		GlobalLog: trustconfig.GlobalLog{
 			Enabled: v.GetBool("global_log.enabled"),
@@ -312,7 +319,8 @@ func loadConfig(v *viper.Viper) trustconfig.Config {
 			Compression: v.GetString("backup.compression"),
 		},
 		Proofstore: trustconfig.Proofstore{
-			IndexStorageTokens: v.GetBool("proofstore.index_storage_tokens"),
+			ArtifactSyncMode: v.GetString("proofstore.artifact_sync_mode"),
+			RecordIndexMode:  proofstoreRecordIndexMode(v),
 		},
 		Log: trustconfig.Log{
 			Level:  v.GetString("log.level"),
@@ -340,6 +348,35 @@ func loadConfig(v *viper.Viper) trustconfig.Config {
 			RegistryPublic:  v.GetString("keys.registry_public"),
 		},
 	}
+}
+
+func proofstoreRecordIndexMode(v *viper.Viper) string {
+	mode := strings.TrimSpace(v.GetString("proofstore.record_index_mode"))
+	if envIsSet("TRUSTDB_PROOFSTORE_RECORD_INDEX_MODE") && mode != "" {
+		return mode
+	}
+	if envIsSet("TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS") && !v.GetBool("proofstore.index_storage_tokens") {
+		return "no_storage_tokens"
+	}
+	if v.InConfig("proofstore.record_index_mode") && mode != "" {
+		return mode
+	}
+	if v.InConfig("proofstore.index_storage_tokens") && !v.GetBool("proofstore.index_storage_tokens") {
+		return "no_storage_tokens"
+	}
+	if mode != "" {
+		return mode
+	}
+	return "full"
+}
+
+func envIsSet(names ...string) bool {
+	for _, name := range names {
+		if _, ok := os.LookupEnv(name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (rt *runtimeConfig) writeJSON(v any) error {
@@ -499,6 +536,12 @@ func configString(cfg trustconfig.Config, key string) string {
 		return cfg.Anchor.Scope
 	case "anchor.max_delay":
 		return cfg.Anchor.MaxDelay
+	case "batch.proof_mode":
+		return cfg.Batch.ProofMode
+	case "proofstore.artifact_sync_mode":
+		return cfg.Proofstore.ArtifactSyncMode
+	case "proofstore.record_index_mode":
+		return cfg.Proofstore.RecordIndexMode
 	case "backup.compression":
 		return cfg.Backup.Compression
 	case "log.level":

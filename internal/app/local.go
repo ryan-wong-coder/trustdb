@@ -199,6 +199,29 @@ func (e LocalEngine) resolveClientKey(signed model.SignedClaim, receivedAt time.
 }
 
 func (e LocalEngine) CommitBatch(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) ([]model.ProofBundle, error) {
+	return e.commitBatch(batchID, closedAt, signed, records, accepted, true)
+}
+
+func (e LocalEngine) CommitBatchIndexes(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) (model.BatchRoot, []model.RecordIndex, error) {
+	bundles, err := e.commitBatch(batchID, closedAt, signed, records, accepted, false)
+	if err != nil {
+		return model.BatchRoot{}, nil, err
+	}
+	root := model.BatchRoot{
+		SchemaVersion: model.SchemaBatchRoot,
+		BatchID:       batchID,
+		BatchRoot:     append([]byte(nil), bundles[0].CommittedReceipt.BatchRoot...),
+		TreeSize:      uint64(len(bundles)),
+		ClosedAtUnixN: bundles[0].CommittedReceipt.ClosedAtUnixN,
+	}
+	indexes := make([]model.RecordIndex, len(bundles))
+	for i := range bundles {
+		indexes[i] = model.RecordIndexFromBundle(bundles[i])
+	}
+	return root, indexes, nil
+}
+
+func (e LocalEngine) commitBatch(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt, includeProofs bool) ([]model.ProofBundle, error) {
 	if len(records) == 0 || len(records) != len(signed) || len(records) != len(accepted) {
 		return nil, fmt.Errorf("app: inconsistent batch input sizes")
 	}
@@ -211,7 +234,10 @@ func (e LocalEngine) CommitBatch(batchID string, closedAt time.Time, signed []mo
 	}
 	closedAt = closedAt.UTC()
 	root := tree.Root()
-	proofs := tree.Proofs()
+	var proofs [][][]byte
+	if includeProofs {
+		proofs = tree.Proofs()
+	}
 	bundles := make([]model.ProofBundle, len(records))
 	for i := range records {
 		leaf, err := tree.LeafHash(i)
@@ -243,8 +269,10 @@ func (e LocalEngine) CommitBatch(batchID string, closedAt time.Time, signed []mo
 				TreeAlg:   model.DefaultMerkleTreeAlg,
 				LeafIndex: uint64(i),
 				TreeSize:  uint64(len(records)),
-				AuditPath: proofs[i],
 			},
+		}
+		if includeProofs {
+			bundles[i].BatchProof.AuditPath = proofs[i]
 		}
 	}
 	return bundles, nil

@@ -267,6 +267,144 @@ func TestServiceInvokesOnCheckpointAdvanced(t *testing.T) {
 	}
 }
 
+func TestServiceAsyncProofModePublishesIndexBeforeBundle(t *testing.T) {
+	t.Parallel()
+
+	block := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	engine := blockingMaterializeEngine{block: block, entered: entered}
+	store := proofstore.LocalStore{Root: t.TempDir()}
+	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync}, nil)
+	defer func() {
+		close(block)
+		_ = svc.Shutdown(context.Background())
+	}()
+
+	if err := svc.Enqueue(context.Background(), signed("async-rec"), recordWithWAL("async-rec", 31), accepted("async-rec")); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	idx := waitForRecordIndex(t, svc, "async-rec")
+	if idx.BatchID == "" {
+		t.Fatalf("RecordIndex() missing batch_id: %+v", idx)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("async materializer did not start")
+	}
+	if _, err := svc.Proof(context.Background(), "async-rec"); trusterr.CodeOf(err) != trusterr.CodeNotFound {
+		t.Fatalf("Proof() before async materialization code = %s err=%v", trusterr.CodeOf(err), err)
+	}
+
+	close(block)
+	block = make(chan struct{}) // keep deferred close safe after the real unblock.
+	got := waitForProof(t, svc, "async-rec")
+	if got.RecordID != "async-rec" {
+		t.Fatalf("Proof() = %+v", got)
+	}
+	manifest := waitForManifestState(t, store, idx.BatchID, model.BatchStateCommitted)
+	if manifest.WALRange.To.Sequence != 31 {
+		t.Fatalf("manifest WAL range = %+v", manifest.WALRange)
+	}
+}
+
+func TestServiceOnDemandProofModeMaterializesOnce(t *testing.T) {
+	t.Parallel()
+
+	engine := &countingMaterializeEngine{}
+	store := proofstore.LocalStore{Root: t.TempDir()}
+	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeOnDemand}, nil)
+	defer svc.Shutdown(context.Background())
+
+	if err := svc.Enqueue(context.Background(), signed("ondemand-rec"), recordWithWAL("ondemand-rec", 41), accepted("ondemand-rec")); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	idx := waitForRecordIndex(t, svc, "ondemand-rec")
+	if idx.BatchID == "" {
+		t.Fatalf("RecordIndex() missing batch_id: %+v", idx)
+	}
+	waitForManifestState(t, store, idx.BatchID, model.BatchStatePrepared)
+	if _, err := store.GetBundle(context.Background(), "ondemand-rec"); trusterr.CodeOf(err) != trusterr.CodeNotFound {
+		t.Fatalf("GetBundle() before on-demand proof code = %s err=%v", trusterr.CodeOf(err), err)
+	}
+
+	got := waitForProof(t, svc, "ondemand-rec")
+	if got.RecordID != "ondemand-rec" {
+		t.Fatalf("Proof() = %+v", got)
+	}
+	if commits := engine.CommitCount(); commits != 1 {
+		t.Fatalf("materialize CommitBatch calls = %d, want 1", commits)
+	}
+	waitForManifestState(t, store, idx.BatchID, model.BatchStateCommitted)
+	if _, err := svc.Proof(context.Background(), "ondemand-rec"); err != nil {
+		t.Fatalf("cached Proof() error = %v", err)
+	}
+	if commits := engine.CommitCount(); commits != 1 {
+		t.Fatalf("cached proof materialize CommitBatch calls = %d, want 1", commits)
+	}
+}
+
+func TestServiceOnDemandRecoverManifestKeepsBundleLazy(t *testing.T) {
+	t.Parallel()
+
+	items := []Accepted{{Signed: signed("recover-ondemand"), Record: recordWithWAL("recover-ondemand", 51), Accepted: accepted("recover-ondemand")}}
+	engine := &countingMaterializeEngine{}
+	store := proofstore.LocalStore{Root: t.TempDir()}
+	closedAt := time.Unix(0, 1234).UTC()
+	root, indexes, err := engine.CommitBatchIndexes("recover-batch", closedAt, []model.SignedClaim{items[0].Signed}, []model.ServerRecord{items[0].Record}, []model.AcceptedReceipt{items[0].Accepted})
+	if err != nil {
+		t.Fatalf("CommitBatchIndexes: %v", err)
+	}
+	manifest := model.BatchManifest{
+		SchemaVersion:   model.SchemaBatchManifest,
+		BatchID:         "recover-batch",
+		State:           model.BatchStatePrepared,
+		TreeAlg:         model.DefaultMerkleTreeAlg,
+		TreeSize:        1,
+		BatchRoot:       root.BatchRoot,
+		RecordIDs:       []string{"recover-ondemand"},
+		WALRange:        walRangeFor(items),
+		ClosedAtUnixN:   root.ClosedAtUnixN,
+		PreparedAtUnixN: closedAt.UnixNano(),
+	}
+	if err := store.PutManifest(context.Background(), manifest); err != nil {
+		t.Fatalf("PutManifest: %v", err)
+	}
+	if len(indexes) != 1 {
+		t.Fatalf("indexes = %+v", indexes)
+	}
+
+	svc := New(engine, store, Options{
+		QueueSize:  4,
+		MaxRecords: 1,
+		MaxDelay:   time.Hour,
+		ProofMode:  ProofModeOnDemand,
+		LoadBatchItems: func(context.Context, model.BatchManifest) ([]Accepted, error) {
+			return cloneAcceptedItems(items), nil
+		},
+	}, nil)
+	defer svc.Shutdown(context.Background())
+	if err := svc.RecoverManifest(context.Background(), manifest, items); err != nil {
+		t.Fatalf("RecoverManifest: %v", err)
+	}
+	if _, err := store.GetBundle(context.Background(), "recover-ondemand"); trusterr.CodeOf(err) != trusterr.CodeNotFound {
+		t.Fatalf("GetBundle() after on-demand recovery code = %s err=%v", trusterr.CodeOf(err), err)
+	}
+	idx, ok, err := store.GetRecordIndex(context.Background(), "recover-ondemand")
+	if err != nil || !ok || idx.BatchID != "recover-batch" {
+		t.Fatalf("GetRecordIndex() = %+v ok=%v err=%v", idx, ok, err)
+	}
+	waitForManifestState(t, store, "recover-batch", model.BatchStatePrepared)
+	if commits := engine.CommitCount(); commits != 0 {
+		t.Fatalf("materialize CommitBatch calls after recovery = %d, want 0", commits)
+	}
+	waitForProof(t, svc, "recover-ondemand")
+	if commits := engine.CommitCount(); commits != 1 {
+		t.Fatalf("materialize CommitBatch calls after proof = %d, want 1", commits)
+	}
+	waitForManifestState(t, store, "recover-batch", model.BatchStateCommitted)
+}
+
 func waitForCheckpoint(t *testing.T, store proofstore.LocalStore, wantSeq uint64) model.WALCheckpoint {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -280,6 +418,36 @@ func waitForCheckpoint(t *testing.T, store proofstore.LocalStore, wantSeq uint64
 	cp, found, err := store.GetCheckpoint(context.Background())
 	t.Fatalf("GetCheckpoint() after wait = %+v found=%v err=%v (want LastSequence >= %d)", cp, found, err, wantSeq)
 	return model.WALCheckpoint{}
+}
+
+func waitForRecordIndex(t *testing.T, svc *Service, recordID string) model.RecordIndex {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		idx, ok, err := svc.RecordIndex(context.Background(), recordID)
+		if err == nil && ok {
+			return idx
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	idx, ok, err := svc.RecordIndex(context.Background(), recordID)
+	t.Fatalf("RecordIndex(%q) after wait = %+v ok=%v err=%v lastErr=%v", recordID, idx, ok, err, svc.LastError())
+	return model.RecordIndex{}
+}
+
+func waitForManifestState(t *testing.T, store proofstore.LocalStore, batchID, state string) model.BatchManifest {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		manifest, err := store.GetManifest(context.Background(), batchID)
+		if err == nil && manifest.State == state {
+			return manifest
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	manifest, err := store.GetManifest(context.Background(), batchID)
+	t.Fatalf("GetManifest(%q) after wait = %+v err=%v want state=%s", batchID, manifest, err, state)
+	return model.BatchManifest{}
 }
 
 // waitForLatestRoot polls LatestRoot until the committed batch has published
@@ -346,6 +514,19 @@ func (fakeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model
 	return out, nil
 }
 
+func (fakeEngine) CommitBatchIndexes(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) (model.BatchRoot, []model.RecordIndex, error) {
+	bundles, err := fakeEngine{}.CommitBatch(batchID, closedAt, signed, records, accepted)
+	if err != nil {
+		return model.BatchRoot{}, nil, err
+	}
+	root := rootFromBundles(batchID, bundles)
+	indexes := make([]model.RecordIndex, len(bundles))
+	for i := range bundles {
+		indexes[i] = model.RecordIndexFromBundle(bundles[i])
+	}
+	return root, indexes, nil
+}
+
 type blockingEngine struct {
 	block   chan struct{}
 	entered chan struct{}
@@ -358,6 +539,46 @@ func (e blockingEngine) CommitBatch(batchID string, closedAt time.Time, signed [
 	}
 	<-e.block
 	return fakeEngine{}.CommitBatch(batchID, closedAt, signed, records, accepted)
+}
+
+type blockingMaterializeEngine struct {
+	block   chan struct{}
+	entered chan struct{}
+}
+
+func (e blockingMaterializeEngine) CommitBatchIndexes(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) (model.BatchRoot, []model.RecordIndex, error) {
+	return fakeEngine{}.CommitBatchIndexes(batchID, closedAt, signed, records, accepted)
+}
+
+func (e blockingMaterializeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) ([]model.ProofBundle, error) {
+	select {
+	case e.entered <- struct{}{}:
+	default:
+	}
+	<-e.block
+	return fakeEngine{}.CommitBatch(batchID, closedAt, signed, records, accepted)
+}
+
+type countingMaterializeEngine struct {
+	mu      sync.Mutex
+	commits int
+}
+
+func (e *countingMaterializeEngine) CommitBatchIndexes(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) (model.BatchRoot, []model.RecordIndex, error) {
+	return fakeEngine{}.CommitBatchIndexes(batchID, closedAt, signed, records, accepted)
+}
+
+func (e *countingMaterializeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) ([]model.ProofBundle, error) {
+	e.mu.Lock()
+	e.commits++
+	e.mu.Unlock()
+	return fakeEngine{}.CommitBatch(batchID, closedAt, signed, records, accepted)
+}
+
+func (e *countingMaterializeEngine) CommitCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.commits
 }
 
 func signed(recordID string) model.SignedClaim {

@@ -18,7 +18,8 @@ metastore: "pebble"
 metastore_path: ".trustdb/proofs/pebble"
 
 proofstore:
-  index_storage_tokens: true
+  artifact_sync_mode: "chunk"
+  record_index_mode: "full"
 
 wal:
   fsync_mode: "group"
@@ -47,6 +48,7 @@ batch:
   queue_size: 1024
   max_records: 1024
   max_delay: "500ms"
+  proof_mode: "inline"
 
 global_log:
   enabled: true
@@ -135,6 +137,7 @@ type Batch struct {
 	QueueSize  int    `mapstructure:"queue_size" json:"queue_size"`
 	MaxRecords int    `mapstructure:"max_records" json:"max_records"`
 	MaxDelay   string `mapstructure:"max_delay" json:"max_delay"`
+	ProofMode  string `mapstructure:"proof_mode" json:"proof_mode"`
 }
 
 type GlobalLog struct {
@@ -156,7 +159,8 @@ type Backup struct {
 }
 
 type Proofstore struct {
-	IndexStorageTokens bool `mapstructure:"index_storage_tokens" json:"index_storage_tokens"`
+	ArtifactSyncMode string `mapstructure:"artifact_sync_mode" json:"artifact_sync_mode"`
+	RecordIndexMode  string `mapstructure:"record_index_mode" json:"record_index_mode"`
 }
 
 type Log struct {
@@ -219,6 +223,7 @@ func Default() Config {
 			QueueSize:  1024,
 			MaxRecords: 1024,
 			MaxDelay:   "500ms",
+			ProofMode:  "inline",
 		},
 		GlobalLog: GlobalLog{
 			Enabled: true,
@@ -235,7 +240,8 @@ func Default() Config {
 			Compression: "gzip",
 		},
 		Proofstore: Proofstore{
-			IndexStorageTokens: true,
+			ArtifactSyncMode: "chunk",
+			RecordIndexMode:  "full",
 		},
 		Log: Log{
 			Level:  "warn",
@@ -324,6 +330,11 @@ func (c Config) Validate() error {
 	if _, err := time.ParseDuration(c.Batch.MaxDelay); err != nil {
 		return fmt.Errorf("batch.max_delay must be a valid duration: %w", err)
 	}
+	switch strings.ToLower(c.Batch.ProofMode) {
+	case "", "inline", "async", "on_demand":
+	default:
+		return fmt.Errorf("batch.proof_mode must be one of inline, async, or on_demand")
+	}
 	switch strings.ToLower(c.Anchor.Scope) {
 	case "", "global":
 	default:
@@ -342,6 +353,16 @@ func (c Config) Validate() error {
 	case "", "gzip", "none":
 	default:
 		return fmt.Errorf("backup.compression must be gzip or none")
+	}
+	switch strings.ToLower(c.Proofstore.ArtifactSyncMode) {
+	case "", "chunk", "batch":
+	default:
+		return fmt.Errorf("proofstore.artifact_sync_mode must be chunk or batch")
+	}
+	switch strings.ToLower(c.Proofstore.RecordIndexMode) {
+	case "", "full", "no_storage_tokens", "time_only":
+	default:
+		return fmt.Errorf("proofstore.record_index_mode must be one of full, no_storage_tokens, or time_only")
 	}
 
 	switch strings.ToLower(c.Log.Level) {

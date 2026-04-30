@@ -71,6 +71,15 @@ const (
 	storedBundleCodecSnappy   = "snappy"
 )
 
+const (
+	RecordIndexModeFull            = "full"
+	RecordIndexModeNoStorageTokens = "no_storage_tokens"
+	RecordIndexModeTimeOnly        = "time_only"
+
+	ArtifactSyncModeChunk = "chunk"
+	ArtifactSyncModeBatch = "batch"
+)
+
 var (
 	recordIndexRefPrefix = []byte("trustdb.record-index-ref.v1\x00")
 	recordByIDPrefix     = []byte(prefixRecordByID)
@@ -83,7 +92,10 @@ type storedProofBundleEnvelope struct {
 }
 
 type Options struct {
-	IndexStorageTokens bool
+	RecordIndexMode              string
+	ArtifactSyncMode             string
+	IndexStorageTokens           bool
+	IndexStorageTokensConfigured bool
 }
 
 type encodedBatchArtifact struct {
@@ -114,8 +126,9 @@ var artifactBufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 // from multiple goroutines; Pebble's internal locking guarantees that
 // all Store methods see a linearizable view of the underlying key space.
 type Store struct {
-	db                 *pdb.DB
-	indexStorageTokens bool
+	db               *pdb.DB
+	recordIndexMode  string
+	artifactSyncMode string
 
 	// closeOnce guards the underlying db.Close so that duplicate
 	// Close calls from defers and shutdown hooks cannot panic on a
@@ -129,7 +142,7 @@ type Store struct {
 // release the underlying file locks; Pebble refuses a second Open at
 // the same path while the first handle is still live.
 func Open(path string) (*Store, error) {
-	return OpenWithOptions(path, Options{IndexStorageTokens: true})
+	return OpenWithOptions(path, Options{RecordIndexMode: RecordIndexModeFull, ArtifactSyncMode: ArtifactSyncModeChunk})
 }
 
 func OpenWithOptions(path string, opts Options) (*Store, error) {
@@ -140,7 +153,37 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 	if err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeInternal, "open pebble proofstore", err)
 	}
-	return &Store{db: db, indexStorageTokens: opts.IndexStorageTokens}, nil
+	return &Store{
+		db:               db,
+		recordIndexMode:  normalizeRecordIndexMode(opts),
+		artifactSyncMode: normalizeArtifactSyncMode(opts.ArtifactSyncMode),
+	}, nil
+}
+
+func normalizeRecordIndexMode(opts Options) string {
+	mode := strings.ToLower(strings.TrimSpace(opts.RecordIndexMode))
+	if mode == "" && opts.IndexStorageTokensConfigured && !opts.IndexStorageTokens {
+		mode = RecordIndexModeNoStorageTokens
+	}
+	switch mode {
+	case "", RecordIndexModeFull:
+		return RecordIndexModeFull
+	case RecordIndexModeNoStorageTokens:
+		return RecordIndexModeNoStorageTokens
+	case RecordIndexModeTimeOnly:
+		return RecordIndexModeTimeOnly
+	default:
+		return RecordIndexModeFull
+	}
+}
+
+func normalizeArtifactSyncMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ArtifactSyncModeBatch:
+		return ArtifactSyncModeBatch
+	default:
+		return ArtifactSyncModeChunk
+	}
 }
 
 // Close releases the underlying Pebble database. It is safe to call
@@ -216,10 +259,11 @@ func recordIndexUpperTimeKey(prefix string, receivedAtUnixN int64) []byte {
 	return append(key, '0')
 }
 
-func visitRecordIndexKeys(idx model.RecordIndex, includeStorageTokens bool, visit func([]byte) error) error {
+func visitRecordIndexKeys(idx model.RecordIndex, mode string, visit func([]byte) error) error {
 	if idx.RecordID == "" {
 		return nil
 	}
+	mode = normalizeRecordIndexMode(Options{RecordIndexMode: mode})
 	key := make([]byte, 0, recordIndexKeyCap(idx))
 	key = append(key, recordByIDPrefix...)
 	key = append(key, idx.RecordID...)
@@ -229,6 +273,9 @@ func visitRecordIndexKeys(idx model.RecordIndex, includeStorageTokens bool, visi
 	key = appendRecordIndexKeyPrefix(key[:0], prefixRecordByTime, idx.ReceivedAtUnixN, idx.RecordID)
 	if err := visit(key); err != nil {
 		return err
+	}
+	if mode == RecordIndexModeTimeOnly {
+		return nil
 	}
 	if idx.BatchID != "" {
 		key = appendRecordIndexEncodedPrefix(key[:0], prefixRecordByBatch, idx.BatchID, idx.ReceivedAtUnixN, idx.RecordID)
@@ -263,7 +310,7 @@ func visitRecordIndexKeys(idx model.RecordIndex, includeStorageTokens bool, visi
 			return err
 		}
 	}
-	if includeStorageTokens {
+	if mode == RecordIndexModeFull {
 		for _, token := range model.RecordIndexStorageTokens(idx) {
 			key = appendRecordIndexEncodedPrefix(key[:0], prefixRecordByToken, token, idx.ReceivedAtUnixN, idx.RecordID)
 			if err := visit(key); err != nil {
@@ -580,6 +627,13 @@ func stageRecordIndexRef(batch *pdb.Batch, key []byte, recordID string) error {
 	return op.Finish()
 }
 
+func (s *Store) artifactWriteOptions() *pdb.WriteOptions {
+	if s != nil && s.artifactSyncMode == ArtifactSyncModeBatch {
+		return pdb.NoSync
+	}
+	return pdb.Sync
+}
+
 func decodeRecordIndexRef(value []byte) (string, bool) {
 	if !bytes.HasPrefix(value, recordIndexRefPrefix) {
 		return "", false
@@ -678,12 +732,70 @@ func (s *Store) PutBatchArtifacts(ctx context.Context, bundles []model.ProofBund
 				return err
 			}
 		}
-		if err := batch.Commit(pdb.Sync); err != nil {
+		if err := batch.Commit(s.artifactWriteOptions()); err != nil {
 			_ = batch.Close()
 			return trusterr.Wrap(trusterr.CodeDataLoss, "commit batch artifacts", err)
 		}
 		if err := batch.Close(); err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "close batch artifacts", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) PutBatchIndexesAndRoot(ctx context.Context, indexes []model.RecordIndex, root model.BatchRoot) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch indexes canceled", err)
+	}
+	if len(indexes) == 0 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "proofstore batch indexes require at least one record index")
+	}
+	root, err := normalizeBatchRoot(root, len(indexes))
+	if err != nil {
+		return err
+	}
+	for start := 0; start < len(indexes); start += batchArtifactChunkSize {
+		end := start + batchArtifactChunkSize
+		if end > len(indexes) {
+			end = len(indexes)
+		}
+		if err := ctx.Err(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch indexes canceled", err)
+		}
+		encoded := make([]encodedRecordIndex, end-start)
+		for i := range encoded {
+			idx, err := encodeRecordIndexArtifact(indexes[start+i])
+			if err != nil {
+				for j := 0; j < i; j++ {
+					encoded[j].release()
+				}
+				return err
+			}
+			encoded[i] = idx
+		}
+		batch := s.db.NewBatch()
+		for i := range encoded {
+			if err := s.stageEncodedRecordIndexSetForMode(batch, encoded[i]); err != nil {
+				for j := i; j < len(encoded); j++ {
+					encoded[j].release()
+				}
+				_ = batch.Close()
+				return err
+			}
+			encoded[i].release()
+		}
+		if end == len(indexes) {
+			if err := s.stageRoot(batch, root); err != nil {
+				_ = batch.Close()
+				return err
+			}
+		}
+		if err := batch.Commit(s.artifactWriteOptions()); err != nil {
+			_ = batch.Close()
+			return trusterr.Wrap(trusterr.CodeDataLoss, "commit batch indexes", err)
+		}
+		if err := batch.Close(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "close batch indexes", err)
 		}
 	}
 	return nil
@@ -702,7 +814,7 @@ func (s *Store) stageEncodedBatchArtifact(batch *pdb.Batch, artifact encodedBatc
 	if err := stageSet(batch, bundleV2Key(artifact.recordID), artifact.bundleValue); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "stage proof bundle", err)
 	}
-	return s.stageEncodedRecordIndexSet(batch, artifact.index)
+	return s.stageEncodedRecordIndexSetForMode(batch, artifact.index)
 }
 
 func (s *Store) PutRecordIndex(ctx context.Context, idx model.RecordIndex) error {
@@ -2329,22 +2441,23 @@ func sortSTHAnchorItems(items []model.STHAnchorOutboxItem) {
 }
 
 func (s *Store) recordListPrefix(opts model.RecordListOptions) string {
-	useStorageTokens := true
+	mode := RecordIndexModeFull
 	if s != nil {
-		useStorageTokens = s.indexStorageTokens
+		mode = s.recordIndexMode
 	}
+	useSecondary := mode != RecordIndexModeTimeOnly
 	switch {
-	case len(opts.ContentHash) > 0:
+	case useSecondary && len(opts.ContentHash) > 0:
 		return prefixRecordByHash + hex.EncodeToString(opts.ContentHash) + "/"
-	case useStorageTokens && model.RecordStorageQueryToken(opts.Query) != "":
+	case mode == RecordIndexModeFull && model.RecordStorageQueryToken(opts.Query) != "":
 		return prefixRecordByToken + recordSecondaryPart(model.RecordStorageQueryToken(opts.Query)) + "/"
-	case opts.BatchID != "":
+	case useSecondary && opts.BatchID != "":
 		return prefixRecordByBatch + recordSecondaryPart(opts.BatchID) + "/"
-	case opts.ProofLevel != "":
+	case useSecondary && opts.ProofLevel != "":
 		return prefixRecordByLevel + recordSecondaryPart(opts.ProofLevel) + "/"
-	case opts.TenantID != "":
+	case useSecondary && opts.TenantID != "":
 		return prefixRecordByTenant + recordSecondaryPart(opts.TenantID) + "/"
-	case opts.ClientID != "":
+	case useSecondary && opts.ClientID != "":
 		return prefixRecordByClient + recordSecondaryPart(opts.ClientID) + "/"
 	default:
 		return prefixRecordByTime
@@ -2379,7 +2492,7 @@ func (s *Store) stageRecordIndexReplace(batch *pdb.Batch, idx, old model.RecordI
 
 func (s *Store) stageEncodedRecordIndexReplace(batch *pdb.Batch, idx encodedRecordIndex, old model.RecordIndex, oldFound bool) error {
 	if oldFound {
-		if err := visitRecordIndexKeys(old, true, func(key []byte) error {
+		if err := visitRecordIndexKeys(old, RecordIndexModeFull, func(key []byte) error {
 			if err := batch.Delete(key, nil); err != nil {
 				return trusterr.Wrap(trusterr.CodeDataLoss, "stage old record index delete", err)
 			}
@@ -2387,6 +2500,25 @@ func (s *Store) stageEncodedRecordIndexReplace(batch *pdb.Batch, idx encodedReco
 		}); err != nil {
 			return err
 		}
+	}
+	return s.stageEncodedRecordIndexSet(batch, idx)
+}
+
+func (s *Store) stageEncodedRecordIndexSetForMode(batch *pdb.Batch, idx encodedRecordIndex) error {
+	if s == nil || s.recordIndexMode == RecordIndexModeFull {
+		return s.stageEncodedRecordIndexSet(batch, idx)
+	}
+	return s.stageEncodedRecordIndexReplaceSame(batch, idx)
+}
+
+func (s *Store) stageEncodedRecordIndexReplaceSame(batch *pdb.Batch, idx encodedRecordIndex) error {
+	if err := visitRecordIndexKeys(idx.idx, RecordIndexModeFull, func(key []byte) error {
+		if err := batch.Delete(key, nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index delete", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return s.stageEncodedRecordIndexSet(batch, idx)
 }
@@ -2401,11 +2533,11 @@ func (s *Store) stageRecordIndexSet(batch *pdb.Batch, idx model.RecordIndex) err
 }
 
 func (s *Store) stageEncodedRecordIndexSet(batch *pdb.Batch, idx encodedRecordIndex) error {
-	includeStorageTokens := true
+	mode := RecordIndexModeFull
 	if s != nil {
-		includeStorageTokens = s.indexStorageTokens
+		mode = s.recordIndexMode
 	}
-	if err := visitRecordIndexKeys(idx.idx, includeStorageTokens, func(key []byte) error {
+	if err := visitRecordIndexKeys(idx.idx, mode, func(key []byte) error {
 		if isRecordByIDKey(key) {
 			if err := stageSet(batch, key, idx.value); err != nil {
 				return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index", err)

@@ -33,30 +33,40 @@ type benchMatrixFile struct {
 }
 
 type benchMatrixDefaults struct {
-	Count         *int   `json:"count,omitempty"`
-	Concurrency   *int   `json:"concurrency,omitempty"`
-	PayloadBytes  *int   `json:"payload_bytes,omitempty"`
-	ProgressEvery *int   `json:"progress_every,omitempty"`
-	Samples       *int   `json:"samples,omitempty"`
-	ProofLevel    string `json:"proof_level,omitempty"`
-	ProofTimeout  string `json:"proof_timeout,omitempty"`
-	Settle        string `json:"settle,omitempty"`
-	EventType     string `json:"event_type,omitempty"`
-	Source        string `json:"source,omitempty"`
+	Count             *int   `json:"count,omitempty"`
+	Concurrency       *int   `json:"concurrency,omitempty"`
+	PayloadBytes      *int   `json:"payload_bytes,omitempty"`
+	ProgressEvery     *int   `json:"progress_every,omitempty"`
+	Samples           *int   `json:"samples,omitempty"`
+	ProofLevel        string `json:"proof_level,omitempty"`
+	ProofTimeout      string `json:"proof_timeout,omitempty"`
+	Settle            string `json:"settle,omitempty"`
+	EventType         string `json:"event_type,omitempty"`
+	Source            string `json:"source,omitempty"`
+	SemanticProfile   string `json:"semantic_profile,omitempty"`
+	DurabilityProfile string `json:"durability_profile,omitempty"`
+	ProofMode         string `json:"proof_mode,omitempty"`
+	RecordIndexMode   string `json:"record_index_mode,omitempty"`
+	MaxProofLevel     string `json:"max_proof_level,omitempty"`
 }
 
 type benchMatrixCaseDef struct {
-	Name          string `json:"name,omitempty"`
-	Count         *int   `json:"count,omitempty"`
-	Concurrency   *int   `json:"concurrency,omitempty"`
-	PayloadBytes  *int   `json:"payload_bytes,omitempty"`
-	ProgressEvery *int   `json:"progress_every,omitempty"`
-	Samples       *int   `json:"samples,omitempty"`
-	ProofLevel    string `json:"proof_level,omitempty"`
-	ProofTimeout  string `json:"proof_timeout,omitempty"`
-	Settle        string `json:"settle,omitempty"`
-	EventType     string `json:"event_type,omitempty"`
-	Source        string `json:"source,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Count             *int   `json:"count,omitempty"`
+	Concurrency       *int   `json:"concurrency,omitempty"`
+	PayloadBytes      *int   `json:"payload_bytes,omitempty"`
+	ProgressEvery     *int   `json:"progress_every,omitempty"`
+	Samples           *int   `json:"samples,omitempty"`
+	ProofLevel        string `json:"proof_level,omitempty"`
+	ProofTimeout      string `json:"proof_timeout,omitempty"`
+	Settle            string `json:"settle,omitempty"`
+	EventType         string `json:"event_type,omitempty"`
+	Source            string `json:"source,omitempty"`
+	SemanticProfile   string `json:"semantic_profile,omitempty"`
+	DurabilityProfile string `json:"durability_profile,omitempty"`
+	ProofMode         string `json:"proof_mode,omitempty"`
+	RecordIndexMode   string `json:"record_index_mode,omitempty"`
+	MaxProofLevel     string `json:"max_proof_level,omitempty"`
 }
 
 type benchMatrixResult struct {
@@ -89,6 +99,7 @@ type benchMatrixSummary struct {
 	TotalImmediateQueryFailed     int     `json:"total_immediate_query_failed"`
 	TotalPostProofQueryFailed     int     `json:"total_post_proof_query_failed"`
 	TotalProofTimeouts            int     `json:"total_proof_timeouts"`
+	TotalProofDisabled            int     `json:"total_proof_disabled"`
 	TotalProofFailed              int     `json:"total_proof_failed"`
 	AverageThroughputPerSec       float64 `json:"average_throughput_per_sec"`
 	AverageSubmitThroughputPerSec float64 `json:"average_submit_throughput_per_sec"`
@@ -235,6 +246,11 @@ func newBenchMatrixCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().DurationVar(&cfg.Base.Settle, "settle", cfg.Base.Settle, "default extra settle time before final metric snapshot")
 	cmd.Flags().StringVar(&cfg.Base.EventType, "event-type", cfg.Base.EventType, "default metadata.event_type for synthetic claims")
 	cmd.Flags().StringVar(&cfg.Base.Source, "source", cfg.Base.Source, "default metadata.source for synthetic claims")
+	cmd.Flags().StringVar(&cfg.Base.SemanticProfile, "semantic-profile", "", "semantic profile label recorded in child ingest reports")
+	cmd.Flags().StringVar(&cfg.Base.DurabilityProfile, "durability-profile", "", "durability profile label recorded in child ingest reports")
+	cmd.Flags().StringVar(&cfg.Base.ProofMode, "proof-mode", "", "server proof materialization mode label recorded in child ingest reports")
+	cmd.Flags().StringVar(&cfg.Base.RecordIndexMode, "record-index-mode", "", "server record index mode label recorded in child ingest reports")
+	cmd.Flags().StringVar(&cfg.Base.MaxProofLevel, "max-proof-level", "", "highest enabled proof level label recorded in child ingest reports")
 	return cmd
 }
 
@@ -322,6 +338,11 @@ func resolveBenchMatrixCase(base benchIngestConfig, defaults benchMatrixDefaults
 	cfg.ProofLevel = firstBenchMatrixString(item.ProofLevel, defaults.ProofLevel, base.ProofLevel)
 	cfg.EventType = firstBenchMatrixString(item.EventType, defaults.EventType, base.EventType)
 	cfg.Source = firstBenchMatrixString(item.Source, defaults.Source, base.Source)
+	cfg.SemanticProfile = firstBenchMatrixString(item.SemanticProfile, defaults.SemanticProfile, base.SemanticProfile)
+	cfg.DurabilityProfile = firstBenchMatrixString(item.DurabilityProfile, defaults.DurabilityProfile, base.DurabilityProfile)
+	cfg.ProofMode = firstBenchMatrixString(item.ProofMode, defaults.ProofMode, base.ProofMode)
+	cfg.RecordIndexMode = firstBenchMatrixString(item.RecordIndexMode, defaults.RecordIndexMode, base.RecordIndexMode)
+	cfg.MaxProofLevel = firstBenchMatrixString(item.MaxProofLevel, defaults.MaxProofLevel, base.MaxProofLevel)
 
 	proofTimeout, err := resolveBenchMatrixDuration("proof_timeout", item.ProofTimeout, defaults.ProofTimeout, base.ProofTimeout)
 	if err != nil {
@@ -354,6 +375,12 @@ func resolveBenchMatrixCase(base benchIngestConfig, defaults benchMatrixDefaults
 	default:
 		return benchIngestConfig{}, "", usageError("bench matrix case proof_level must be L3, L4, or L5")
 	}
+	cfg.MaxProofLevel = strings.ToUpper(strings.TrimSpace(cfg.MaxProofLevel))
+	switch cfg.MaxProofLevel {
+	case "", sdk.ProofLevelL3, sdk.ProofLevelL4, sdk.ProofLevelL5:
+	default:
+		return benchIngestConfig{}, "", usageError("bench matrix case max_proof_level must be L3, L4, or L5")
+	}
 	if cfg.ProofTimeout <= 0 {
 		return benchIngestConfig{}, "", usageError("bench matrix case proof_timeout must be > 0")
 	}
@@ -378,6 +405,7 @@ func buildBenchMatrixSummary(cases []benchMatrixCaseResult) benchMatrixSummary {
 		summary.TotalImmediateQueryFailed += result.ImmediateQuerySamples.Failed
 		summary.TotalPostProofQueryFailed += result.PostProofQuerySamples.Failed
 		summary.TotalProofTimeouts += result.ProofSamples.Timeouts
+		summary.TotalProofDisabled += result.ProofSamples.Disabled
 		summary.TotalProofFailed += result.ProofSamples.Failed
 		throughputSum += result.ThroughputPerSec
 		submitThroughputSum += result.SubmitThroughputPerSec
@@ -422,7 +450,7 @@ func writeBenchMatrixText(w io.Writer, result benchMatrixResult) {
 	for _, item := range result.Cases {
 		caseResult := normalizeBenchIngestResult(item.Result)
 		line := fmt.Sprintf(
-			"  %s count=%d concurrency=%d payload_bytes=%d submitted=%d failed=%d throughput_per_sec=%.2f submit_p95_ms=%.2f immediate_query_failed=%d post_proof_query_failed=%d proof_timeouts=%d",
+			"  %s count=%d concurrency=%d payload_bytes=%d submitted=%d failed=%d throughput_per_sec=%.2f submit_p95_ms=%.2f immediate_query_failed=%d post_proof_query_failed=%d proof_disabled=%d proof_timeouts=%d",
 			item.Name,
 			item.Count,
 			item.Concurrency,
@@ -433,12 +461,19 @@ func writeBenchMatrixText(w io.Writer, result benchMatrixResult) {
 			caseResult.SubmitLatency.P95Ms,
 			caseResult.ImmediateQuerySamples.Failed,
 			caseResult.PostProofQuerySamples.Failed,
+			caseResult.ProofSamples.Disabled,
 			caseResult.ProofSamples.Timeouts,
 		)
 		if item.ReportFile != "" {
 			line += " report_file=" + item.ReportFile
 		}
 		line += fmt.Sprintf(" submit_throughput_per_sec=%.2f", caseResult.SubmitThroughputPerSec)
+		if caseResult.SemanticProfile != "" {
+			line += " semantic_profile=" + caseResult.SemanticProfile
+		}
+		if caseResult.MaxProofLevel != "" {
+			line += " max_proof_level=" + caseResult.MaxProofLevel
+		}
 		fmt.Fprintln(w, line)
 	}
 	fmt.Fprintln(w, "summary:")
@@ -447,6 +482,7 @@ func writeBenchMatrixText(w io.Writer, result benchMatrixResult) {
 	fmt.Fprintf(w, "  total_failed: %d\n", result.Summary.TotalFailed)
 	fmt.Fprintf(w, "  total_immediate_query_failed: %d\n", result.Summary.TotalImmediateQueryFailed)
 	fmt.Fprintf(w, "  total_post_proof_query_failed: %d\n", result.Summary.TotalPostProofQueryFailed)
+	fmt.Fprintf(w, "  total_proof_disabled: %d\n", result.Summary.TotalProofDisabled)
 	fmt.Fprintf(w, "  total_proof_timeouts: %d\n", result.Summary.TotalProofTimeouts)
 	fmt.Fprintf(w, "  total_proof_failed: %d\n", result.Summary.TotalProofFailed)
 	fmt.Fprintf(w, "  average_throughput_per_sec: %.2f\n", result.Summary.AverageThroughputPerSec)

@@ -21,8 +21,14 @@ func TestDefaultYAMLIsStructured(t *testing.T) {
 			t.Fatalf("default yaml missing section %q", section)
 		}
 	}
-	if !Default().Proofstore.IndexStorageTokens {
-		t.Fatal("default proofstore.index_storage_tokens = false, want true")
+	if Default().Batch.ProofMode != "inline" {
+		t.Fatalf("default batch.proof_mode = %q, want inline", Default().Batch.ProofMode)
+	}
+	if Default().Proofstore.ArtifactSyncMode != "chunk" {
+		t.Fatalf("default proofstore.artifact_sync_mode = %q, want chunk", Default().Proofstore.ArtifactSyncMode)
+	}
+	if Default().Proofstore.RecordIndexMode != "full" {
+		t.Fatalf("default proofstore.record_index_mode = %q, want full", Default().Proofstore.RecordIndexMode)
 	}
 }
 
@@ -92,6 +98,28 @@ func TestValidateRejectsInvalidBatchConfig(t *testing.T) {
 	cfg.Batch.MaxDelay = "soon"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate accepted invalid batch max delay")
+	}
+
+	cfg = Default()
+	cfg.Batch.ProofMode = "eventually"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted invalid batch proof mode")
+	}
+}
+
+func TestValidateRejectsInvalidProofstoreConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Proofstore.ArtifactSyncMode = "sometimes"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted invalid proofstore artifact sync mode")
+	}
+
+	cfg = Default()
+	cfg.Proofstore.RecordIndexMode = "none"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted invalid proofstore record index mode")
 	}
 }
 

@@ -108,6 +108,9 @@ func TestResolveBenchMatrixCase(t *testing.T) {
 	if _, _, err := resolveBenchMatrixCase(base, benchMatrixDefaults{}, benchMatrixCaseDef{ProofLevel: "L9"}, 1); err == nil || !strings.Contains(err.Error(), "proof_level") {
 		t.Fatalf("invalid proof_level error = %v", err)
 	}
+	if _, _, err := resolveBenchMatrixCase(base, benchMatrixDefaults{}, benchMatrixCaseDef{MaxProofLevel: "L9"}, 1); err == nil || !strings.Contains(err.Error(), "max_proof_level") {
+		t.Fatalf("invalid max_proof_level error = %v", err)
+	}
 }
 
 func TestRunBenchMatrixWritesReportsAndSummary(t *testing.T) {
@@ -274,9 +277,10 @@ func TestWriteBenchMatrixText(t *testing.T) {
 	for _, want := range []string{
 		"matrix_file: matrix.json",
 		"transport: grpc",
-		"small count=4 concurrency=2 payload_bytes=256 submitted=4 failed=0 throughput_per_sec=8.50 submit_p95_ms=12.00 immediate_query_failed=1 post_proof_query_failed=0 proof_timeouts=1 report_file=reports/01-small.json",
+		"small count=4 concurrency=2 payload_bytes=256 submitted=4 failed=0 throughput_per_sec=8.50 submit_p95_ms=12.00 immediate_query_failed=1 post_proof_query_failed=0 proof_disabled=0 proof_timeouts=1 report_file=reports/01-small.json",
 		"total_immediate_query_failed: 1",
 		"total_post_proof_query_failed: 0",
+		"total_proof_disabled: 0",
 		"average_throughput_per_sec: 8.50",
 		"fastest_case: small (8.50/s)",
 	} {

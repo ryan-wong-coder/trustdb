@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	benchIngestReportSchema   = "trustdb.bench.ingest.v3"
+	benchIngestReportSchema   = "trustdb.bench.ingest.v4"
 	benchIngestReportSchemaV1 = "trustdb.bench.ingest.v1"
 	benchIngestReportSchemaV2 = "trustdb.bench.ingest.v2"
+	benchIngestReportSchemaV3 = "trustdb.bench.ingest.v3"
 	benchCompareReportSchema  = "trustdb.bench.compare.v2"
 )
 
@@ -54,6 +55,11 @@ type benchCompareMetadata struct {
 	SchemaVersion          string  `json:"schema_version"`
 	Endpoint               string  `json:"endpoint"`
 	Transport              string  `json:"transport"`
+	SemanticProfile        string  `json:"semantic_profile,omitempty"`
+	DurabilityProfile      string  `json:"durability_profile,omitempty"`
+	ProofMode              string  `json:"proof_mode,omitempty"`
+	RecordIndexMode        string  `json:"record_index_mode,omitempty"`
+	MaxProofLevel          string  `json:"max_proof_level,omitempty"`
 	Count                  int     `json:"count"`
 	Concurrency            int     `json:"concurrency"`
 	PayloadBytes           int     `json:"payload_bytes"`
@@ -84,6 +90,7 @@ type benchCompareSummary struct {
 	PostProofQueryReady    benchNumberComparison `json:"post_proof_query_ready"`
 	PostProofQueryFailed   benchNumberComparison `json:"post_proof_query_failed"`
 	ProofReady             benchNumberComparison `json:"proof_ready"`
+	ProofDisabled          benchNumberComparison `json:"proof_disabled"`
 	ProofTimeouts          benchNumberComparison `json:"proof_timeouts"`
 	ProofFailed            benchNumberComparison `json:"proof_failed"`
 }
@@ -240,6 +247,7 @@ func compareBenchIngestResults(baselinePath, candidatePath string, baseline, can
 			PostProofQueryReady:    benchNumberDelta(float64(baseline.PostProofQuerySamples.Ready), float64(candidate.PostProofQuerySamples.Ready)),
 			PostProofQueryFailed:   benchNumberDelta(float64(baseline.PostProofQuerySamples.Failed), float64(candidate.PostProofQuerySamples.Failed)),
 			ProofReady:             benchNumberDelta(float64(baseline.ProofSamples.Ready), float64(candidate.ProofSamples.Ready)),
+			ProofDisabled:          benchNumberDelta(float64(baseline.ProofSamples.Disabled), float64(candidate.ProofSamples.Disabled)),
 			ProofTimeouts:          benchNumberDelta(float64(baseline.ProofSamples.Timeouts), float64(candidate.ProofSamples.Timeouts)),
 			ProofFailed:            benchNumberDelta(float64(baseline.ProofSamples.Failed), float64(candidate.ProofSamples.Failed)),
 		},
@@ -253,6 +261,11 @@ func benchCompareMetadataFromResult(result benchIngestResult) benchCompareMetada
 		SchemaVersion:          result.SchemaVersion,
 		Endpoint:               result.Endpoint,
 		Transport:              result.Transport,
+		SemanticProfile:        result.SemanticProfile,
+		DurabilityProfile:      result.DurabilityProfile,
+		ProofMode:              result.ProofMode,
+		RecordIndexMode:        result.RecordIndexMode,
+		MaxProofLevel:          result.MaxProofLevel,
 		Count:                  result.Count,
 		Concurrency:            result.Concurrency,
 		PayloadBytes:           result.PayloadBytes,
@@ -362,6 +375,12 @@ func writeBenchCompareText(w io.Writer, result benchCompareResult) {
 	fmt.Fprintf(w, "candidate: %s\n", result.CandidatePath)
 	fmt.Fprintf(w, "baseline_endpoint: %s\n", result.Baseline.Endpoint)
 	fmt.Fprintf(w, "candidate_endpoint: %s\n", result.Candidate.Endpoint)
+	if result.Baseline.SemanticProfile != "" || result.Candidate.SemanticProfile != "" {
+		fmt.Fprintf(w, "semantic_profile: baseline=%s candidate=%s\n", result.Baseline.SemanticProfile, result.Candidate.SemanticProfile)
+	}
+	if result.Baseline.DurabilityProfile != "" || result.Candidate.DurabilityProfile != "" {
+		fmt.Fprintf(w, "durability_profile: baseline=%s candidate=%s\n", result.Baseline.DurabilityProfile, result.Candidate.DurabilityProfile)
+	}
 	fmt.Fprintln(w, "summary:")
 	writeBenchComparisonLine(w, "submitted", result.Summary.Submitted, 0)
 	writeBenchComparisonLine(w, "failed", result.Summary.Failed, 0)
@@ -380,6 +399,7 @@ func writeBenchCompareText(w io.Writer, result benchCompareResult) {
 	writeBenchComparisonLine(w, "post_proof_query_ready", result.Summary.PostProofQueryReady, 0)
 	writeBenchComparisonLine(w, "post_proof_query_failed", result.Summary.PostProofQueryFailed, 0)
 	writeBenchComparisonLine(w, "proof_ready", result.Summary.ProofReady, 0)
+	writeBenchComparisonLine(w, "proof_disabled", result.Summary.ProofDisabled, 0)
 	writeBenchComparisonLine(w, "proof_timeouts", result.Summary.ProofTimeouts, 0)
 	writeBenchComparisonLine(w, "proof_failed", result.Summary.ProofFailed, 0)
 	if len(result.Metrics) > 0 {

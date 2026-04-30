@@ -13,19 +13,27 @@ import (
 )
 
 func BenchmarkPebblePutBatchArtifacts1024(b *testing.B) {
-	benchmarkPebblePutBatchArtifacts(b, 1024, Options{IndexStorageTokens: true})
+	benchmarkPebblePutBatchArtifacts(b, 1024, Options{RecordIndexMode: RecordIndexModeFull})
 }
 
 func BenchmarkPebblePutBatchArtifacts8192(b *testing.B) {
-	benchmarkPebblePutBatchArtifacts(b, 8192, Options{IndexStorageTokens: true})
+	benchmarkPebblePutBatchArtifacts(b, 8192, Options{RecordIndexMode: RecordIndexModeFull})
 }
 
 func BenchmarkPebblePutBatchArtifacts1024TokenIndexDisabled(b *testing.B) {
-	benchmarkPebblePutBatchArtifacts(b, 1024, Options{IndexStorageTokens: false})
+	benchmarkPebblePutBatchArtifacts(b, 1024, Options{RecordIndexMode: RecordIndexModeNoStorageTokens})
 }
 
 func BenchmarkPebblePutBatchArtifacts8192TokenIndexDisabled(b *testing.B) {
-	benchmarkPebblePutBatchArtifacts(b, 8192, Options{IndexStorageTokens: false})
+	benchmarkPebblePutBatchArtifacts(b, 8192, Options{RecordIndexMode: RecordIndexModeNoStorageTokens})
+}
+
+func BenchmarkPebbleArtifactSyncModeBatch1024(b *testing.B) {
+	benchmarkPebblePutBatchArtifacts(b, 1024, Options{RecordIndexMode: RecordIndexModeFull, ArtifactSyncMode: ArtifactSyncModeBatch})
+}
+
+func BenchmarkRecordIndexModeTimeOnly1024(b *testing.B) {
+	benchmarkPebblePutBatchArtifacts(b, 1024, Options{RecordIndexMode: RecordIndexModeTimeOnly})
 }
 
 func benchmarkPebblePutBatchArtifacts(b *testing.B, n int, opts Options) {
@@ -62,7 +70,7 @@ func BenchmarkRecordIndexKeyBuild(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		count := 0
-		if err := visitRecordIndexKeys(idx, true, func([]byte) error {
+		if err := visitRecordIndexKeys(idx, RecordIndexModeFull, func([]byte) error {
 			count++
 			return nil
 		}); err != nil {
@@ -193,7 +201,7 @@ func TestStoreSecondaryRecordIndexesUseRefs(t *testing.T) {
 func TestStoreCanDisableStorageTokenIndexes(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{IndexStorageTokens: false})
+	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeNoStorageTokens})
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -219,7 +227,7 @@ func TestStoreCanDisableStorageTokenIndexes(t *testing.T) {
 func TestStoreDisablingStorageTokenIndexesRemovesOldTokenKeys(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{IndexStorageTokens: true})
+	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -234,7 +242,7 @@ func TestStoreDisablingStorageTokenIndexesRemovesOldTokenKeys(t *testing.T) {
 		t.Fatal("token index keys = 0, want enabled store to write token indexes")
 	}
 
-	store.indexStorageTokens = false
+	store.recordIndexMode = RecordIndexModeNoStorageTokens
 	bundle.AcceptedReceipt.Status = "accepted-again"
 	if err := store.PutBundle(context.Background(), bundle); err != nil {
 		t.Fatalf("PutBundle disabled: %v", err)
@@ -247,6 +255,142 @@ func TestStoreDisablingStorageTokenIndexesRemovesOldTokenKeys(t *testing.T) {
 		t.Fatalf("ListRecordIndexes: %v", err)
 	}
 	if len(records) != 1 || records[0].RecordID != bundle.RecordID {
+		t.Fatalf("query records = %+v", records)
+	}
+}
+
+func TestStoreRecordIndexModeTimeOnlyScansAndFilters(t *testing.T) {
+	t.Parallel()
+
+	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeTimeOnly})
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer store.Close()
+	bundle := syntheticProofBundles(1)[0]
+	bundle.SignedClaim.Claim.TenantID = "tenant-time-only"
+	bundle.SignedClaim.Claim.ClientID = "client-time-only"
+	bundle.SignedClaim.Claim.Content.StorageURI = "bench://tenant-time-only/searchable-file-0001"
+	bundle.SignedClaim.Claim.Metadata.Custom = map[string]string{"file_name": "searchable-file-0001.txt"}
+	bundle.ServerRecord.TenantID = bundle.SignedClaim.Claim.TenantID
+	bundle.ServerRecord.ClientID = bundle.SignedClaim.Claim.ClientID
+	if err := store.PutBundle(context.Background(), bundle); err != nil {
+		t.Fatalf("PutBundle: %v", err)
+	}
+	for _, prefix := range []string{
+		prefixRecordByBatch,
+		prefixRecordByLevel,
+		prefixRecordByTenant,
+		prefixRecordByClient,
+		prefixRecordByHash,
+		prefixRecordByToken,
+	} {
+		if got := countKeysWithPrefix(t, store, prefix); got != 0 {
+			t.Fatalf("%s keys = %d, want 0", prefix, got)
+		}
+	}
+	for name, opts := range map[string]model.RecordListOptions{
+		"tenant":       {TenantID: "tenant-time-only"},
+		"client":       {ClientID: "client-time-only"},
+		"proof-level":  {ProofLevel: "L3"},
+		"content-hash": {ContentHash: bundle.SignedClaim.Claim.Content.ContentHash},
+		"query":        {Query: "searchable"},
+		"time-range": {
+			ReceivedFromUnixN: bundle.ServerRecord.ReceivedAtUnixN - 1,
+			ReceivedToUnixN:   bundle.ServerRecord.ReceivedAtUnixN + 1,
+		},
+	} {
+		records, err := store.ListRecordIndexes(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("ListRecordIndexes(%s): %v", name, err)
+		}
+		if len(records) != 1 || records[0].RecordID != bundle.RecordID {
+			t.Fatalf("ListRecordIndexes(%s) = %+v", name, records)
+		}
+	}
+}
+
+func TestStoreBatchArtifactsReplaceOldSecondaryIndexes(t *testing.T) {
+	t.Parallel()
+
+	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer store.Close()
+	bundles := syntheticProofBundles(1)
+	bundles[0].SignedClaim.Claim.Content.StorageURI = "bench://tenant/batch-toggle-file-0001"
+	bundles[0].SignedClaim.Claim.Metadata.Custom = map[string]string{"file_name": "batch-toggle-file-0001.txt"}
+	root := model.BatchRoot{
+		SchemaVersion: model.SchemaBatchRoot,
+		BatchID:       bundles[0].CommittedReceipt.BatchID,
+		BatchRoot:     bundles[0].CommittedReceipt.BatchRoot,
+		TreeSize:      1,
+		ClosedAtUnixN: bundles[0].CommittedReceipt.ClosedAtUnixN,
+	}
+	if err := store.PutBatchArtifacts(context.Background(), bundles, root); err != nil {
+		t.Fatalf("PutBatchArtifacts full: %v", err)
+	}
+	if got := countKeysWithPrefix(t, store, prefixRecordByToken); got == 0 {
+		t.Fatal("token index keys = 0, want full batch artifact write to create tokens")
+	}
+
+	store.recordIndexMode = RecordIndexModeTimeOnly
+	if err := store.PutBatchArtifacts(context.Background(), bundles, root); err != nil {
+		t.Fatalf("PutBatchArtifacts time_only: %v", err)
+	}
+	for _, prefix := range []string{prefixRecordByBatch, prefixRecordByTenant, prefixRecordByClient, prefixRecordByHash, prefixRecordByToken} {
+		if got := countKeysWithPrefix(t, store, prefix); got != 0 {
+			t.Fatalf("%s keys after time_only replace = %d, want 0", prefix, got)
+		}
+	}
+	records, err := store.ListRecordIndexes(context.Background(), model.RecordListOptions{Query: "batch-toggle"})
+	if err != nil {
+		t.Fatalf("ListRecordIndexes: %v", err)
+	}
+	if len(records) != 1 || records[0].RecordID != bundles[0].RecordID {
+		t.Fatalf("query records = %+v", records)
+	}
+}
+
+func TestStoreBatchIndexesReplaceOldStorageTokenIndexes(t *testing.T) {
+	t.Parallel()
+
+	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer store.Close()
+	bundle := syntheticProofBundles(1)[0]
+	bundle.SignedClaim.Claim.Content.StorageURI = "bench://tenant/batch-index-toggle-file-0001"
+	bundle.SignedClaim.Claim.Metadata.Custom = map[string]string{"file_name": "batch-index-toggle-file-0001.txt"}
+	idx := model.RecordIndexFromBundle(bundle)
+	root := model.BatchRoot{
+		SchemaVersion: model.SchemaBatchRoot,
+		BatchID:       idx.BatchID,
+		BatchRoot:     bundle.CommittedReceipt.BatchRoot,
+		TreeSize:      1,
+		ClosedAtUnixN: bundle.CommittedReceipt.ClosedAtUnixN,
+	}
+	if err := store.PutBatchIndexesAndRoot(context.Background(), []model.RecordIndex{idx}, root); err != nil {
+		t.Fatalf("PutBatchIndexesAndRoot full: %v", err)
+	}
+	if got := countKeysWithPrefix(t, store, prefixRecordByToken); got == 0 {
+		t.Fatal("token index keys = 0, want full batch index write to create tokens")
+	}
+
+	store.recordIndexMode = RecordIndexModeNoStorageTokens
+	if err := store.PutBatchIndexesAndRoot(context.Background(), []model.RecordIndex{idx}, root); err != nil {
+		t.Fatalf("PutBatchIndexesAndRoot no_storage_tokens: %v", err)
+	}
+	if got := countKeysWithPrefix(t, store, prefixRecordByToken); got != 0 {
+		t.Fatalf("token index keys after no_storage_tokens replace = %d, want 0", got)
+	}
+	records, err := store.ListRecordIndexes(context.Background(), model.RecordListOptions{Query: "batch-index-toggle"})
+	if err != nil {
+		t.Fatalf("ListRecordIndexes: %v", err)
+	}
+	if len(records) != 1 || records[0].RecordID != idx.RecordID {
 		t.Fatalf("query records = %+v", records)
 	}
 }

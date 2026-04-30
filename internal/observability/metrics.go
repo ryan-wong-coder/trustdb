@@ -18,6 +18,7 @@ type Metrics struct {
 	BatchCommitLatency prometheus.Histogram
 	BatchStageLatency  *prometheus.HistogramVec
 	MerkleBuildLatency prometheus.Histogram
+	SemanticProfile    *prometheus.GaugeVec
 	AnchorPending      prometheus.Gauge
 	AnchorLatency      prometheus.Histogram
 	// AnchorAttempts counts every Sink.Publish call the worker has
@@ -127,6 +128,10 @@ func NewMetrics() *Metrics {
 			Help:    "Merkle tree build latency in seconds.",
 			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
 		}),
+		SemanticProfile: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "trustdb_semantic_profile_info",
+			Help: "Active semantic and durability performance profile labels for this process.",
+		}, []string{"semantic_profile", "durability_profile", "proof_mode", "record_index_mode", "artifact_sync_mode", "global_log"}),
 		AnchorPending: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "trustdb_anchor_pending_total",
 			Help: "Current pending anchor outbox entries.",
@@ -194,6 +199,7 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 		m.BatchCommitLatency,
 		m.BatchStageLatency,
 		m.MerkleBuildLatency,
+		m.SemanticProfile,
 		m.AnchorPending,
 		m.AnchorLatency,
 		m.AnchorAttempts,

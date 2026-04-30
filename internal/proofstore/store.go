@@ -103,3 +103,11 @@ var _ Store = (*LocalStore)(nil)
 type BatchArtifactWriter interface {
 	PutBatchArtifacts(ctx context.Context, bundles []model.ProofBundle, root model.BatchRoot) error
 }
+
+// BatchIndexRootWriter is an optional fast path for proof modes that expose
+// record visibility before full proof bundles are materialized. It persists
+// the record index projection and batch root without writing ProofBundle
+// payloads.
+type BatchIndexRootWriter interface {
+	PutBatchIndexesAndRoot(ctx context.Context, indexes []model.RecordIndex, root model.BatchRoot) error
+}

@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
-
-	"path/filepath"
 
 	"github.com/ryan-wong-coder/trustdb/internal/anchor"
 	"github.com/ryan-wong-coder/trustdb/internal/app"
@@ -40,6 +40,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	var readTimeoutText, writeTimeoutText, shutdownTimeoutText, batchMaxDelayText string
 	var walGroupCommitIntervalText string
 	var metastoreKind, metastorePath string
+	var batchProofMode, proofstoreArtifactSyncMode, proofstoreRecordIndexMode string
 	var proofstoreIndexStorageTokens bool
 	var anchorSinkKind, anchorPath string
 	var anchorOtsCalendars []string
@@ -60,11 +61,16 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			proofDir = stringOrConfig(cmd, rt, "proof-dir", proofDir, "proof_dir")
 			metastoreKind = stringOrConfig(cmd, rt, "metastore", metastoreKind, "metastore")
 			metastorePath = stringOrConfig(cmd, rt, "metastore-path", metastorePath, "metastore_path")
+			proofstoreRecordIndexMode = stringOrLiteral(cmd, "proofstore-record-index-mode", proofstoreRecordIndexMode, rt.cfg.Proofstore.RecordIndexMode)
 			if cmd.Flags().Changed("proofstore-index-storage-tokens") {
 				proofstoreIndexStorageTokens, _ = cmd.Flags().GetBool("proofstore-index-storage-tokens")
-			} else {
-				proofstoreIndexStorageTokens = rt.cfg.Proofstore.IndexStorageTokens
+				if !proofstoreIndexStorageTokens {
+					proofstoreRecordIndexMode = "no_storage_tokens"
+				} else if strings.TrimSpace(proofstoreRecordIndexMode) == "" {
+					proofstoreRecordIndexMode = "full"
+				}
 			}
+			proofstoreArtifactSyncMode = stringOrLiteral(cmd, "proofstore-artifact-sync-mode", proofstoreArtifactSyncMode, rt.cfg.Proofstore.ArtifactSyncMode)
 			anchorSinkKind = stringOrConfig(cmd, rt, "anchor-sink", anchorSinkKind, "anchor.sink")
 			anchorPath = stringOrConfig(cmd, rt, "anchor-path", anchorPath, "anchor.path")
 			// OTS sink options: calendars live as a list in viper
@@ -129,6 +135,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			writeTimeoutText = stringOrLiteral(cmd, "write-timeout", writeTimeoutText, rt.cfg.Server.WriteTimeout)
 			shutdownTimeoutText = stringOrLiteral(cmd, "shutdown-timeout", shutdownTimeoutText, rt.cfg.Server.ShutdownTimeout)
 			batchMaxDelayText = stringOrLiteral(cmd, "batch-max-delay", batchMaxDelayText, rt.cfg.Batch.MaxDelay)
+			batchProofMode = stringOrLiteral(cmd, "batch-proof-mode", batchProofMode, rt.cfg.Batch.ProofMode)
 			if serverKeyPath == "" {
 				return usageError("serve requires server-private-key")
 			}
@@ -182,6 +189,12 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse wal-group-commit-interval", err)
 			}
+			batchProofMode = normalizeSemanticProofMode(batchProofMode)
+			proofstoreRecordIndexMode = normalizeSemanticRecordIndexMode(proofstoreRecordIndexMode)
+			proofstoreArtifactSyncMode = normalizeSemanticArtifactSyncMode(proofstoreArtifactSyncMode)
+			if err := validateSemanticModes(batchProofMode, proofstoreRecordIndexMode, proofstoreArtifactSyncMode); err != nil {
+				return err
+			}
 			reg, metrics := observability.NewRegistry()
 			walOpts := wal.Options{
 				MaxSegmentBytes:     walMaxSegmentBytes,
@@ -212,6 +225,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				Str("wal", walPath).
 				Str("mode", walMode).
 				Str("fsync_mode", walFsyncMode).
+				Str("durability_profile", walDurabilityProfile(walFsyncMode)).
 				Dur("group_commit_interval", walGroupCommitInterval).
 				Int64("max_segment_bytes", walMaxSegmentBytes).
 				Int("keep_segments", walKeepSegments).
@@ -264,8 +278,10 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			proofStore, err := proofstore.Open(proofstore.Config{
 				Kind:                         proofstore.Backend(metaKind),
 				Path:                         metaPath,
-				IndexStorageTokens:           proofstoreIndexStorageTokens,
-				IndexStorageTokensConfigured: true,
+				RecordIndexMode:              proofstoreRecordIndexMode,
+				ArtifactSyncMode:             proofstoreArtifactSyncMode,
+				IndexStorageTokens:           !strings.EqualFold(proofstoreRecordIndexMode, "no_storage_tokens"),
+				IndexStorageTokensConfigured: cmd.Flags().Changed("proofstore-index-storage-tokens"),
 			})
 			if err != nil {
 				return err
@@ -275,6 +291,24 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			} else if enabled {
 				rt.logger.Info().Str("path", metaPath).Msg("pebble proofstore metrics enabled")
 			}
+			activeSemanticProfile := semanticProfile(walFsyncMode, batchProofMode, proofstoreRecordIndexMode, proofstoreArtifactSyncMode, rt.cfg.GlobalLog.Enabled)
+			activeDurabilityProfile := walDurabilityProfile(walFsyncMode)
+			metrics.SemanticProfile.WithLabelValues(
+				activeSemanticProfile,
+				activeDurabilityProfile,
+				batchProofMode,
+				proofstoreRecordIndexMode,
+				proofstoreArtifactSyncMode,
+				strings.ToLower(strconv.FormatBool(rt.cfg.GlobalLog.Enabled)),
+			).Set(1)
+			rt.logger.Info().
+				Str("semantic_profile", activeSemanticProfile).
+				Str("durability_profile", activeDurabilityProfile).
+				Str("proof_mode", batchProofMode).
+				Str("record_index_mode", proofstoreRecordIndexMode).
+				Str("artifact_sync_mode", proofstoreArtifactSyncMode).
+				Bool("global_log_enabled", rt.cfg.GlobalLog.Enabled).
+				Msg("semantic performance profile active")
 			defer func() {
 				if cerr := proofStore.Close(); cerr != nil {
 					rt.logger.Warn().Err(cerr).Msg("proofstore close failed")
@@ -284,7 +318,11 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				QueueSize:  batchQueueSize,
 				MaxRecords: batchMaxRecords,
 				MaxDelay:   batchMaxDelay,
+				ProofMode:  batchProofMode,
 				InitialSeq: restoreBatchSeq(context.Background(), rt, proofStore),
+				LoadBatchItems: func(ctx context.Context, manifest model.BatchManifest) ([]batch.Accepted, error) {
+					return loadManifestItemsFromWAL(ctx, walPath, engine, manifest)
+				},
 			}
 			// Only wire automatic prune on directory-mode WALs: single-file
 			// deployments have no notion of "older segments to delete" so
@@ -299,6 +337,13 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			// file/noop sinks run the full outbox pipeline so tests and
 			// on-prem deployments exercise the same code paths as real
 			// external notaries.
+			globalLogEnabled := rt.cfg.GlobalLog.Enabled
+			if !globalLogEnabled && strings.TrimSpace(anchorSinkKind) != "" && !strings.EqualFold(anchorSinkKind, "off") {
+				rt.logger.Warn().Str("anchor_sink", anchorSinkKind).Msg("global log disabled; anchor sink will not be started")
+			}
+			if !globalLogEnabled {
+				anchorSinkKind = "off"
+			}
 			anchorSvc, anchorAPI, anchorShutdown, err := buildAnchorService(rt, proofStore, metrics, anchorSinkKind, anchorPath, proofDir, otsSinkParams{
 				Calendars:   anchorOtsCalendars,
 				MinAccepted: anchorOtsMinAccepted,
@@ -308,27 +353,31 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				return err
 			}
 			defer anchorShutdown()
-			globalSvc, err := globallog.New(globallog.Options{
-				Store:      proofStore,
-				LogID:      rt.cfg.Server.ID,
-				KeyID:      rt.cfg.Server.KeyID,
-				PrivateKey: serverPriv,
-			})
-			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInternal, "build global log service", err)
+			var globalSvc *globallog.Service
+			var globalOutbox *globallog.OutboxWorker
+			if globalLogEnabled {
+				globalSvc, err = globallog.New(globallog.Options{
+					Store:      proofStore,
+					LogID:      rt.cfg.Server.ID,
+					KeyID:      rt.cfg.Server.KeyID,
+					PrivateKey: serverPriv,
+				})
+				if err != nil {
+					return trusterr.Wrap(trusterr.CodeInternal, "build global log service", err)
+				}
+				globalOutbox = globallog.NewOutboxWorker(globallog.OutboxConfig{
+					Store:  proofStore,
+					Global: globalSvc,
+					OnSTH: func(ctx context.Context, sth model.SignedTreeHead) {
+						if anchorSvc != nil {
+							enqueueSTHAnchor(ctx, rt, proofStore, anchorSvc, sth)
+						}
+					},
+					Logger: rt.logger,
+				})
+				defer globalOutbox.Stop()
+				batchOpts.OnBatchCommitted = newGlobalLogEnqueueHook(rt, proofStore, globalOutbox)
 			}
-			globalOutbox := globallog.NewOutboxWorker(globallog.OutboxConfig{
-				Store:  proofStore,
-				Global: globalSvc,
-				OnSTH: func(ctx context.Context, sth model.SignedTreeHead) {
-					if anchorSvc != nil {
-						enqueueSTHAnchor(ctx, rt, proofStore, anchorSvc, sth)
-					}
-				},
-				Logger: rt.logger,
-			})
-			defer globalOutbox.Stop()
-			batchOpts.OnBatchCommitted = newGlobalLogEnqueueHook(rt, proofStore, globalOutbox)
 			batchSvc := batch.New(engine, proofStore, batchOpts, metrics)
 			defer batchSvc.Shutdown(context.Background())
 			recovered, replayed, skipped, err := replayWALAccepted(context.Background(), walPath, engine, batchSvc, proofStore, metrics)
@@ -340,13 +389,15 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				Int("replayed", replayed).
 				Int("skipped", skipped).
 				Msg("wal replay complete")
-			if n, err := backfillGlobalLogOutbox(context.Background(), proofStore); err != nil {
-				rt.logger.Warn().Err(err).Msg("global log outbox backfill failed")
-			} else if n > 0 {
-				rt.logger.Info().Int("backfilled", n).Msg("global log outbox backfill complete")
+			if globalLogEnabled {
+				if n, err := backfillGlobalLogOutbox(context.Background(), proofStore); err != nil {
+					rt.logger.Warn().Err(err).Msg("global log outbox backfill failed")
+				} else if n > 0 {
+					rt.logger.Info().Int("backfilled", n).Msg("global log outbox backfill complete")
+				}
+				globalOutbox.Start(context.Background())
+				globalOutbox.Trigger()
 			}
-			globalOutbox.Start(context.Background())
-			globalOutbox.Trigger()
 			if anchorSvc != nil {
 				// Start *after* backfill so the worker sees the freshly
 				// enqueued items on its first tick.
@@ -461,12 +512,15 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().StringVar(&writeTimeoutText, "write-timeout", "", "http write timeout")
 	cmd.Flags().StringVar(&shutdownTimeoutText, "shutdown-timeout", "", "graceful shutdown timeout")
 	cmd.Flags().StringVar(&batchMaxDelayText, "batch-max-delay", "", "maximum delay before committing a partial batch")
+	cmd.Flags().StringVar(&batchProofMode, "batch-proof-mode", "", "proof materialization mode: inline (default), async, or on_demand")
 	cmd.Flags().Int64Var(&walMaxSegmentBytes, "wal-max-segment-bytes", 0, "rotate WAL directory segments above this byte count (0 disables rotation; only honored in directory mode)")
 	cmd.Flags().IntVar(&walKeepSegments, "wal-keep-segments", 0, "after checkpoint advance, keep this many segments older than the checkpoint-covered segment (directory mode; 0 = only retain the active segment + checkpoint-covered one)")
 	cmd.Flags().StringVar(&walFsyncMode, "wal-fsync-mode", "", "WAL fsync mode: strict, group (production default), or batch")
 	cmd.Flags().StringVar(&walGroupCommitIntervalText, "wal-group-commit-interval", "", "WAL group fsync interval when --wal-fsync-mode=group (default 10ms)")
 	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default) or pebble")
 	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path (defaults to --proof-dir; for pebble, a subdirectory is created under --proof-dir unless set)")
+	cmd.Flags().StringVar(&proofstoreArtifactSyncMode, "proofstore-artifact-sync-mode", "", "proof artifact durability mode: chunk (default) or batch")
+	cmd.Flags().StringVar(&proofstoreRecordIndexMode, "proofstore-record-index-mode", "", "record secondary index mode: full (default), no_storage_tokens, or time_only")
 	cmd.Flags().BoolVar(&proofstoreIndexStorageTokens, "proofstore-index-storage-tokens", true, "write StorageURI/FileName token secondary indexes in the proofstore; disable for high-write ingest profiles")
 	cmd.Flags().StringVar(&anchorSinkKind, "anchor-sink", "", "external anchor sink: off (default; no L5 proofs), file, noop, or ots (OpenTimestamps)")
 	cmd.Flags().StringVar(&anchorPath, "anchor-path", "", "file anchor sink output path (JSONL). Defaults to <proof-dir>/anchors.jsonl when --anchor-sink=file and this flag is empty")
@@ -833,6 +887,83 @@ func refreshWALSegmentsTotal(metrics *observability.Metrics, walDir string) erro
 	return nil
 }
 
+func walDurabilityProfile(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case wal.FsyncStrict:
+		return "strict"
+	case wal.FsyncBatch:
+		return "unsafe_batch"
+	default:
+		return "bounded_group"
+	}
+}
+
+func semanticProfile(walMode, proofMode, recordIndexMode, artifactSyncMode string, globalLogEnabled bool) string {
+	if walDurabilityProfile(walMode) == "unsafe_batch" {
+		return "unsafe_high_write"
+	}
+	if proofMode != batch.ProofModeInline || recordIndexMode != "full" || artifactSyncMode == "batch" || !globalLogEnabled {
+		return "bounded_high_write"
+	}
+	return "safe_default"
+}
+
+func normalizeSemanticProofMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", batch.ProofModeInline:
+		return batch.ProofModeInline
+	case batch.ProofModeAsync:
+		return batch.ProofModeAsync
+	case batch.ProofModeOnDemand:
+		return batch.ProofModeOnDemand
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func normalizeSemanticRecordIndexMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "full":
+		return "full"
+	case "no_storage_tokens":
+		return "no_storage_tokens"
+	case "time_only":
+		return "time_only"
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func normalizeSemanticArtifactSyncMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "chunk":
+		return "chunk"
+	case "batch":
+		return "batch"
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func validateSemanticModes(proofMode, recordIndexMode, artifactSyncMode string) error {
+	switch strings.ToLower(strings.TrimSpace(proofMode)) {
+	case batch.ProofModeInline, batch.ProofModeAsync, batch.ProofModeOnDemand:
+	default:
+		return trusterr.New(trusterr.CodeInvalidArgument, "batch proof mode must be inline, async, or on_demand")
+	}
+	switch strings.ToLower(strings.TrimSpace(recordIndexMode)) {
+	case "full", "no_storage_tokens", "time_only":
+	default:
+		return trusterr.New(trusterr.CodeInvalidArgument, "proofstore record index mode must be full, no_storage_tokens, or time_only")
+	}
+	switch strings.ToLower(strings.TrimSpace(artifactSyncMode)) {
+	case "chunk", "batch":
+	default:
+		return trusterr.New(trusterr.CodeInvalidArgument, "proofstore artifact sync mode must be chunk or batch")
+	}
+	return nil
+}
+
 // openWALWriter is the rotate-hook-free variant used by tests and existing
 // callers that only care about mode selection. It forwards to the options
 // form with just MaxSegmentBytes populated.
@@ -936,6 +1067,50 @@ func (p *preparedReplay) missingRecordID() string {
 	}
 	return ""
 }
+
+func loadManifestItemsFromWAL(ctx context.Context, walPath string, engine app.LocalEngine, manifest model.BatchManifest) ([]batch.Accepted, error) {
+	prepared := newPreparedReplay(manifest)
+	minSegmentID := manifest.WALRange.From.SegmentID
+	if minSegmentID == 0 {
+		minSegmentID = 1
+	}
+	err := scanWALRecords(walPath, minSegmentID, func(record wal.Record) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if manifest.WALRange.From.Sequence > 0 && record.Position.Sequence < manifest.WALRange.From.Sequence {
+			return nil
+		}
+		if manifest.WALRange.To.Sequence > 0 && record.Position.Sequence > manifest.WALRange.To.Sequence {
+			return errStopManifestScan
+		}
+		replayed, err := engine.ReplayAccepted(record)
+		if err != nil {
+			return err
+		}
+		prepared.add(batch.Accepted{
+			Signed:   replayed.Signed,
+			Record:   replayed.Record,
+			Accepted: replayed.Accepted,
+		})
+		if prepared.count == len(prepared.items) {
+			return errStopManifestScan
+		}
+		return nil
+	})
+	if errors.Is(err, errStopManifestScan) {
+		err = nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if missing := prepared.missingRecordID(); missing != "" {
+		return nil, trusterr.New(trusterr.CodeDataLoss, "manifest "+manifest.BatchID+" missing WAL record "+missing)
+	}
+	return prepared.items, nil
+}
+
+var errStopManifestScan = errors.New("stop manifest scan")
 
 // replayWALAccepted brings the local proof store back to a consistent state
 // after a restart:
