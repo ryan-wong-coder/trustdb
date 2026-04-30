@@ -13,6 +13,12 @@ paths:
 metastore: "file"
 metastore_path: ".trustdb-dev/proofs"
 
+proofstore:
+  record_index_mode: "full"
+  artifact_sync_mode: "chunk"
+  tikv_pd_endpoints: []
+  tikv_keyspace: ""
+
 wal:
   fsync_mode: "group"
   group_commit_interval: "10ms"
@@ -43,6 +49,7 @@ batch:
 
 global_log:
   enabled: true
+  log_id: "trustdb-dev"
 
 anchor:
   scope: "global"

@@ -20,6 +20,8 @@ metastore_path: ".trustdb/proofs/pebble"
 proofstore:
   artifact_sync_mode: "chunk"
   record_index_mode: "full"
+  tikv_pd_endpoints: []
+  tikv_keyspace: ""
 
 wal:
   fsync_mode: "group"
@@ -52,6 +54,7 @@ batch:
 
 global_log:
   enabled: true
+  log_id: "trustdb-global-log"
 
 anchor:
   scope: "global"
@@ -141,7 +144,8 @@ type Batch struct {
 }
 
 type GlobalLog struct {
-	Enabled bool `mapstructure:"enabled" json:"enabled"`
+	Enabled bool   `mapstructure:"enabled" json:"enabled"`
+	LogID   string `mapstructure:"log_id" json:"log_id"`
 }
 
 type Anchor struct {
@@ -159,8 +163,10 @@ type Backup struct {
 }
 
 type Proofstore struct {
-	ArtifactSyncMode string `mapstructure:"artifact_sync_mode" json:"artifact_sync_mode"`
-	RecordIndexMode  string `mapstructure:"record_index_mode" json:"record_index_mode"`
+	ArtifactSyncMode string   `mapstructure:"artifact_sync_mode" json:"artifact_sync_mode"`
+	RecordIndexMode  string   `mapstructure:"record_index_mode" json:"record_index_mode"`
+	TiKVPDAddresses  []string `mapstructure:"tikv_pd_endpoints" json:"tikv_pd_endpoints"`
+	TiKVKeyspace     string   `mapstructure:"tikv_keyspace" json:"tikv_keyspace"`
 }
 
 type Log struct {
@@ -227,6 +233,7 @@ func Default() Config {
 		},
 		GlobalLog: GlobalLog{
 			Enabled: true,
+			LogID:   "trustdb-global-log",
 		},
 		Anchor: Anchor{
 			Scope:    "global",

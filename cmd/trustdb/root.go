@@ -128,6 +128,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("batch.max_delay", defaults.Batch.MaxDelay)
 	v.SetDefault("batch.proof_mode", defaults.Batch.ProofMode)
 	v.SetDefault("global_log.enabled", defaults.GlobalLog.Enabled)
+	v.SetDefault("global_log.log_id", defaults.GlobalLog.LogID)
 	v.SetDefault("anchor.scope", defaults.Anchor.Scope)
 	v.SetDefault("anchor.max_delay", defaults.Anchor.MaxDelay)
 	v.SetDefault("history.tile_size", defaults.History.TileSize)
@@ -135,6 +136,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.compression", defaults.Backup.Compression)
 	v.SetDefault("proofstore.artifact_sync_mode", defaults.Proofstore.ArtifactSyncMode)
 	v.SetDefault("proofstore.record_index_mode", defaults.Proofstore.RecordIndexMode)
+	v.SetDefault("proofstore.tikv_pd_endpoints", defaults.Proofstore.TiKVPDAddresses)
+	v.SetDefault("proofstore.tikv_keyspace", defaults.Proofstore.TiKVKeyspace)
 	v.SetDefault("proofstore.index_storage_tokens", true)
 	v.SetDefault("log.level", defaults.Log.Level)
 	v.SetDefault("log.format", defaults.Log.Format)
@@ -192,6 +195,7 @@ func setDefaults(v *viper.Viper) {
 	bindEnv(v, "batch.max_delay", "TRUSTDB_BATCH_MAX_DELAY")
 	bindEnv(v, "batch.proof_mode", "TRUSTDB_BATCH_PROOF_MODE")
 	bindEnv(v, "global_log.enabled", "TRUSTDB_GLOBAL_LOG_ENABLED")
+	bindEnv(v, "global_log.log_id", "TRUSTDB_GLOBAL_LOG_LOG_ID", "TRUSTDB_GLOBAL_LOG_ID")
 	bindEnv(v, "anchor.scope", "TRUSTDB_ANCHOR_SCOPE")
 	bindEnv(v, "anchor.max_delay", "TRUSTDB_ANCHOR_MAX_DELAY")
 	bindEnv(v, "history.tile_size", "TRUSTDB_HISTORY_TILE_SIZE")
@@ -199,6 +203,8 @@ func setDefaults(v *viper.Viper) {
 	bindEnv(v, "backup.compression", "TRUSTDB_BACKUP_COMPRESSION")
 	bindEnv(v, "proofstore.artifact_sync_mode", "TRUSTDB_PROOFSTORE_ARTIFACT_SYNC_MODE")
 	bindEnv(v, "proofstore.record_index_mode", "TRUSTDB_PROOFSTORE_RECORD_INDEX_MODE")
+	bindEnv(v, "proofstore.tikv_pd_endpoints", "TRUSTDB_PROOFSTORE_TIKV_PD_ENDPOINTS", "TRUSTDB_TIKV_PD_ENDPOINTS")
+	bindEnv(v, "proofstore.tikv_keyspace", "TRUSTDB_PROOFSTORE_TIKV_KEYSPACE", "TRUSTDB_TIKV_KEYSPACE")
 	bindEnv(v, "proofstore.index_storage_tokens", "TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS")
 	bindEnv(v, "log.level", "TRUSTDB_LOG_LEVEL")
 	bindEnv(v, "log.format", "TRUSTDB_LOG_FORMAT")
@@ -306,6 +312,7 @@ func loadConfig(v *viper.Viper) trustconfig.Config {
 		},
 		GlobalLog: trustconfig.GlobalLog{
 			Enabled: v.GetBool("global_log.enabled"),
+			LogID:   v.GetString("global_log.log_id"),
 		},
 		Anchor: trustconfig.Anchor{
 			Scope:    v.GetString("anchor.scope"),
@@ -321,6 +328,8 @@ func loadConfig(v *viper.Viper) trustconfig.Config {
 		Proofstore: trustconfig.Proofstore{
 			ArtifactSyncMode: v.GetString("proofstore.artifact_sync_mode"),
 			RecordIndexMode:  proofstoreRecordIndexMode(v),
+			TiKVPDAddresses:  splitCSV(strings.Join(v.GetStringSlice("proofstore.tikv_pd_endpoints"), ",")),
+			TiKVKeyspace:     v.GetString("proofstore.tikv_keyspace"),
 		},
 		Log: trustconfig.Log{
 			Level:  v.GetString("log.level"),
@@ -532,6 +541,8 @@ func configString(cfg trustconfig.Config, key string) string {
 			return "true"
 		}
 		return "false"
+	case "global_log.log_id":
+		return cfg.GlobalLog.LogID
 	case "anchor.scope":
 		return cfg.Anchor.Scope
 	case "anchor.max_delay":
@@ -542,6 +553,8 @@ func configString(cfg trustconfig.Config, key string) string {
 		return cfg.Proofstore.ArtifactSyncMode
 	case "proofstore.record_index_mode":
 		return cfg.Proofstore.RecordIndexMode
+	case "proofstore.tikv_keyspace":
+		return cfg.Proofstore.TiKVKeyspace
 	case "backup.compression":
 		return cfg.Backup.Compression
 	case "log.level":

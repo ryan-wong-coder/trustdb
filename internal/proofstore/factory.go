@@ -13,6 +13,7 @@ type Backend string
 const (
 	BackendFile   Backend = "file"
 	BackendPebble Backend = "pebble"
+	BackendTiKV   Backend = "tikv"
 )
 
 // Config picks the backend and its on-disk location. Path is treated as
@@ -22,6 +23,8 @@ const (
 type Config struct {
 	Kind                         Backend
 	Path                         string
+	TiKVPDAddresses              []string
+	TiKVKeyspace                 string
 	RecordIndexMode              string
 	ArtifactSyncMode             string
 	IndexStorageTokens           bool
@@ -32,7 +35,7 @@ type Config struct {
 // backend so existing deployments that only pass a proof directory keep
 // working without any CLI changes.
 func Open(cfg Config) (Store, error) {
-	if cfg.Path == "" {
+	if cfg.Path == "" && Backend(strings.ToLower(string(cfg.Kind))) != BackendTiKV {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "proofstore path is required")
 	}
 	switch Backend(strings.ToLower(string(cfg.Kind))) {
@@ -45,7 +48,24 @@ func Open(cfg Config) (Store, error) {
 			IndexStorageTokens:           cfg.IndexStorageTokens,
 			IndexStorageTokensConfigured: cfg.IndexStorageTokensConfigured,
 		})
+	case BackendTiKV:
+		if !hasTiKVPDAddress(cfg) {
+			return nil, trusterr.New(trusterr.CodeInvalidArgument, "tikv proofstore requires at least one PD endpoint")
+		}
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "tikv proofstore backend is not implemented yet")
 	default:
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown proofstore backend: "+string(cfg.Kind))
 	}
+}
+
+func hasTiKVPDAddress(cfg Config) bool {
+	if strings.TrimSpace(cfg.Path) != "" {
+		return true
+	}
+	for _, address := range cfg.TiKVPDAddresses {
+		if strings.TrimSpace(address) != "" {
+			return true
+		}
+	}
+	return false
 }

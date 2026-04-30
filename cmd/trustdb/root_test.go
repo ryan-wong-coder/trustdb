@@ -56,6 +56,9 @@ func TestConfigEnvOverride(t *testing.T) {
 	t.Setenv("TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS", "false")
 	t.Setenv("TRUSTDB_BATCH_PROOF_MODE", "async")
 	t.Setenv("TRUSTDB_PROOFSTORE_ARTIFACT_SYNC_MODE", "batch")
+	t.Setenv("TRUSTDB_GLOBAL_LOG_ID", "node-log-a")
+	t.Setenv("TRUSTDB_TIKV_PD_ENDPOINTS", "10.0.0.1:2379,10.0.0.2:2379")
+	t.Setenv("TRUSTDB_TIKV_KEYSPACE", "trustdb-test")
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -85,6 +88,13 @@ func TestConfigEnvOverride(t *testing.T) {
 	if batch["proof_mode"] != "async" {
 		t.Fatalf("batch.proof_mode = %v", batch["proof_mode"])
 	}
+	globalLog, ok := cfg["global_log"].(map[string]any)
+	if !ok {
+		t.Fatalf("global_log is not an object: %#v", cfg["global_log"])
+	}
+	if globalLog["log_id"] != "node-log-a" {
+		t.Fatalf("global_log.log_id = %v", globalLog["log_id"])
+	}
 	proofstore, ok := cfg["proofstore"].(map[string]any)
 	if !ok {
 		t.Fatalf("proofstore is not an object: %#v", cfg["proofstore"])
@@ -94,6 +104,13 @@ func TestConfigEnvOverride(t *testing.T) {
 	}
 	if proofstore["artifact_sync_mode"] != "batch" {
 		t.Fatalf("proofstore.artifact_sync_mode = %v", proofstore["artifact_sync_mode"])
+	}
+	endpoints, ok := proofstore["tikv_pd_endpoints"].([]any)
+	if !ok || len(endpoints) != 2 || endpoints[0] != "10.0.0.1:2379" || endpoints[1] != "10.0.0.2:2379" {
+		t.Fatalf("proofstore.tikv_pd_endpoints = %#v", proofstore["tikv_pd_endpoints"])
+	}
+	if proofstore["tikv_keyspace"] != "trustdb-test" {
+		t.Fatalf("proofstore.tikv_keyspace = %v", proofstore["tikv_keyspace"])
 	}
 }
 
@@ -123,14 +140,14 @@ func TestServeAcceptsProofstoreIndexStorageTokensFlag(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"serve", "--proofstore-index-storage-tokens=false", "--batch-proof-mode=async", "--proofstore-record-index-mode=time_only", "--proofstore-artifact-sync-mode=batch", "--help"})
+	cmd.SetArgs([]string{"serve", "--proofstore-index-storage-tokens=false", "--batch-proof-mode=async", "--proofstore-record-index-mode=time_only", "--proofstore-artifact-sync-mode=batch", "--proofstore-tikv-pd-endpoints=127.0.0.1:2379", "--proofstore-tikv-keyspace=trustdb", "--help"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("serve help error = %v stderr=%s", err, errOut.String())
 	}
 	if !bytes.Contains(out.Bytes(), []byte("--proofstore-index-storage-tokens")) {
 		t.Fatalf("serve help missing proofstore token flag: %s", out.String())
 	}
-	for _, flag := range [][]byte{[]byte("--batch-proof-mode"), []byte("--proofstore-record-index-mode"), []byte("--proofstore-artifact-sync-mode")} {
+	for _, flag := range [][]byte{[]byte("--batch-proof-mode"), []byte("--proofstore-record-index-mode"), []byte("--proofstore-artifact-sync-mode"), []byte("--proofstore-tikv-pd-endpoints"), []byte("--proofstore-tikv-keyspace")} {
 		if !bytes.Contains(out.Bytes(), flag) {
 			t.Fatalf("serve help missing %s: %s", flag, out.String())
 		}

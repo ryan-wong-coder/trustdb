@@ -195,7 +195,15 @@ func (s *Service) Proof(ctx context.Context, recordID string) (model.ProofBundle
 		return model.ProofBundle{}, trusterr.New(trusterr.CodeFailedPrecondition, "proof store is not configured")
 	}
 	bundle, err := s.store.GetBundle(ctx, recordID)
-	if err == nil || s.opts.ProofMode != ProofModeOnDemand {
+	if err == nil {
+		if s.opts.ProofMode != ProofModeInline {
+			if err := s.requireCommittedManifest(ctx, bundle); err != nil {
+				return model.ProofBundle{}, err
+			}
+		}
+		return bundle, nil
+	}
+	if s.opts.ProofMode != ProofModeOnDemand {
 		return bundle, err
 	}
 	if trusterr.CodeOf(err) != trusterr.CodeNotFound {
@@ -204,7 +212,32 @@ func (s *Service) Proof(ctx context.Context, recordID string) (model.ProofBundle
 	if err := s.materializeRecord(ctx, recordID); err != nil {
 		return model.ProofBundle{}, err
 	}
-	return s.store.GetBundle(ctx, recordID)
+	bundle, err = s.store.GetBundle(ctx, recordID)
+	if err != nil {
+		return model.ProofBundle{}, err
+	}
+	if err := s.requireCommittedManifest(ctx, bundle); err != nil {
+		return model.ProofBundle{}, err
+	}
+	return bundle, nil
+}
+
+func (s *Service) requireCommittedManifest(ctx context.Context, bundle model.ProofBundle) error {
+	batchID := bundle.CommittedReceipt.BatchID
+	if batchID == "" {
+		return nil
+	}
+	manifest, err := s.store.GetManifest(ctx, batchID)
+	if err != nil {
+		if trusterr.CodeOf(err) == trusterr.CodeNotFound {
+			return nil
+		}
+		return err
+	}
+	if manifest.State != model.BatchStateCommitted {
+		return trusterr.New(trusterr.CodeNotFound, "proof bundle is not committed yet")
+	}
+	return nil
 }
 
 func (s *Service) RecordIndex(ctx context.Context, recordID string) (model.RecordIndex, bool, error) {
@@ -403,6 +436,8 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 	manifest := model.BatchManifest{
 		SchemaVersion:   model.SchemaBatchManifest,
 		BatchID:         batchID,
+		NodeID:          root.NodeID,
+		LogID:           root.LogID,
 		State:           model.BatchStatePrepared,
 		TreeAlg:         model.DefaultMerkleTreeAlg,
 		TreeSize:        root.TreeSize,
@@ -481,13 +516,18 @@ func (s *Service) writeBundlesAndRoot(ctx context.Context, batchID string, bundl
 }
 
 func rootFromBundles(batchID string, bundles []model.ProofBundle) model.BatchRoot {
-	return model.BatchRoot{
+	r := model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       batchID,
 		BatchRoot:     append([]byte(nil), bundles[0].CommittedReceipt.BatchRoot...),
 		TreeSize:      uint64(len(bundles)),
 		ClosedAtUnixN: bundles[0].CommittedReceipt.ClosedAtUnixN,
 	}
+	if len(bundles) > 0 {
+		r.NodeID = bundles[0].NodeID
+		r.LogID = bundles[0].LogID
+	}
+	return r
 }
 
 func (s *Service) planBatchIndexes(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) (model.BatchRoot, []model.RecordIndex, error) {

@@ -196,11 +196,11 @@ Important configuration groups:
 | Group | Purpose |
 | --- | --- |
 | `paths` | Data, key registry, WAL, object, and proof directories. |
-| `metastore` / `metastore_path` | Proofstore backend selection: `file` or `pebble`. |
+| `metastore` / `metastore_path` | Proofstore backend selection: `file` or `pebble`; `tikv` is reserved for the planned native TiKV backend and currently fails fast instead of using a local cache. |
 | `wal` | Fsync strategy and group-commit interval. |
 | `server` | HTTP listen address, optional gRPC listen address, queue size, workers, and timeouts. |
 | `batch` | Batch queue, max records, and max delay. |
-| `global_log` | Enables the global transparency log. |
+| `global_log` | Enables the global transparency log and configures the node-local `log_id`. |
 | `anchor` | L5 anchor scope, sink, max delay, OTS calendars, and OTS upgrader. |
 | `history` | Global-log tile size and hot window. |
 | `backup` | Backup compression. |
@@ -244,6 +244,7 @@ Current SDK capabilities:
 - submit signed claims to `POST /v1/claims`;
 - query records, proof bundles, STHs, GlobalLogProof, and STH anchor state;
 - use either the default HTTP transport or the gRPC transport via `sdk.NewGRPCClient`;
+- use client-side multi-endpoint failover or round-robin via `sdk.NewLoadBalancedClient`;
 - export the recommended `.sproof` single-file proof;
 - verify `.sproof` and split proof artifacts locally.
 
@@ -265,6 +266,15 @@ Use gRPC transport instead of HTTP:
 
 ```go
 client, err := sdk.NewGRPCClient("127.0.0.1:9090")
+```
+
+Use SDK-side failover across independent TrustDB nodes:
+
+```go
+client, err := sdk.NewLoadBalancedClient(
+    []string{"http://10.0.0.10:8080", "http://10.0.0.11:8080"},
+    sdk.LoadBalanceOptions{Mode: sdk.LoadBalanceFailover},
+)
 ```
 
 ## Development Checks

@@ -138,11 +138,25 @@ func GlobalLogConsistency(bundle model.ProofBundle, proof model.GlobalLogProof) 
 	if proof.BatchID != bundle.CommittedReceipt.BatchID {
 		return fmt.Errorf("verify: global proof batch_id mismatch: proof=%s bundle=%s", proof.BatchID, bundle.CommittedReceipt.BatchID)
 	}
+	if proof.NodeID != "" && bundle.NodeID != "" && proof.NodeID != bundle.NodeID {
+		return fmt.Errorf("verify: global proof node_id mismatch: proof=%s bundle=%s", proof.NodeID, bundle.NodeID)
+	}
+	if proof.LogID != "" && bundle.LogID != "" && proof.LogID != bundle.LogID {
+		return fmt.Errorf("verify: global proof log_id mismatch: proof=%s bundle=%s", proof.LogID, bundle.LogID)
+	}
+	if proof.STH.NodeID != "" && proof.NodeID != "" && proof.STH.NodeID != proof.NodeID {
+		return fmt.Errorf("verify: global proof STH node_id mismatch: proof=%s sth=%s", proof.NodeID, proof.STH.NodeID)
+	}
+	if proof.STH.LogID != "" && proof.LogID != "" && proof.STH.LogID != proof.LogID {
+		return fmt.Errorf("verify: global proof STH log_id mismatch: proof=%s sth=%s", proof.LogID, proof.STH.LogID)
+	}
 	if !globallog.VerifyInclusion(proof) {
 		return fmt.Errorf("verify: global log inclusion proof failed")
 	}
 	leaf := model.GlobalLogLeaf{
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		NodeID:             proof.NodeID,
+		LogID:              proof.LogID,
 		BatchID:            bundle.CommittedReceipt.BatchID,
 		BatchRoot:          bundle.CommittedReceipt.BatchRoot,
 		BatchTreeSize:      bundle.BatchProof.TreeSize,
@@ -168,6 +182,12 @@ func AnchorConsistency(proof model.GlobalLogProof, ar model.STHAnchorResult) err
 	}
 	if ar.TreeSize != proof.STH.TreeSize {
 		return fmt.Errorf("verify: anchor tree_size mismatch: anchor=%d sth=%d", ar.TreeSize, proof.STH.TreeSize)
+	}
+	if ar.NodeID != "" && proof.STH.NodeID != "" && ar.NodeID != proof.STH.NodeID {
+		return fmt.Errorf("verify: anchor node_id mismatch: anchor=%s sth=%s", ar.NodeID, proof.STH.NodeID)
+	}
+	if ar.LogID != "" && proof.STH.LogID != "" && ar.LogID != proof.STH.LogID {
+		return fmt.Errorf("verify: anchor log_id mismatch: anchor=%s sth=%s", ar.LogID, proof.STH.LogID)
 	}
 	if !bytes.Equal(ar.RootHash, proof.STH.RootHash) {
 		return fmt.Errorf("verify: anchor root_hash does not match STH root")

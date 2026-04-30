@@ -40,6 +40,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	var readTimeoutText, writeTimeoutText, shutdownTimeoutText, batchMaxDelayText string
 	var walGroupCommitIntervalText string
 	var metastoreKind, metastorePath string
+	var proofstoreTiKVPDText, proofstoreTiKVKeyspace string
 	var batchProofMode, proofstoreArtifactSyncMode, proofstoreRecordIndexMode string
 	var proofstoreIndexStorageTokens bool
 	var anchorSinkKind, anchorPath string
@@ -61,6 +62,11 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			proofDir = stringOrConfig(cmd, rt, "proof-dir", proofDir, "proof_dir")
 			metastoreKind = stringOrConfig(cmd, rt, "metastore", metastoreKind, "metastore")
 			metastorePath = stringOrConfig(cmd, rt, "metastore-path", metastorePath, "metastore_path")
+			tikvPDAddresses := rt.cfg.Proofstore.TiKVPDAddresses
+			if cmd.Flags().Changed("proofstore-tikv-pd-endpoints") {
+				tikvPDAddresses = splitCSV(proofstoreTiKVPDText)
+			}
+			proofstoreTiKVKeyspace = stringOrLiteral(cmd, "proofstore-tikv-keyspace", proofstoreTiKVKeyspace, rt.cfg.Proofstore.TiKVKeyspace)
 			proofstoreRecordIndexMode = stringOrLiteral(cmd, "proofstore-record-index-mode", proofstoreRecordIndexMode, rt.cfg.Proofstore.RecordIndexMode)
 			if cmd.Flags().Changed("proofstore-index-storage-tokens") {
 				proofstoreIndexStorageTokens, _ = cmd.Flags().GetBool("proofstore-index-storage-tokens")
@@ -243,8 +249,14 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			}
 
 			idempotency := app.NewIdempotencyIndex()
+			nodeID := stringValue(cmd, rt, "server-id", "server_id")
+			logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
+			if logID == "" {
+				logID = nodeID
+			}
 			engine := app.LocalEngine{
-				ServerID:         stringValue(cmd, rt, "server-id", "server_id"),
+				ServerID:         nodeID,
+				LogID:            logID,
 				ServerKeyID:      stringValue(cmd, rt, "server-key-id", "server_key_id"),
 				ClientPublicKey:  clientPub,
 				ClientKeys:       clientKeys,
@@ -278,6 +290,8 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			proofStore, err := proofstore.Open(proofstore.Config{
 				Kind:                         proofstore.Backend(metaKind),
 				Path:                         metaPath,
+				TiKVPDAddresses:              tikvPDAddresses,
+				TiKVKeyspace:                 proofstoreTiKVKeyspace,
 				RecordIndexMode:              proofstoreRecordIndexMode,
 				ArtifactSyncMode:             proofstoreArtifactSyncMode,
 				IndexStorageTokens:           !strings.EqualFold(proofstoreRecordIndexMode, "no_storage_tokens"),
@@ -358,7 +372,8 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if globalLogEnabled {
 				globalSvc, err = globallog.New(globallog.Options{
 					Store:      proofStore,
-					LogID:      rt.cfg.Server.ID,
+					NodeID:     nodeID,
+					LogID:      logID,
 					KeyID:      rt.cfg.Server.KeyID,
 					PrivateKey: serverPriv,
 				})
@@ -517,8 +532,10 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().IntVar(&walKeepSegments, "wal-keep-segments", 0, "after checkpoint advance, keep this many segments older than the checkpoint-covered segment (directory mode; 0 = only retain the active segment + checkpoint-covered one)")
 	cmd.Flags().StringVar(&walFsyncMode, "wal-fsync-mode", "", "WAL fsync mode: strict, group (production default), or batch")
 	cmd.Flags().StringVar(&walGroupCommitIntervalText, "wal-group-commit-interval", "", "WAL group fsync interval when --wal-fsync-mode=group (default 10ms)")
-	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default) or pebble")
-	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path (defaults to --proof-dir; for pebble, a subdirectory is created under --proof-dir unless set)")
+	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default), pebble, or tikv (experimental, not implemented)")
+	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path (defaults to --proof-dir; for tikv, accepts comma-separated PD endpoints)")
+	cmd.Flags().StringVar(&proofstoreTiKVPDText, "proofstore-tikv-pd-endpoints", "", "comma-separated TiKV PD endpoints for the tikv proofstore backend")
+	cmd.Flags().StringVar(&proofstoreTiKVKeyspace, "proofstore-tikv-keyspace", "", "TiKV keyspace for the tikv proofstore backend")
 	cmd.Flags().StringVar(&proofstoreArtifactSyncMode, "proofstore-artifact-sync-mode", "", "proof artifact durability mode: chunk (default) or batch")
 	cmd.Flags().StringVar(&proofstoreRecordIndexMode, "proofstore-record-index-mode", "", "record secondary index mode: full (default), no_storage_tokens, or time_only")
 	cmd.Flags().BoolVar(&proofstoreIndexStorageTokens, "proofstore-index-storage-tokens", true, "write StorageURI/FileName token secondary indexes in the proofstore; disable for high-write ingest profiles")
@@ -1251,4 +1268,15 @@ func stringOrLiteral(cmd *cobra.Command, flagName, flagValue, fallback string) s
 		return flagValue
 	}
 	return fallback
+}
+
+func splitCSV(text string) []string {
+	parts := strings.Split(text, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
