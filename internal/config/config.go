@@ -17,6 +17,9 @@ paths:
 metastore: "pebble"
 metastore_path: ".trustdb/proofs/pebble"
 
+proofstore:
+  index_storage_tokens: true
+
 wal:
   fsync_mode: "group"
   group_commit_interval: "10ms"
@@ -84,17 +87,18 @@ keys:
 `
 
 type Config struct {
-	Paths     Paths     `mapstructure:"paths" json:"paths"`
-	Identity  Identity  `mapstructure:"identity" json:"identity"`
-	Server    Server    `mapstructure:"server" json:"server"`
-	Registry  Registry  `mapstructure:"registry" json:"registry"`
-	Batch     Batch     `mapstructure:"batch" json:"batch"`
-	GlobalLog GlobalLog `mapstructure:"global_log" json:"global_log"`
-	Anchor    Anchor    `mapstructure:"anchor" json:"anchor"`
-	History   History   `mapstructure:"history" json:"history"`
-	Backup    Backup    `mapstructure:"backup" json:"backup"`
-	Log       Log       `mapstructure:"log" json:"log"`
-	Keys      Keys      `mapstructure:"keys" json:"keys"`
+	Paths      Paths      `mapstructure:"paths" json:"paths"`
+	Identity   Identity   `mapstructure:"identity" json:"identity"`
+	Server     Server     `mapstructure:"server" json:"server"`
+	Registry   Registry   `mapstructure:"registry" json:"registry"`
+	Batch      Batch      `mapstructure:"batch" json:"batch"`
+	GlobalLog  GlobalLog  `mapstructure:"global_log" json:"global_log"`
+	Anchor     Anchor     `mapstructure:"anchor" json:"anchor"`
+	History    History    `mapstructure:"history" json:"history"`
+	Backup     Backup     `mapstructure:"backup" json:"backup"`
+	Proofstore Proofstore `mapstructure:"proofstore" json:"proofstore"`
+	Log        Log        `mapstructure:"log" json:"log"`
+	Keys       Keys       `mapstructure:"keys" json:"keys"`
 }
 
 type Paths struct {
@@ -149,6 +153,10 @@ type History struct {
 
 type Backup struct {
 	Compression string `mapstructure:"compression" json:"compression"`
+}
+
+type Proofstore struct {
+	IndexStorageTokens bool `mapstructure:"index_storage_tokens" json:"index_storage_tokens"`
 }
 
 type Log struct {
@@ -225,6 +233,9 @@ func Default() Config {
 		},
 		Backup: Backup{
 			Compression: "gzip",
+		},
+		Proofstore: Proofstore{
+			IndexStorageTokens: true,
 		},
 		Log: Log{
 			Level:  "warn",

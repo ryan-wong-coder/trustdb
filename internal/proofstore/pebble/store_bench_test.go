@@ -13,15 +13,23 @@ import (
 )
 
 func BenchmarkPebblePutBatchArtifacts1024(b *testing.B) {
-	benchmarkPebblePutBatchArtifacts(b, 1024)
+	benchmarkPebblePutBatchArtifacts(b, 1024, Options{IndexStorageTokens: true})
 }
 
 func BenchmarkPebblePutBatchArtifacts8192(b *testing.B) {
-	benchmarkPebblePutBatchArtifacts(b, 8192)
+	benchmarkPebblePutBatchArtifacts(b, 8192, Options{IndexStorageTokens: true})
 }
 
-func benchmarkPebblePutBatchArtifacts(b *testing.B, n int) {
-	store, err := Open(b.TempDir())
+func BenchmarkPebblePutBatchArtifacts1024TokenIndexDisabled(b *testing.B) {
+	benchmarkPebblePutBatchArtifacts(b, 1024, Options{IndexStorageTokens: false})
+}
+
+func BenchmarkPebblePutBatchArtifacts8192TokenIndexDisabled(b *testing.B) {
+	benchmarkPebblePutBatchArtifacts(b, 8192, Options{IndexStorageTokens: false})
+}
+
+func benchmarkPebblePutBatchArtifacts(b *testing.B, n int, opts Options) {
+	store, err := OpenWithOptions(b.TempDir(), opts)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -41,6 +49,26 @@ func benchmarkPebblePutBatchArtifacts(b *testing.B, n int) {
 		if err := store.PutBatchArtifacts(ctx, bundles, root); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+var benchmarkRecordIndexKeyCount int
+
+func BenchmarkRecordIndexKeyBuild(b *testing.B) {
+	idx := model.RecordIndexFromBundle(syntheticProofBundles(1)[0])
+	idx.FileName = "bench-record-0001.txt"
+	idx.StorageURI = "bench://tenant/client/bench-record-0001.txt"
+
+	b.ReportAllocs()
+	for b.Loop() {
+		count := 0
+		if err := visitRecordIndexKeys(idx, true, func([]byte) error {
+			count++
+			return nil
+		}); err != nil {
+			b.Fatal(err)
+		}
+		benchmarkRecordIndexKeyCount = count
 	}
 }
 
@@ -160,6 +188,85 @@ func TestStoreSecondaryRecordIndexesUseRefs(t *testing.T) {
 	if len(records) != 1 || records[0].RecordID != bundle.RecordID {
 		t.Fatalf("records = %+v", records)
 	}
+}
+
+func TestStoreCanDisableStorageTokenIndexes(t *testing.T) {
+	t.Parallel()
+
+	store, err := OpenWithOptions(t.TempDir(), Options{IndexStorageTokens: false})
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer store.Close()
+	bundle := syntheticProofBundles(1)[0]
+	bundle.SignedClaim.Claim.Content.StorageURI = "bench://tenant/searchable-file-0001"
+	bundle.SignedClaim.Claim.Metadata.Custom = map[string]string{"file_name": "searchable-file-0001.txt"}
+	if err := store.PutBundle(context.Background(), bundle); err != nil {
+		t.Fatalf("PutBundle: %v", err)
+	}
+	if got := countKeysWithPrefix(t, store, prefixRecordByToken); got != 0 {
+		t.Fatalf("token index keys = %d, want 0", got)
+	}
+	records, err := store.ListRecordIndexes(context.Background(), model.RecordListOptions{Query: "searchable"})
+	if err != nil {
+		t.Fatalf("ListRecordIndexes: %v", err)
+	}
+	if len(records) != 1 || records[0].RecordID != bundle.RecordID {
+		t.Fatalf("query records = %+v", records)
+	}
+}
+
+func TestStoreDisablingStorageTokenIndexesRemovesOldTokenKeys(t *testing.T) {
+	t.Parallel()
+
+	store, err := OpenWithOptions(t.TempDir(), Options{IndexStorageTokens: true})
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer store.Close()
+	bundle := syntheticProofBundles(1)[0]
+	bundle.SignedClaim.Claim.Content.StorageURI = "bench://tenant/toggle-file-0001"
+	bundle.SignedClaim.Claim.Metadata.Custom = map[string]string{"file_name": "toggle-file-0001.txt"}
+	if err := store.PutBundle(context.Background(), bundle); err != nil {
+		t.Fatalf("PutBundle enabled: %v", err)
+	}
+	if got := countKeysWithPrefix(t, store, prefixRecordByToken); got == 0 {
+		t.Fatal("token index keys = 0, want enabled store to write token indexes")
+	}
+
+	store.indexStorageTokens = false
+	bundle.AcceptedReceipt.Status = "accepted-again"
+	if err := store.PutBundle(context.Background(), bundle); err != nil {
+		t.Fatalf("PutBundle disabled: %v", err)
+	}
+	if got := countKeysWithPrefix(t, store, prefixRecordByToken); got != 0 {
+		t.Fatalf("token index keys after disabled replace = %d, want 0", got)
+	}
+	records, err := store.ListRecordIndexes(context.Background(), model.RecordListOptions{Query: "toggle"})
+	if err != nil {
+		t.Fatalf("ListRecordIndexes: %v", err)
+	}
+	if len(records) != 1 || records[0].RecordID != bundle.RecordID {
+		t.Fatalf("query records = %+v", records)
+	}
+}
+
+func countKeysWithPrefix(t *testing.T, store *Store, prefix string) int {
+	t.Helper()
+	lower, upper := prefixBounds(prefix)
+	iter, err := store.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		t.Fatalf("NewIter: %v", err)
+	}
+	defer iter.Close()
+	count := 0
+	for ok := iter.First(); ok; ok = iter.Next() {
+		count++
+	}
+	if err := iter.Error(); err != nil {
+		t.Fatalf("iterate %s: %v", prefix, err)
+	}
+	return count
 }
 
 func syntheticProofBundles(n int) []model.ProofBundle {

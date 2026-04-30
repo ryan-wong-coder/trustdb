@@ -2,9 +2,9 @@
 
 ![AI 生成的 TrustDB 性能概览图](assets/perf-v3-ai-overview.png)
 
-报告日期：2026-04-30  
-测试 Run ID：`perf-v3-20260430T043651Z`  
-代码范围：bench v3、Merkle proof、Pebble proof artifact、WAL 可观测性、SDK HTTP transport 优化后分支  
+报告日期：2026-04-30
+测试 Run ID：`perf-v3-20260430T043651Z`
+代码范围：bench v3、Merkle proof、Pebble proof artifact、WAL 可观测性、SDK HTTP transport 优化后分支
 核心目标：验证当前单机写入性能，并把“提交成功”“立即查询可见”“等待 proof 后查询成功”拆成独立指标。
 
 上图是 AI 生成的报告概览视觉图。下方表格和指标图来自本轮测试产物与 benchmark 输出，是本报告的数据依据。
@@ -177,4 +177,3 @@ go test -run '^$' -bench 'BenchmarkWALAppendGroup' -benchmem -count=6 ./internal
 ```text
 .localdeploy/perf-v3-20260430T043651Z/reports/
 ```
-

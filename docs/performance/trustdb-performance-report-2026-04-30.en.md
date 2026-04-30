@@ -2,9 +2,9 @@
 
 ![AI generated TrustDB performance overview](assets/perf-v3-ai-overview.png)
 
-Report date: 2026-04-30  
-Run ID: `perf-v3-20260430T043651Z`  
-Code path: optimized bench v3 / Merkle / Pebble artifact / WAL observability / SDK HTTP transport branch  
+Report date: 2026-04-30
+Run ID: `perf-v3-20260430T043651Z`
+Code path: optimized bench v3 / Merkle / Pebble artifact / WAL observability / SDK HTTP transport branch
 Primary goal: validate current single-node ingest behavior while separating accepted submission, immediate query visibility, and proof-ready query visibility.
 
 The image above is an AI-generated visual overview for the report. The tables and metric charts below are generated from the recorded benchmark and matrix outputs and are the source of truth.
@@ -177,4 +177,3 @@ Primary local report artifacts were retained under:
 ```text
 .localdeploy/perf-v3-20260430T043651Z/reports/
 ```
-

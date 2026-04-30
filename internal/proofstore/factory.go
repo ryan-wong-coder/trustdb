@@ -20,8 +20,10 @@ const (
 // puts manifests/bundles/roots/checkpoint under it, while the Pebble
 // backend uses it as the database directory.
 type Config struct {
-	Kind Backend
-	Path string
+	Kind                         Backend
+	Path                         string
+	IndexStorageTokens           bool
+	IndexStorageTokensConfigured bool
 }
 
 // Open constructs a Store using cfg. An empty Kind defaults to the file
@@ -35,6 +37,9 @@ func Open(cfg Config) (Store, error) {
 	case "", BackendFile:
 		return &LocalStore{Root: cfg.Path}, nil
 	case BackendPebble:
+		if cfg.IndexStorageTokensConfigured {
+			return pebblestore.OpenWithOptions(cfg.Path, pebblestore.Options{IndexStorageTokens: cfg.IndexStorageTokens})
+		}
 		return pebblestore.Open(cfg.Path)
 	default:
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown proofstore backend: "+string(cfg.Kind))

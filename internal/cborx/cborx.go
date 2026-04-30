@@ -1,6 +1,7 @@
 package cborx
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -57,6 +58,21 @@ func Marshal(v any) ([]byte, error) {
 		return nil, fmt.Errorf("cborx: marshal: %w", err)
 	}
 	return b, nil
+}
+
+func MarshalBuffer(buf *bytes.Buffer, v any) error {
+	if v == nil {
+		return errors.New("cborx: cannot marshal nil")
+	}
+	if buf == nil {
+		return errors.New("cborx: nil buffer")
+	}
+	before := buf.Len()
+	if err := encMode.NewEncoder(buf).Encode(v); err != nil {
+		buf.Truncate(before)
+		return fmt.Errorf("cborx: marshal: %w", err)
+	}
+	return nil
 }
 
 func Unmarshal(data []byte, v any) error {

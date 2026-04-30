@@ -54,4 +54,6 @@ Thumbs.db
 
 # Local design/operations drafts
 doc/
-docs/
+docs/*
+!docs/performance/
+!docs/performance/**

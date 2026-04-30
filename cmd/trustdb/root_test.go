@@ -53,6 +53,7 @@ func TestConfigInitAndShow(t *testing.T) {
 
 func TestConfigEnvOverride(t *testing.T) {
 	t.Setenv("TRUSTDB_TENANT", "tenant-from-env")
+	t.Setenv("TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS", "false")
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -74,6 +75,27 @@ func TestConfigEnvOverride(t *testing.T) {
 	}
 	if identity["tenant"] != "tenant-from-env" {
 		t.Fatalf("identity.tenant = %v", identity["tenant"])
+	}
+	proofstore, ok := cfg["proofstore"].(map[string]any)
+	if !ok {
+		t.Fatalf("proofstore is not an object: %#v", cfg["proofstore"])
+	}
+	if proofstore["index_storage_tokens"] != false {
+		t.Fatalf("proofstore.index_storage_tokens = %v", proofstore["index_storage_tokens"])
+	}
+}
+
+func TestServeAcceptsProofstoreIndexStorageTokensFlag(t *testing.T) {
+	t.Parallel()
+
+	var out, errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{"serve", "--proofstore-index-storage-tokens=false", "--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("serve help error = %v stderr=%s", err, errOut.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("--proofstore-index-storage-tokens")) {
+		t.Fatalf("serve help missing proofstore token flag: %s", out.String())
 	}
 }
 

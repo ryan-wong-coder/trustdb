@@ -40,6 +40,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	var readTimeoutText, writeTimeoutText, shutdownTimeoutText, batchMaxDelayText string
 	var walGroupCommitIntervalText string
 	var metastoreKind, metastorePath string
+	var proofstoreIndexStorageTokens bool
 	var anchorSinkKind, anchorPath string
 	var anchorOtsCalendars []string
 	var anchorOtsMinAccepted int
@@ -59,6 +60,11 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			proofDir = stringOrConfig(cmd, rt, "proof-dir", proofDir, "proof_dir")
 			metastoreKind = stringOrConfig(cmd, rt, "metastore", metastoreKind, "metastore")
 			metastorePath = stringOrConfig(cmd, rt, "metastore-path", metastorePath, "metastore_path")
+			if cmd.Flags().Changed("proofstore-index-storage-tokens") {
+				proofstoreIndexStorageTokens, _ = cmd.Flags().GetBool("proofstore-index-storage-tokens")
+			} else {
+				proofstoreIndexStorageTokens = rt.cfg.Proofstore.IndexStorageTokens
+			}
 			anchorSinkKind = stringOrConfig(cmd, rt, "anchor-sink", anchorSinkKind, "anchor.sink")
 			anchorPath = stringOrConfig(cmd, rt, "anchor-path", anchorPath, "anchor.path")
 			// OTS sink options: calendars live as a list in viper
@@ -256,8 +262,10 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				rt.logger.Warn().Msg("file proofstore is intended for development/small datasets; use --metastore=pebble for production-scale attestations")
 			}
 			proofStore, err := proofstore.Open(proofstore.Config{
-				Kind: proofstore.Backend(metaKind),
-				Path: metaPath,
+				Kind:                         proofstore.Backend(metaKind),
+				Path:                         metaPath,
+				IndexStorageTokens:           proofstoreIndexStorageTokens,
+				IndexStorageTokensConfigured: true,
 			})
 			if err != nil {
 				return err
@@ -459,6 +467,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().StringVar(&walGroupCommitIntervalText, "wal-group-commit-interval", "", "WAL group fsync interval when --wal-fsync-mode=group (default 10ms)")
 	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default) or pebble")
 	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path (defaults to --proof-dir; for pebble, a subdirectory is created under --proof-dir unless set)")
+	cmd.Flags().BoolVar(&proofstoreIndexStorageTokens, "proofstore-index-storage-tokens", true, "write StorageURI/FileName token secondary indexes in the proofstore; disable for high-write ingest profiles")
 	cmd.Flags().StringVar(&anchorSinkKind, "anchor-sink", "", "external anchor sink: off (default; no L5 proofs), file, noop, or ots (OpenTimestamps)")
 	cmd.Flags().StringVar(&anchorPath, "anchor-path", "", "file anchor sink output path (JSONL). Defaults to <proof-dir>/anchors.jsonl when --anchor-sink=file and this flag is empty")
 	cmd.Flags().StringSliceVar(&anchorOtsCalendars, "anchor-ots-calendars", nil, "comma-separated OpenTimestamps calendar URLs. When empty a built-in public pool is used (only honored when --anchor-sink=ots)")

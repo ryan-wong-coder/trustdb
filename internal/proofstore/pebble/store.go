@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,7 +71,10 @@ const (
 	storedBundleCodecSnappy   = "snappy"
 )
 
-var recordIndexRefPrefix = []byte("trustdb.record-index-ref.v1\x00")
+var (
+	recordIndexRefPrefix = []byte("trustdb.record-index-ref.v1\x00")
+	recordByIDPrefix     = []byte(prefixRecordByID)
+)
 
 type storedProofBundleEnvelope struct {
 	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
@@ -78,25 +82,40 @@ type storedProofBundleEnvelope struct {
 	Data          []byte `cbor:"data" json:"data"`
 }
 
+type Options struct {
+	IndexStorageTokens bool
+}
+
 type encodedBatchArtifact struct {
 	recordID    string
 	bundleValue []byte
+	bundleBuf   *bytes.Buffer
 	index       encodedRecordIndex
 }
 
-type encodedRecordIndex struct {
-	idx           model.RecordIndex
-	value         []byte
-	primaryKey    []byte
-	secondaryKeys [][]byte
-	refValue      []byte
+func (a encodedBatchArtifact) release() {
+	putArtifactBuffer(a.bundleBuf)
+	a.index.release()
 }
+
+type encodedRecordIndex struct {
+	idx      model.RecordIndex
+	value    []byte
+	valueBuf *bytes.Buffer
+}
+
+func (idx encodedRecordIndex) release() {
+	putArtifactBuffer(idx.valueBuf)
+}
+
+var artifactBufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 // Store is a Pebble-backed proof store. It is safe for concurrent use
 // from multiple goroutines; Pebble's internal locking guarantees that
 // all Store methods see a linearizable view of the underlying key space.
 type Store struct {
-	db *pdb.DB
+	db                 *pdb.DB
+	indexStorageTokens bool
 
 	// closeOnce guards the underlying db.Close so that duplicate
 	// Close calls from defers and shutdown hooks cannot panic on a
@@ -110,6 +129,10 @@ type Store struct {
 // release the underlying file locks; Pebble refuses a second Open at
 // the same path while the first handle is still live.
 func Open(path string) (*Store, error) {
+	return OpenWithOptions(path, Options{IndexStorageTokens: true})
+}
+
+func OpenWithOptions(path string, opts Options) (*Store, error) {
 	if path == "" {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "pebble proofstore path is required")
 	}
@@ -117,7 +140,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeInternal, "open pebble proofstore", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, indexStorageTokens: opts.IndexStorageTokens}, nil
 }
 
 // Close releases the underlying Pebble database. It is safe to call
@@ -159,50 +182,132 @@ func recordSecondaryPart(value string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(value))
 }
 
-func recordIndexSuffix(receivedAtUnixN int64, recordID string) string {
-	return fmt.Sprintf("%0*d/%s", rootSortKeyWidth, receivedAtUnixN, recordID)
+func appendRecordSecondaryPart(dst []byte, value string) []byte {
+	return base64.RawURLEncoding.AppendEncode(dst, []byte(value))
+}
+
+func appendZeroPaddedInt(dst []byte, value int64, width int) []byte {
+	var tmp [32]byte
+	digits := strconv.AppendInt(tmp[:0], value, 10)
+	if len(digits) < width {
+		for i := 0; i < width-len(digits); i++ {
+			dst = append(dst, '0')
+		}
+	}
+	return append(dst, digits...)
+}
+
+func appendRecordIndexSuffix(dst []byte, receivedAtUnixN int64, recordID string) []byte {
+	dst = appendZeroPaddedInt(dst, receivedAtUnixN, rootSortKeyWidth)
+	dst = append(dst, '/')
+	return append(dst, recordID...)
 }
 
 func recordIndexKey(prefix string, receivedAtUnixN int64, recordID string) []byte {
-	return []byte(prefix + recordIndexSuffix(receivedAtUnixN, recordID))
+	key := make([]byte, 0, len(prefix)+rootSortKeyWidth+1+len(recordID))
+	key = append(key, prefix...)
+	return appendRecordIndexSuffix(key, receivedAtUnixN, recordID)
 }
 
 func recordIndexUpperTimeKey(prefix string, receivedAtUnixN int64) []byte {
-	return []byte(fmt.Sprintf("%s%0*d0", prefix, rootSortKeyWidth, receivedAtUnixN))
+	key := make([]byte, 0, len(prefix)+rootSortKeyWidth+1)
+	key = append(key, prefix...)
+	key = appendZeroPaddedInt(key, receivedAtUnixN, rootSortKeyWidth)
+	return append(key, '0')
 }
 
-func recordIndexPrefixes(idx model.RecordIndex) []string {
-	prefixes := []string{prefixRecordByTime}
-	if idx.BatchID != "" {
-		prefixes = append(prefixes, prefixRecordByBatch+recordSecondaryPart(idx.BatchID)+"/")
-	}
-	if idx.ProofLevel != "" {
-		prefixes = append(prefixes, prefixRecordByLevel+recordSecondaryPart(idx.ProofLevel)+"/")
-	}
-	if idx.TenantID != "" {
-		prefixes = append(prefixes, prefixRecordByTenant+recordSecondaryPart(idx.TenantID)+"/")
-	}
-	if idx.ClientID != "" {
-		prefixes = append(prefixes, prefixRecordByClient+recordSecondaryPart(idx.ClientID)+"/")
-	}
-	if len(idx.ContentHash) > 0 {
-		prefixes = append(prefixes, prefixRecordByHash+hex.EncodeToString(idx.ContentHash)+"/")
-	}
-	for _, token := range model.RecordIndexStorageTokens(idx) {
-		prefixes = append(prefixes, prefixRecordByToken+recordSecondaryPart(token)+"/")
-	}
-	return prefixes
-}
-
-func recordIndexKeys(idx model.RecordIndex) [][]byte {
+func visitRecordIndexKeys(idx model.RecordIndex, includeStorageTokens bool, visit func([]byte) error) error {
 	if idx.RecordID == "" {
 		return nil
 	}
-	keys := [][]byte{recordByIDKey(idx.RecordID)}
-	for _, prefix := range recordIndexPrefixes(idx) {
-		keys = append(keys, recordIndexKey(prefix, idx.ReceivedAtUnixN, idx.RecordID))
+	key := make([]byte, 0, recordIndexKeyCap(idx))
+	key = append(key, recordByIDPrefix...)
+	key = append(key, idx.RecordID...)
+	if err := visit(key); err != nil {
+		return err
 	}
-	return keys
+	key = appendRecordIndexKeyPrefix(key[:0], prefixRecordByTime, idx.ReceivedAtUnixN, idx.RecordID)
+	if err := visit(key); err != nil {
+		return err
+	}
+	if idx.BatchID != "" {
+		key = appendRecordIndexEncodedPrefix(key[:0], prefixRecordByBatch, idx.BatchID, idx.ReceivedAtUnixN, idx.RecordID)
+		if err := visit(key); err != nil {
+			return err
+		}
+	}
+	if idx.ProofLevel != "" {
+		key = appendRecordIndexEncodedPrefix(key[:0], prefixRecordByLevel, idx.ProofLevel, idx.ReceivedAtUnixN, idx.RecordID)
+		if err := visit(key); err != nil {
+			return err
+		}
+	}
+	if idx.TenantID != "" {
+		key = appendRecordIndexEncodedPrefix(key[:0], prefixRecordByTenant, idx.TenantID, idx.ReceivedAtUnixN, idx.RecordID)
+		if err := visit(key); err != nil {
+			return err
+		}
+	}
+	if idx.ClientID != "" {
+		key = appendRecordIndexEncodedPrefix(key[:0], prefixRecordByClient, idx.ClientID, idx.ReceivedAtUnixN, idx.RecordID)
+		if err := visit(key); err != nil {
+			return err
+		}
+	}
+	if len(idx.ContentHash) > 0 {
+		key = append(key[:0], prefixRecordByHash...)
+		key = hex.AppendEncode(key, idx.ContentHash)
+		key = append(key, '/')
+		key = appendRecordIndexSuffix(key, idx.ReceivedAtUnixN, idx.RecordID)
+		if err := visit(key); err != nil {
+			return err
+		}
+	}
+	if includeStorageTokens {
+		for _, token := range model.RecordIndexStorageTokens(idx) {
+			key = appendRecordIndexEncodedPrefix(key[:0], prefixRecordByToken, token, idx.ReceivedAtUnixN, idx.RecordID)
+			if err := visit(key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func appendRecordIndexKeyPrefix(dst []byte, prefix string, receivedAtUnixN int64, recordID string) []byte {
+	dst = append(dst, prefix...)
+	return appendRecordIndexSuffix(dst, receivedAtUnixN, recordID)
+}
+
+func appendRecordIndexEncodedPrefix(dst []byte, prefix, value string, receivedAtUnixN int64, recordID string) []byte {
+	dst = append(dst, prefix...)
+	dst = appendRecordSecondaryPart(dst, value)
+	dst = append(dst, '/')
+	return appendRecordIndexSuffix(dst, receivedAtUnixN, recordID)
+}
+
+func recordIndexKeyCap(idx model.RecordIndex) int {
+	maxPart := len(idx.BatchID)
+	if n := len(idx.ProofLevel); n > maxPart {
+		maxPart = n
+	}
+	if n := len(idx.TenantID); n > maxPart {
+		maxPart = n
+	}
+	if n := len(idx.ClientID); n > maxPart {
+		maxPart = n
+	}
+	if maxPart < 64 {
+		maxPart = 64
+	}
+	capHint := len(prefixRecordByToken) + base64.RawURLEncoding.EncodedLen(maxPart) + 1 + rootSortKeyWidth + 1 + len(idx.RecordID)
+	if capHint < len(prefixRecordByID)+len(idx.RecordID) {
+		capHint = len(prefixRecordByID) + len(idx.RecordID)
+	}
+	if capHint < 128 {
+		return 128
+	}
+	return capHint
 }
 
 func manifestKey(batchID string) []byte {
@@ -259,30 +364,63 @@ func (s *Store) readCBOR(key []byte, v any) (bool, error) {
 	return true, nil
 }
 
-func encodeStoredProofBundle(bundle model.ProofBundle) ([]byte, error) {
-	if bundle.RecordID == "" {
-		return nil, trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
+func getArtifactBuffer() *bytes.Buffer {
+	buf := artifactBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return buf
+}
+
+func putArtifactBuffer(buf *bytes.Buffer) {
+	if buf == nil {
+		return
 	}
-	raw, err := cborx.Marshal(bundle)
+	if buf.Cap() > maxStoredObjectBytes {
+		return
+	}
+	buf.Reset()
+	artifactBufferPool.Put(buf)
+}
+
+func marshalArtifact(v any) ([]byte, *bytes.Buffer, error) {
+	buf := getArtifactBuffer()
+	if err := cborx.MarshalBuffer(buf, v); err != nil {
+		putArtifactBuffer(buf)
+		return nil, nil, err
+	}
+	return buf.Bytes(), buf, nil
+}
+
+func encodeStoredProofBundle(bundle model.ProofBundle) ([]byte, *bytes.Buffer, error) {
+	if bundle.RecordID == "" {
+		return nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
+	}
+	raw, rawBuf, err := marshalArtifact(bundle)
 	if err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle", err)
+		return nil, nil, trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle", err)
 	}
 	if len(raw) < bundleCompressionMinBytes {
-		return raw, nil
+		return raw, rawBuf, nil
 	}
-	compressed := snappy.Encode(nil, raw)
+	compressedBuf := getArtifactBuffer()
+	compressed := snappy.Encode(compressedBuf.Bytes()[:0], raw)
 	if len(compressed) >= len(raw) {
-		return raw, nil
+		putArtifactBuffer(compressedBuf)
+		return raw, rawBuf, nil
 	}
-	envelope, err := cborx.Marshal(storedProofBundleEnvelope{
+	envelopeBuf := getArtifactBuffer()
+	if err := cborx.MarshalBuffer(envelopeBuf, storedProofBundleEnvelope{
 		SchemaVersion: schemaStoredProofBundleV2,
 		Codec:         storedBundleCodecSnappy,
 		Data:          compressed,
-	})
-	if err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle envelope", err)
+	}); err != nil {
+		putArtifactBuffer(rawBuf)
+		putArtifactBuffer(compressedBuf)
+		putArtifactBuffer(envelopeBuf)
+		return nil, nil, trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle envelope", err)
 	}
-	return envelope, nil
+	putArtifactBuffer(rawBuf)
+	putArtifactBuffer(compressedBuf)
+	return envelopeBuf.Bytes(), envelopeBuf, nil
 }
 
 func decodeStoredProofBundle(data []byte) (model.ProofBundle, error) {
@@ -339,30 +477,28 @@ func encodeRecordIndexArtifact(idx model.RecordIndex) (encodedRecordIndex, error
 	if idx.SchemaVersion == "" {
 		idx.SchemaVersion = model.SchemaRecordIndex
 	}
-	indexData, err := cborx.Marshal(idx)
+	indexData, indexBuf, err := marshalArtifact(idx)
 	if err != nil {
 		return encodedRecordIndex{}, trusterr.Wrap(trusterr.CodeDataLoss, "encode record index", err)
 	}
-	keys := recordIndexKeys(idx)
 	return encodedRecordIndex{
-		idx:           idx,
-		value:         indexData,
-		primaryKey:    keys[0],
-		secondaryKeys: keys[1:],
-		refValue:      recordIndexRefValue(idx.RecordID),
+		idx:      idx,
+		value:    indexData,
+		valueBuf: indexBuf,
 	}, nil
 }
 
 func encodeBatchArtifact(bundle model.ProofBundle) (encodedBatchArtifact, error) {
-	bundleValue, err := encodeStoredProofBundle(bundle)
+	bundleValue, bundleBuf, err := encodeStoredProofBundle(bundle)
 	if err != nil {
 		return encodedBatchArtifact{}, err
 	}
 	index, err := encodeRecordIndexArtifact(model.RecordIndexFromBundle(bundle))
 	if err != nil {
+		putArtifactBuffer(bundleBuf)
 		return encodedBatchArtifact{}, err
 	}
-	return encodedBatchArtifact{recordID: bundle.RecordID, bundleValue: bundleValue, index: index}, nil
+	return encodedBatchArtifact{recordID: bundle.RecordID, bundleValue: bundleValue, bundleBuf: bundleBuf, index: index}, nil
 }
 
 func encodeBatchArtifacts(ctx context.Context, bundles []model.ProofBundle) ([]encodedBatchArtifact, error) {
@@ -404,20 +540,29 @@ func encodeBatchArtifacts(ctx context.Context, bundles []model.ProofBundle) ([]e
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
+			releaseBatchArtifacts(artifacts)
 			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore encode batch artifacts canceled", ctx.Err())
 		}
 	}
 	close(jobs)
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
+		releaseBatchArtifacts(artifacts)
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore encode batch artifacts canceled", err)
 	}
 	for i := range errs {
 		if errs[i] != nil {
+			releaseBatchArtifacts(artifacts)
 			return nil, errs[i]
 		}
 	}
 	return artifacts, nil
+}
+
+func releaseBatchArtifacts(artifacts []encodedBatchArtifact) {
+	for i := range artifacts {
+		artifacts[i].release()
+	}
 }
 
 func stageSet(batch *pdb.Batch, key, value []byte) error {
@@ -427,11 +572,12 @@ func stageSet(batch *pdb.Batch, key, value []byte) error {
 	return op.Finish()
 }
 
-func recordIndexRefValue(recordID string) []byte {
-	value := make([]byte, 0, len(recordIndexRefPrefix)+len(recordID))
-	value = append(value, recordIndexRefPrefix...)
-	value = append(value, recordID...)
-	return value
+func stageRecordIndexRef(batch *pdb.Batch, key []byte, recordID string) error {
+	op := batch.SetDeferred(len(key), len(recordIndexRefPrefix)+len(recordID))
+	copy(op.Key, key)
+	copy(op.Value, recordIndexRefPrefix)
+	copy(op.Value[len(recordIndexRefPrefix):], recordID)
+	return op.Finish()
 }
 
 func decodeRecordIndexRef(value []byte) (string, bool) {
@@ -472,6 +618,7 @@ func (s *Store) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
 	if err != nil {
 		return err
 	}
+	defer artifact.release()
 	var old model.RecordIndex
 	oldFound, err := s.readCBOR(recordByIDKey(bundle.RecordID), &old)
 	if err != nil {
@@ -502,26 +649,30 @@ func (s *Store) PutBatchArtifacts(ctx context.Context, bundles []model.ProofBund
 	if err != nil {
 		return err
 	}
-	artifacts, err := encodeBatchArtifacts(ctx, bundles)
-	if err != nil {
-		return err
-	}
-	for start := 0; start < len(artifacts); start += batchArtifactChunkSize {
+	for start := 0; start < len(bundles); start += batchArtifactChunkSize {
 		end := start + batchArtifactChunkSize
-		if end > len(artifacts) {
-			end = len(artifacts)
+		if end > len(bundles) {
+			end = len(bundles)
 		}
 		if err := ctx.Err(); err != nil {
 			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch artifacts canceled", err)
 		}
+		artifacts, err := encodeBatchArtifacts(ctx, bundles[start:end])
+		if err != nil {
+			return err
+		}
 		batch := s.db.NewBatch()
-		for i := start; i < end; i++ {
+		for i := range artifacts {
 			if err := s.stageEncodedBatchArtifact(batch, artifacts[i]); err != nil {
+				for j := i; j < len(artifacts); j++ {
+					artifacts[j].release()
+				}
 				_ = batch.Close()
 				return err
 			}
+			artifacts[i].release()
 		}
-		if end == len(artifacts) {
+		if end == len(bundles) {
 			if err := s.stageRoot(batch, root); err != nil {
 				_ = batch.Close()
 				return err
@@ -543,6 +694,7 @@ func (s *Store) stageNewBundle(batch *pdb.Batch, bundle model.ProofBundle) error
 	if err != nil {
 		return err
 	}
+	defer artifact.release()
 	return s.stageEncodedBatchArtifact(batch, artifact)
 }
 
@@ -621,7 +773,7 @@ func (s *Store) ListRecordIndexes(ctx context.Context, opts model.RecordListOpti
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list record indexes canceled", err)
 	}
 	limit := normaliseRecordLimit(opts.Limit)
-	prefix := recordListPrefix(opts)
+	prefix := s.recordListPrefix(opts)
 	lower, upper := prefixBounds(prefix)
 	iter, err := s.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
@@ -2176,11 +2328,15 @@ func sortSTHAnchorItems(items []model.STHAnchorOutboxItem) {
 	}
 }
 
-func recordListPrefix(opts model.RecordListOptions) string {
+func (s *Store) recordListPrefix(opts model.RecordListOptions) string {
+	useStorageTokens := true
+	if s != nil {
+		useStorageTokens = s.indexStorageTokens
+	}
 	switch {
 	case len(opts.ContentHash) > 0:
 		return prefixRecordByHash + hex.EncodeToString(opts.ContentHash) + "/"
-	case model.RecordStorageQueryToken(opts.Query) != "":
+	case useStorageTokens && model.RecordStorageQueryToken(opts.Query) != "":
 		return prefixRecordByToken + recordSecondaryPart(model.RecordStorageQueryToken(opts.Query)) + "/"
 	case opts.BatchID != "":
 		return prefixRecordByBatch + recordSecondaryPart(opts.BatchID) + "/"
@@ -2217,15 +2373,19 @@ func (s *Store) stageRecordIndexReplace(batch *pdb.Batch, idx, old model.RecordI
 	if err != nil {
 		return err
 	}
+	defer encoded.release()
 	return s.stageEncodedRecordIndexReplace(batch, encoded, old, oldFound)
 }
 
 func (s *Store) stageEncodedRecordIndexReplace(batch *pdb.Batch, idx encodedRecordIndex, old model.RecordIndex, oldFound bool) error {
 	if oldFound {
-		for _, key := range recordIndexKeys(old) {
+		if err := visitRecordIndexKeys(old, true, func(key []byte) error {
 			if err := batch.Delete(key, nil); err != nil {
 				return trusterr.Wrap(trusterr.CodeDataLoss, "stage old record index delete", err)
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 	return s.stageEncodedRecordIndexSet(batch, idx)
@@ -2236,19 +2396,34 @@ func (s *Store) stageRecordIndexSet(batch *pdb.Batch, idx model.RecordIndex) err
 	if err != nil {
 		return err
 	}
+	defer encoded.release()
 	return s.stageEncodedRecordIndexSet(batch, encoded)
 }
 
 func (s *Store) stageEncodedRecordIndexSet(batch *pdb.Batch, idx encodedRecordIndex) error {
-	if err := stageSet(batch, idx.primaryKey, idx.value); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index", err)
+	includeStorageTokens := true
+	if s != nil {
+		includeStorageTokens = s.indexStorageTokens
 	}
-	for _, key := range idx.secondaryKeys {
-		if err := stageSet(batch, key, idx.refValue); err != nil {
+	if err := visitRecordIndexKeys(idx.idx, includeStorageTokens, func(key []byte) error {
+		if isRecordByIDKey(key) {
+			if err := stageSet(batch, key, idx.value); err != nil {
+				return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index", err)
+			}
+			return nil
+		}
+		if err := stageRecordIndexRef(batch, key, idx.idx.RecordID); err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "stage secondary record index", err)
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return nil
+}
+
+func isRecordByIDKey(key []byte) bool {
+	return bytes.HasPrefix(key, recordByIDPrefix)
 }
 
 func (s *Store) replaceGlobalLogOutbox(ctx context.Context, old, next model.GlobalLogOutboxItem) error {

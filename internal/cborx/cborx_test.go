@@ -27,6 +27,23 @@ func TestMarshalDeterministic(t *testing.T) {
 	}
 }
 
+func TestMarshalBufferMatchesMarshal(t *testing.T) {
+	t.Parallel()
+
+	v := sample{A: "x", B: 7}
+	want, err := Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := MarshalBuffer(&buf, v); err != nil {
+		t.Fatalf("MarshalBuffer() error = %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("MarshalBuffer() = %x, want %x", buf.Bytes(), want)
+	}
+}
+
 func TestUnmarshalRejectsDuplicateMapKeys(t *testing.T) {
 	t.Parallel()
 

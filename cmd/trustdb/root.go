@@ -132,6 +132,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("history.tile_size", defaults.History.TileSize)
 	v.SetDefault("history.hot_window_leaves", defaults.History.HotWindowLeaves)
 	v.SetDefault("backup.compression", defaults.Backup.Compression)
+	v.SetDefault("proofstore.index_storage_tokens", defaults.Proofstore.IndexStorageTokens)
 	v.SetDefault("log.level", defaults.Log.Level)
 	v.SetDefault("log.format", defaults.Log.Format)
 	v.SetDefault("log.output", defaults.Log.Output)
@@ -192,6 +193,7 @@ func setDefaults(v *viper.Viper) {
 	bindEnv(v, "history.tile_size", "TRUSTDB_HISTORY_TILE_SIZE")
 	bindEnv(v, "history.hot_window_leaves", "TRUSTDB_HISTORY_HOT_WINDOW_LEAVES")
 	bindEnv(v, "backup.compression", "TRUSTDB_BACKUP_COMPRESSION")
+	bindEnv(v, "proofstore.index_storage_tokens", "TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS")
 	bindEnv(v, "log.level", "TRUSTDB_LOG_LEVEL")
 	bindEnv(v, "log.format", "TRUSTDB_LOG_FORMAT")
 	bindEnv(v, "log.output", "TRUSTDB_LOG_OUTPUT")
@@ -308,6 +310,9 @@ func loadConfig(v *viper.Viper) trustconfig.Config {
 		},
 		Backup: trustconfig.Backup{
 			Compression: v.GetString("backup.compression"),
+		},
+		Proofstore: trustconfig.Proofstore{
+			IndexStorageTokens: v.GetBool("proofstore.index_storage_tokens"),
 		},
 		Log: trustconfig.Log{
 			Level:  v.GetString("log.level"),

@@ -16,10 +16,13 @@ func TestDefaultConfigIsValid(t *testing.T) {
 func TestDefaultYAMLIsStructured(t *testing.T) {
 	t.Parallel()
 
-	for _, section := range []string{"paths:", "identity:", "server:", "registry:", "batch:", "log:", "keys:"} {
+	for _, section := range []string{"paths:", "identity:", "server:", "registry:", "batch:", "proofstore:", "log:", "keys:"} {
 		if !strings.Contains(DefaultYAML, section) {
 			t.Fatalf("default yaml missing section %q", section)
 		}
+	}
+	if !Default().Proofstore.IndexStorageTokens {
+		t.Fatal("default proofstore.index_storage_tokens = false, want true")
 	}
 }
 
