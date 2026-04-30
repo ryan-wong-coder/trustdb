@@ -8,6 +8,7 @@ import (
 
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
+	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
@@ -321,6 +322,7 @@ func (s *Service) commit(items []Accepted) {
 // manifest protocol so that a crash between steps is recoverable from the WAL
 // by rebuilding the deterministic outputs and replaying the remaining writes.
 func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt time.Time, items []Accepted) error {
+	stageStart := time.Now()
 	signed := make([]model.SignedClaim, len(items))
 	records := make([]model.ServerRecord, len(items))
 	accepted := make([]model.AcceptedReceipt, len(items))
@@ -331,8 +333,11 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 		accepted[i] = items[i].Accepted
 		recordIDs[i] = items[i].Record.RecordID
 	}
+	s.observeBatchStage("collect", stageStart)
 
+	stageStart = time.Now()
 	bundles, err := s.engine.CommitBatch(batchID, closedAt, signed, records, accepted)
+	s.observeBatchStage("commit_batch", stageStart)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeInternal, "commit batch", err)
 	}
@@ -352,40 +357,59 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 		ClosedAtUnixN:   closedAt.UnixNano(),
 		PreparedAtUnixN: closedAt.UnixNano(),
 	}
-	if err := s.store.PutManifest(ctx, manifest); err != nil {
+	stageStart = time.Now()
+	err = s.store.PutManifest(ctx, manifest)
+	s.observeBatchStage("manifest_prepare", stageStart)
+	if err != nil {
 		return err
 	}
+	stageStart = time.Now()
 	root, err := s.writeBundlesAndRoot(ctx, batchID, bundles)
+	s.observeBatchStage("artifacts", stageStart)
 	if err != nil {
 		return err
 	}
 	manifest.State = model.BatchStateCommitted
 	manifest.CommittedAtUnixN = time.Now().UTC().UnixNano()
-	if err := s.store.PutManifest(ctx, manifest); err != nil {
+	stageStart = time.Now()
+	err = s.store.PutManifest(ctx, manifest)
+	s.observeBatchStage("manifest_commit", stageStart)
+	if err != nil {
 		return err
 	}
 	// Advance the WAL checkpoint as a best-effort optimization for the next
 	// restart. A failed write here never breaks correctness: replay can
 	// always fall back to scanning the whole WAL and consulting manifests.
-	if err := s.advanceCheckpoint(ctx, manifest); err != nil {
+	stageStart = time.Now()
+	err = s.advanceCheckpoint(ctx, manifest)
+	s.observeBatchStage("checkpoint", stageStart)
+	if err != nil {
 		s.setLastError(err)
 	}
+	stageStart = time.Now()
 	s.fireOnBatchCommitted(ctx, root)
+	s.observeBatchStage("outbox_hook", stageStart)
 	return nil
 }
 
 func (s *Service) writeBundlesAndRoot(ctx context.Context, batchID string, bundles []model.ProofBundle) (model.BatchRoot, error) {
-	for i := range bundles {
-		if err := s.store.PutBundle(ctx, bundles[i]); err != nil {
-			return model.BatchRoot{}, err
-		}
-	}
 	root := model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       batchID,
 		BatchRoot:     bundles[0].CommittedReceipt.BatchRoot,
 		TreeSize:      uint64(len(bundles)),
 		ClosedAtUnixN: bundles[0].CommittedReceipt.ClosedAtUnixN,
+	}
+	if writer, ok := s.store.(proofstore.BatchArtifactWriter); ok {
+		if err := writer.PutBatchArtifacts(ctx, bundles, root); err != nil {
+			return model.BatchRoot{}, err
+		}
+		return root, nil
+	}
+	for i := range bundles {
+		if err := s.store.PutBundle(ctx, bundles[i]); err != nil {
+			return model.BatchRoot{}, err
+		}
 	}
 	if err := s.store.PutRoot(ctx, root); err != nil {
 		return model.BatchRoot{}, err
@@ -547,5 +571,11 @@ func (s *Service) setLastError(err error) {
 func (s *Service) setQueueDepth() {
 	if s.metrics != nil {
 		s.metrics.QueueDepth.WithLabelValues("batch").Set(float64(len(s.queue)))
+	}
+}
+
+func (s *Service) observeBatchStage(stage string, start time.Time) {
+	if s.metrics != nil {
+		s.metrics.BatchStageLatency.WithLabelValues(stage).Observe(time.Since(start).Seconds())
 	}
 }

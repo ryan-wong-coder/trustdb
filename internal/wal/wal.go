@@ -66,6 +66,8 @@ type Options struct {
 	// GroupCommitInterval is used when FsyncMode is group. A zero value
 	// defaults to 10ms to keep latency bounded while avoiding per-record sync.
 	GroupCommitInterval time.Duration
+	OnAppend            func(string, time.Duration)
+	OnFsync             func(string, time.Duration)
 }
 
 // segmentFileExt is the on-disk suffix for each WAL segment. Segments are
@@ -91,6 +93,8 @@ type Writer struct {
 	fsyncMode  string
 	groupEvery time.Duration
 	lastSync   time.Time
+	appendHook func(string, time.Duration)
+	fsyncHook  func(string, time.Duration)
 }
 
 type Record struct {
@@ -200,6 +204,8 @@ func OpenDirWriter(dir string, opts Options) (*Writer, error) {
 		rotateHook: opts.OnRotate,
 		fsyncMode:  normalizeFsyncMode(opts.FsyncMode),
 		groupEvery: normalizeGroupInterval(opts.GroupCommitInterval),
+		appendHook: opts.OnAppend,
+		fsyncHook:  opts.OnFsync,
 	}, nil
 }
 
@@ -212,6 +218,10 @@ func (w *Writer) ActiveSegmentID() uint64 {
 }
 
 func OpenWriter(path string, segmentID uint64) (*Writer, error) {
+	return OpenWriterWithOptions(path, segmentID, Options{FsyncMode: FsyncStrict})
+}
+
+func OpenWriterWithOptions(path string, segmentID uint64, opts Options) (*Writer, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
@@ -236,8 +246,10 @@ func OpenWriter(path string, segmentID uint64) (*Writer, error) {
 		sequence:   state.lastSequence,
 		offset:     state.validBytes,
 		prevHash:   state.lastHash,
-		fsyncMode:  FsyncStrict,
-		groupEvery: normalizeGroupInterval(0),
+		fsyncMode:  normalizeFsyncMode(opts.FsyncMode),
+		groupEvery: normalizeGroupInterval(opts.GroupCommitInterval),
+		appendHook: opts.OnAppend,
+		fsyncHook:  opts.OnFsync,
 	}, nil
 }
 
@@ -252,6 +264,13 @@ func (w *Writer) AppendAt(ctx context.Context, payload []byte, at time.Time) (mo
 	if err := ctx.Err(); err != nil {
 		return model.WALPosition{}, [32]byte{}, err
 	}
+
+	start := time.Now()
+	defer func() {
+		if w.appendHook != nil {
+			w.appendHook(w.fsyncMode, time.Since(start))
+		}
+	}()
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -348,17 +367,27 @@ func (w *Writer) syncAfterAppendLocked() error {
 		if !w.lastSync.IsZero() && now.Sub(w.lastSync) < w.groupEvery {
 			return nil
 		}
+		start := time.Now()
 		if err := w.file.Sync(); err != nil {
 			return err
 		}
+		w.observeFsync(time.Since(start))
 		w.lastSync = now
 		return nil
 	default:
+		start := time.Now()
 		if err := w.file.Sync(); err != nil {
 			return err
 		}
+		w.observeFsync(time.Since(start))
 		w.lastSync = time.Now().UTC()
 		return nil
+	}
+}
+
+func (w *Writer) observeFsync(duration time.Duration) {
+	if w.fsyncHook != nil {
+		w.fsyncHook(w.fsyncMode, duration)
 	}
 }
 
@@ -957,16 +986,20 @@ func readOne(r io.Reader, offset int64, expectedPrev [32]byte) (Record, int64, e
 	if _, err := io.ReadFull(r, trailer); err != nil {
 		return Record{}, 0, fmt.Errorf("wal: truncated trailer at offset %d: %w", offset, err)
 	}
-	crcInput := make([]byte, 0, len(header)+len(payload))
-	crcInput = append(crcInput, header...)
-	crcInput = append(crcInput, payload...)
 	wantCRC := binary.BigEndian.Uint32(trailer[:4])
-	gotCRC := crc32.Checksum(crcInput, crcTable)
+	crc := crc32.New(crcTable)
+	_, _ = crc.Write(header)
+	_, _ = crc.Write(payload)
+	gotCRC := crc.Sum32()
 	if gotCRC != wantCRC {
 		return Record{}, 0, fmt.Errorf("wal: crc mismatch at offset %d", offset)
 	}
-	hashInput := append(crcInput, trailer[:4]...)
-	gotHash := sha256.Sum256(hashInput)
+	h := sha256.New()
+	_, _ = h.Write(header)
+	_, _ = h.Write(payload)
+	_, _ = h.Write(trailer[:4])
+	var gotHash [32]byte
+	copy(gotHash[:], h.Sum(nil))
 	var storedHash [32]byte
 	copy(storedHash[:], trailer[4:])
 	if gotHash != storedHash {

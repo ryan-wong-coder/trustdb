@@ -17,17 +17,19 @@ func TestEmitBenchIngestResultWritesReportFile(t *testing.T) {
 	reportPath := filepath.Join(t.TempDir(), "bench-report.json")
 	var out bytes.Buffer
 	result := benchIngestResult{
-		SchemaVersion:    benchIngestReportSchema,
-		Endpoint:         "http://127.0.0.1:8080",
-		Transport:        "http",
-		Count:            4,
-		Concurrency:      2,
-		PayloadBytes:     256,
-		Submitted:        4,
-		ThroughputPerSec: 12.5,
-		QuerySamples:     benchQuerySummary{Samples: 1, Ready: 1},
-		ProofSamples:     benchProofSummary{Samples: 1, TargetLevel: "L4", Ready: 1},
-		Metrics:          []benchMetricDelta{{Name: "trustdb_pebble_wal_bytes_written_total", Delta: 32, After: 32}},
+		SchemaVersion:         benchIngestReportSchema,
+		Endpoint:              "http://127.0.0.1:8080",
+		Transport:             "http",
+		Count:                 4,
+		Concurrency:           2,
+		PayloadBytes:          256,
+		Submitted:             4,
+		ThroughputPerSec:      12.5,
+		QuerySamples:          benchQuerySummary{Samples: 1, Ready: 1},
+		ImmediateQuerySamples: benchQuerySummary{Samples: 1, Ready: 1},
+		PostProofQuerySamples: benchQuerySummary{Samples: 1, Ready: 1},
+		ProofSamples:          benchProofSummary{Samples: 1, TargetLevel: "L4", Ready: 1},
+		Metrics:               []benchMetricDelta{{Name: "trustdb_pebble_wal_bytes_written_total", Delta: 32, After: 32}},
 	}
 
 	err := emitBenchIngestResult(&runtimeConfig{out: &out}, benchIngestConfig{
@@ -54,30 +56,34 @@ func TestCompareBenchIngestResults(t *testing.T) {
 	t.Parallel()
 
 	baseline := benchIngestResult{
-		SchemaVersion:    benchIngestReportSchema,
-		Endpoint:         "http://baseline",
-		Transport:        "http",
-		Submitted:        100,
-		Failed:           2,
-		ThroughputPerSec: 100,
-		SubmitLatency:    benchLatencySummary{AvgMs: 12, P95Ms: 20, P99Ms: 25},
-		QuerySamples:     benchQuerySummary{Ready: 8, Failed: 1},
-		ProofSamples:     benchProofSummary{Ready: 8, Timeouts: 1, Failed: 0},
+		SchemaVersion:         benchIngestReportSchema,
+		Endpoint:              "http://baseline",
+		Transport:             "http",
+		Submitted:             100,
+		Failed:                2,
+		ThroughputPerSec:      100,
+		SubmitLatency:         benchLatencySummary{AvgMs: 12, P95Ms: 20, P99Ms: 25},
+		QuerySamples:          benchQuerySummary{Ready: 8, Failed: 1},
+		ImmediateQuerySamples: benchQuerySummary{Ready: 8, Failed: 1},
+		PostProofQuerySamples: benchQuerySummary{Ready: 7, Failed: 0},
+		ProofSamples:          benchProofSummary{Ready: 8, Timeouts: 1, Failed: 0},
 		Metrics: []benchMetricDelta{
 			{Name: "trustdb_pebble_wal_bytes_written_total", Delta: 1024},
 			{Name: "trustdb_queue_depth{queue=\"ingest\"}", Delta: 0},
 		},
 	}
 	candidate := benchIngestResult{
-		SchemaVersion:    benchIngestReportSchema,
-		Endpoint:         "http://candidate",
-		Transport:        "grpc",
-		Submitted:        120,
-		Failed:           1,
-		ThroughputPerSec: 150,
-		SubmitLatency:    benchLatencySummary{AvgMs: 10, P95Ms: 18, P99Ms: 22},
-		QuerySamples:     benchQuerySummary{Ready: 8, Failed: 0},
-		ProofSamples:     benchProofSummary{Ready: 8, Timeouts: 0, Failed: 0},
+		SchemaVersion:         benchIngestReportSchema,
+		Endpoint:              "http://candidate",
+		Transport:             "grpc",
+		Submitted:             120,
+		Failed:                1,
+		ThroughputPerSec:      150,
+		SubmitLatency:         benchLatencySummary{AvgMs: 10, P95Ms: 18, P99Ms: 22},
+		QuerySamples:          benchQuerySummary{Ready: 8, Failed: 0},
+		ImmediateQuerySamples: benchQuerySummary{Ready: 8, Failed: 0},
+		PostProofQuerySamples: benchQuerySummary{Ready: 8, Failed: 0},
+		ProofSamples:          benchProofSummary{Ready: 8, Timeouts: 0, Failed: 0},
 		Metrics: []benchMetricDelta{
 			{Name: "trustdb_pebble_wal_bytes_written_total", Delta: 1400},
 			{Name: "trustdb_pebble_memtable_size_bytes", Delta: 64},
@@ -93,6 +99,9 @@ func TestCompareBenchIngestResults(t *testing.T) {
 	}
 	if result.Summary.ThroughputPerSec.DeltaPct == nil || *result.Summary.ThroughputPerSec.DeltaPct != 50 {
 		t.Fatalf("throughput delta pct = %+v", result.Summary.ThroughputPerSec)
+	}
+	if result.Summary.ImmediateQueryFailed.Delta != -1 || result.Summary.PostProofQueryReady.Delta != 1 {
+		t.Fatalf("split query summary = %+v %+v", result.Summary.ImmediateQueryFailed, result.Summary.PostProofQueryReady)
 	}
 	if len(result.Metrics) != 2 {
 		t.Fatalf("metrics len = %d, want 2: %+v", len(result.Metrics), result.Metrics)
@@ -159,29 +168,87 @@ func TestBenchCompareCommandJSON(t *testing.T) {
 	}
 }
 
+func TestReadBenchIngestReportFileAcceptsV1(t *testing.T) {
+	t.Parallel()
+
+	reportPath := filepath.Join(t.TempDir(), "bench-v1.json")
+	if err := writeJSONFile(reportPath, benchIngestResult{
+		SchemaVersion:    benchIngestReportSchemaV1,
+		Endpoint:         "http://legacy",
+		Transport:        "http",
+		Submitted:        11,
+		ThroughputPerSec: 55,
+	}); err != nil {
+		t.Fatalf("write v1 report: %v", err)
+	}
+
+	loaded, err := readBenchIngestReportFile(reportPath)
+	if err != nil {
+		t.Fatalf("readBenchIngestReportFile() error = %v", err)
+	}
+	if loaded.SchemaVersion != benchIngestReportSchemaV1 {
+		t.Fatalf("schema = %q, want %q", loaded.SchemaVersion, benchIngestReportSchemaV1)
+	}
+	if loaded.SubmitThroughputPerSec != loaded.ThroughputPerSec {
+		t.Fatalf("submit throughput fallback = %v, want %v", loaded.SubmitThroughputPerSec, loaded.ThroughputPerSec)
+	}
+	if loaded.SubmitDurationSeconds != float64(loaded.Submitted)/loaded.ThroughputPerSec {
+		t.Fatalf("submit duration fallback = %v", loaded.SubmitDurationSeconds)
+	}
+}
+
+func TestNormalizeBenchIngestResultAcceptsV2(t *testing.T) {
+	t.Parallel()
+
+	loaded := normalizeBenchIngestResult(benchIngestResult{
+		SchemaVersion:        benchIngestReportSchemaV2,
+		Submitted:            10,
+		ThroughputPerSec:     20,
+		QueryDurationSeconds: 0.25,
+		QuerySamples:         benchQuerySummary{Samples: 2, Ready: 1, Failed: 1},
+	})
+	if loaded.SchemaVersion != benchIngestReportSchemaV2 {
+		t.Fatalf("schema = %q, want %q", loaded.SchemaVersion, benchIngestReportSchemaV2)
+	}
+	if loaded.ImmediateQuerySamples.Failed != 1 || loaded.QuerySamples.Failed != 1 {
+		t.Fatalf("query normalization = %+v %+v", loaded.ImmediateQuerySamples, loaded.QuerySamples)
+	}
+	if loaded.ImmediateQueryDurationSeconds != loaded.QueryDurationSeconds {
+		t.Fatalf("query duration normalization = %+v", loaded)
+	}
+}
+
 func TestEvaluateBenchCompareAssertions(t *testing.T) {
 	t.Parallel()
 
 	flags := pflag.NewFlagSet("bench-compare", pflag.ContinueOnError)
 	flags.Float64("min-candidate-throughput", 0, "")
 	flags.Float64("max-throughput-regression-pct", 0, "")
+	flags.Float64("min-candidate-submit-throughput", 0, "")
+	flags.Float64("max-submit-throughput-regression-pct", 0, "")
 	flags.Float64("max-duration-regression-pct", 0, "")
 	flags.Float64("max-submit-p95-regression-pct", 0, "")
 	flags.Float64("max-candidate-submit-p95-ms", 0, "")
 	flags.Int("max-candidate-failed", 0, "")
 	flags.Int("max-candidate-batch-errors", 0, "")
 	flags.Int("max-candidate-query-failed", 0, "")
+	flags.Int("max-candidate-immediate-query-failed", 0, "")
+	flags.Int("max-candidate-post-proof-query-failed", 0, "")
 	flags.Int("max-candidate-proof-timeouts", 0, "")
 	flags.Int("max-candidate-proof-failed", 0, "")
 	args := []string{
 		"--min-candidate-throughput=90",
 		"--max-throughput-regression-pct=15",
+		"--min-candidate-submit-throughput=90",
+		"--max-submit-throughput-regression-pct=15",
 		"--max-duration-regression-pct=10",
 		"--max-submit-p95-regression-pct=25",
 		"--max-candidate-submit-p95-ms=18",
 		"--max-candidate-failed=1",
 		"--max-candidate-batch-errors=0",
 		"--max-candidate-query-failed=0",
+		"--max-candidate-immediate-query-failed=0",
+		"--max-candidate-post-proof-query-failed=0",
 		"--max-candidate-proof-timeouts=0",
 		"--max-candidate-proof-failed=0",
 	}
@@ -193,40 +260,50 @@ func TestEvaluateBenchCompareAssertions(t *testing.T) {
 
 	result := compareBenchIngestResults("baseline.json", "candidate.json",
 		benchIngestResult{
-			SchemaVersion:    benchIngestReportSchema,
-			Submitted:        10,
-			Failed:           0,
-			BatchErrors:      0,
-			DurationSeconds:  10,
-			ThroughputPerSec: 100,
-			SubmitLatency:    benchLatencySummary{P95Ms: 10},
-			QuerySamples:     benchQuerySummary{Failed: 0},
-			ProofSamples:     benchProofSummary{Timeouts: 0, Failed: 0},
+			SchemaVersion:          benchIngestReportSchema,
+			Submitted:              10,
+			Failed:                 0,
+			BatchErrors:            0,
+			DurationSeconds:        10,
+			ThroughputPerSec:       100,
+			SubmitThroughputPerSec: 100,
+			SubmitLatency:          benchLatencySummary{P95Ms: 10},
+			QuerySamples:           benchQuerySummary{Failed: 0},
+			ImmediateQuerySamples:  benchQuerySummary{Failed: 0},
+			PostProofQuerySamples:  benchQuerySummary{Failed: 0},
+			ProofSamples:           benchProofSummary{Timeouts: 0, Failed: 0},
 		},
 		benchIngestResult{
-			SchemaVersion:    benchIngestReportSchema,
-			Submitted:        10,
-			Failed:           2,
-			BatchErrors:      1,
-			DurationSeconds:  12,
-			ThroughputPerSec: 80,
-			SubmitLatency:    benchLatencySummary{P95Ms: 20},
-			QuerySamples:     benchQuerySummary{Failed: 1},
-			ProofSamples:     benchProofSummary{Timeouts: 1, Failed: 1},
+			SchemaVersion:          benchIngestReportSchema,
+			Submitted:              10,
+			Failed:                 2,
+			BatchErrors:            1,
+			DurationSeconds:        12,
+			ThroughputPerSec:       80,
+			SubmitThroughputPerSec: 80,
+			SubmitLatency:          benchLatencySummary{P95Ms: 20},
+			QuerySamples:           benchQuerySummary{Failed: 1},
+			ImmediateQuerySamples:  benchQuerySummary{Failed: 1},
+			PostProofQuerySamples:  benchQuerySummary{Failed: 1},
+			ProofSamples:           benchProofSummary{Timeouts: 1, Failed: 1},
 		},
 	)
 
 	assertions := evaluateBenchCompareAssertions(cmd, benchCompareConfig{
-		MinCandidateThroughput:     90,
-		MaxThroughputRegressionPct: 15,
-		MaxDurationRegressionPct:   10,
-		MaxSubmitP95RegressionPct:  25,
-		MaxCandidateSubmitP95Ms:    18,
-		MaxCandidateFailed:         1,
-		MaxCandidateBatchErrors:    0,
-		MaxCandidateQueryFailed:    0,
-		MaxCandidateProofTimeouts:  0,
-		MaxCandidateProofFailed:    0,
+		MinCandidateThroughput:           90,
+		MaxThroughputRegressionPct:       15,
+		MinCandidateSubmitThroughput:     90,
+		MaxSubmitThroughputRegressionPct: 15,
+		MaxDurationRegressionPct:         10,
+		MaxSubmitP95RegressionPct:        25,
+		MaxCandidateSubmitP95Ms:          18,
+		MaxCandidateFailed:               1,
+		MaxCandidateBatchErrors:          0,
+		MaxCandidateQueryFailed:          0,
+		MaxCandidateImmediateQueryFailed: 0,
+		MaxCandidatePostProofQueryFailed: 0,
+		MaxCandidateProofTimeouts:        0,
+		MaxCandidateProofFailed:          0,
 	}, result)
 	if assertions == nil {
 		t.Fatalf("assertions = nil")

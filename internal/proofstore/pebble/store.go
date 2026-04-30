@@ -6,16 +6,19 @@
 package pebble
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	pdb "github.com/cockroachdb/pebble"
+	"github.com/golang/snappy"
 
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
@@ -26,11 +29,17 @@ import (
 // values that claim to be multi-gigabyte CBOR payloads. Mirrors the same
 // constant in the file backend.
 const maxStoredObjectBytes = 64 << 20
+const (
+	batchArtifactChunkSize       = 1024
+	bundleCompressionMinBytes    = 1024
+	maxBatchArtifactEncodeWorker = 16
+)
 
 var errStopScan = errors.New("stop scan")
 
 const (
 	prefixBundle         = "bundle/"
+	prefixBundleV2       = "bundle-v2/"
 	prefixRecordByID     = "record/by-id/"
 	prefixRecordByTime   = "record/by-time/"
 	prefixRecordByBatch  = "record/by-batch/"
@@ -55,6 +64,33 @@ const (
 	globalStateKey       = "global/state/latest"
 	rootSortKeyWidth     = 20
 )
+
+const (
+	schemaStoredProofBundleV2 = "trustdb.pebble-proof-bundle.v2"
+	storedBundleCodecSnappy   = "snappy"
+)
+
+var recordIndexRefPrefix = []byte("trustdb.record-index-ref.v1\x00")
+
+type storedProofBundleEnvelope struct {
+	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
+	Codec         string `cbor:"codec" json:"codec"`
+	Data          []byte `cbor:"data" json:"data"`
+}
+
+type encodedBatchArtifact struct {
+	recordID    string
+	bundleValue []byte
+	index       encodedRecordIndex
+}
+
+type encodedRecordIndex struct {
+	idx           model.RecordIndex
+	value         []byte
+	primaryKey    []byte
+	secondaryKeys [][]byte
+	refValue      []byte
+}
 
 // Store is a Pebble-backed proof store. It is safe for concurrent use
 // from multiple goroutines; Pebble's internal locking guarantees that
@@ -109,6 +145,10 @@ func (s *Store) PebbleMetrics() *pdb.Metrics {
 // no filename escaping constraints.
 func bundleKey(recordID string) []byte {
 	return append([]byte(prefixBundle), recordID...)
+}
+
+func bundleV2Key(recordID string) []byte {
+	return append([]byte(prefixBundleV2), recordID...)
 }
 
 func recordByIDKey(recordID string) []byte {
@@ -219,6 +259,208 @@ func (s *Store) readCBOR(key []byte, v any) (bool, error) {
 	return true, nil
 }
 
+func encodeStoredProofBundle(bundle model.ProofBundle) ([]byte, error) {
+	if bundle.RecordID == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
+	}
+	raw, err := cborx.Marshal(bundle)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle", err)
+	}
+	if len(raw) < bundleCompressionMinBytes {
+		return raw, nil
+	}
+	compressed := snappy.Encode(nil, raw)
+	if len(compressed) >= len(raw) {
+		return raw, nil
+	}
+	envelope, err := cborx.Marshal(storedProofBundleEnvelope{
+		SchemaVersion: schemaStoredProofBundleV2,
+		Codec:         storedBundleCodecSnappy,
+		Data:          compressed,
+	})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle envelope", err)
+	}
+	return envelope, nil
+}
+
+func decodeStoredProofBundle(data []byte) (model.ProofBundle, error) {
+	var envelope storedProofBundleEnvelope
+	if err := cborx.UnmarshalLimit(data, &envelope, maxStoredObjectBytes); err == nil && envelope.SchemaVersion == schemaStoredProofBundleV2 {
+		if envelope.Codec != storedBundleCodecSnappy {
+			return model.ProofBundle{}, trusterr.New(trusterr.CodeDataLoss, "unsupported proof bundle codec")
+		}
+		decodedLen, err := snappy.DecodedLen(envelope.Data)
+		if err != nil {
+			return model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "decode proof bundle envelope length", err)
+		}
+		if decodedLen > maxStoredObjectBytes {
+			return model.ProofBundle{}, trusterr.New(trusterr.CodeDataLoss, "proof bundle envelope payload too large")
+		}
+		raw, err := snappy.Decode(nil, envelope.Data)
+		if err != nil {
+			return model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "decompress proof bundle", err)
+		}
+		var bundle model.ProofBundle
+		if err := cborx.UnmarshalLimit(raw, &bundle, maxStoredObjectBytes); err != nil {
+			return model.ProofBundle{}, err
+		}
+		return bundle, nil
+	}
+	var bundle model.ProofBundle
+	if err := cborx.UnmarshalLimit(data, &bundle, maxStoredObjectBytes); err != nil {
+		return model.ProofBundle{}, err
+	}
+	return bundle, nil
+}
+
+func (s *Store) readStoredProofBundle(key []byte) (model.ProofBundle, bool, error) {
+	val, closer, err := s.db.Get(key)
+	if err != nil {
+		if isNotFound(err) {
+			return model.ProofBundle{}, false, nil
+		}
+		return model.ProofBundle{}, false, err
+	}
+	defer closer.Close()
+	bundle, err := decodeStoredProofBundle(val)
+	if err != nil {
+		return model.ProofBundle{}, false, err
+	}
+	return bundle, true, nil
+}
+
+func encodeRecordIndexArtifact(idx model.RecordIndex) (encodedRecordIndex, error) {
+	if idx.RecordID == "" {
+		return encodedRecordIndex{}, trusterr.New(trusterr.CodeInvalidArgument, "record index record_id is required")
+	}
+	idx.ProofLevel = model.RecordIndexProofLevel(idx)
+	if idx.SchemaVersion == "" {
+		idx.SchemaVersion = model.SchemaRecordIndex
+	}
+	indexData, err := cborx.Marshal(idx)
+	if err != nil {
+		return encodedRecordIndex{}, trusterr.Wrap(trusterr.CodeDataLoss, "encode record index", err)
+	}
+	keys := recordIndexKeys(idx)
+	return encodedRecordIndex{
+		idx:           idx,
+		value:         indexData,
+		primaryKey:    keys[0],
+		secondaryKeys: keys[1:],
+		refValue:      recordIndexRefValue(idx.RecordID),
+	}, nil
+}
+
+func encodeBatchArtifact(bundle model.ProofBundle) (encodedBatchArtifact, error) {
+	bundleValue, err := encodeStoredProofBundle(bundle)
+	if err != nil {
+		return encodedBatchArtifact{}, err
+	}
+	index, err := encodeRecordIndexArtifact(model.RecordIndexFromBundle(bundle))
+	if err != nil {
+		return encodedBatchArtifact{}, err
+	}
+	return encodedBatchArtifact{recordID: bundle.RecordID, bundleValue: bundleValue, index: index}, nil
+}
+
+func encodeBatchArtifacts(ctx context.Context, bundles []model.ProofBundle) ([]encodedBatchArtifact, error) {
+	artifacts := make([]encodedBatchArtifact, len(bundles))
+	if len(bundles) == 0 {
+		return artifacts, nil
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > maxBatchArtifactEncodeWorker {
+		workers = maxBatchArtifactEncodeWorker
+	}
+	if workers > len(bundles) {
+		workers = len(bundles)
+	}
+	jobs := make(chan int)
+	errs := make([]error, len(bundles))
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := ctx.Err(); err != nil {
+					errs[i] = trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore encode batch artifacts canceled", err)
+					continue
+				}
+				artifact, err := encodeBatchArtifact(bundles[i])
+				if err != nil {
+					errs[i] = err
+					continue
+				}
+				artifacts[i] = artifact
+			}
+		}()
+	}
+	for i := range bundles {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore encode batch artifacts canceled", ctx.Err())
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore encode batch artifacts canceled", err)
+	}
+	for i := range errs {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+	}
+	return artifacts, nil
+}
+
+func stageSet(batch *pdb.Batch, key, value []byte) error {
+	op := batch.SetDeferred(len(key), len(value))
+	copy(op.Key, key)
+	copy(op.Value, value)
+	return op.Finish()
+}
+
+func recordIndexRefValue(recordID string) []byte {
+	value := make([]byte, 0, len(recordIndexRefPrefix)+len(recordID))
+	value = append(value, recordIndexRefPrefix...)
+	value = append(value, recordID...)
+	return value
+}
+
+func decodeRecordIndexRef(value []byte) (string, bool) {
+	if !bytes.HasPrefix(value, recordIndexRefPrefix) {
+		return "", false
+	}
+	recordID := string(value[len(recordIndexRefPrefix):])
+	return recordID, recordID != ""
+}
+
+func (s *Store) readRecordIndexScanValue(value []byte) (model.RecordIndex, error) {
+	if recordID, ok := decodeRecordIndexRef(value); ok {
+		var idx model.RecordIndex
+		found, err := s.readCBOR(recordByIDKey(recordID), &idx)
+		if err != nil {
+			return model.RecordIndex{}, err
+		}
+		if !found {
+			return model.RecordIndex{}, trusterr.New(trusterr.CodeDataLoss, "record index reference target not found")
+		}
+		return idx, nil
+	}
+	var idx model.RecordIndex
+	if err := cborx.UnmarshalLimit(value, &idx, maxStoredObjectBytes); err != nil {
+		return model.RecordIndex{}, err
+	}
+	return idx, nil
+}
+
 func (s *Store) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put bundle canceled", err)
@@ -226,11 +468,10 @@ func (s *Store) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
 	if bundle.RecordID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
 	}
-	bundleData, err := cborx.Marshal(bundle)
+	artifact, err := encodeBatchArtifact(bundle)
 	if err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "encode proof bundle", err)
+		return err
 	}
-	idx := model.RecordIndexFromBundle(bundle)
 	var old model.RecordIndex
 	oldFound, err := s.readCBOR(recordByIDKey(bundle.RecordID), &old)
 	if err != nil {
@@ -238,16 +479,78 @@ func (s *Store) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
 	}
 	batch := s.db.NewBatch()
 	defer batch.Close()
-	if err := batch.Set(bundleKey(bundle.RecordID), bundleData, nil); err != nil {
+	if err := stageSet(batch, bundleV2Key(bundle.RecordID), artifact.bundleValue); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "stage proof bundle", err)
 	}
-	if err := s.stageRecordIndexReplace(batch, idx, old, oldFound); err != nil {
+	if err := s.stageEncodedRecordIndexReplace(batch, artifact.index, old, oldFound); err != nil {
 		return err
 	}
 	if err := batch.Commit(pdb.Sync); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "commit proof bundle", err)
 	}
 	return nil
+}
+
+func (s *Store) PutBatchArtifacts(ctx context.Context, bundles []model.ProofBundle, root model.BatchRoot) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch artifacts canceled", err)
+	}
+	if len(bundles) == 0 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "proofstore batch artifacts require at least one bundle")
+	}
+	root, err := normalizeBatchRoot(root, len(bundles))
+	if err != nil {
+		return err
+	}
+	artifacts, err := encodeBatchArtifacts(ctx, bundles)
+	if err != nil {
+		return err
+	}
+	for start := 0; start < len(artifacts); start += batchArtifactChunkSize {
+		end := start + batchArtifactChunkSize
+		if end > len(artifacts) {
+			end = len(artifacts)
+		}
+		if err := ctx.Err(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch artifacts canceled", err)
+		}
+		batch := s.db.NewBatch()
+		for i := start; i < end; i++ {
+			if err := s.stageEncodedBatchArtifact(batch, artifacts[i]); err != nil {
+				_ = batch.Close()
+				return err
+			}
+		}
+		if end == len(artifacts) {
+			if err := s.stageRoot(batch, root); err != nil {
+				_ = batch.Close()
+				return err
+			}
+		}
+		if err := batch.Commit(pdb.Sync); err != nil {
+			_ = batch.Close()
+			return trusterr.Wrap(trusterr.CodeDataLoss, "commit batch artifacts", err)
+		}
+		if err := batch.Close(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "close batch artifacts", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) stageNewBundle(batch *pdb.Batch, bundle model.ProofBundle) error {
+	artifact, err := encodeBatchArtifact(bundle)
+	if err != nil {
+		return err
+	}
+	return s.stageEncodedBatchArtifact(batch, artifact)
+}
+
+func (s *Store) stageEncodedBatchArtifact(batch *pdb.Batch, artifact encodedBatchArtifact) error {
+	if err := stageSet(batch, bundleV2Key(artifact.recordID), artifact.bundleValue); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage proof bundle", err)
+	}
+	return s.stageEncodedRecordIndexSet(batch, artifact.index)
 }
 
 func (s *Store) PutRecordIndex(ctx context.Context, idx model.RecordIndex) error {
@@ -281,14 +584,21 @@ func (s *Store) GetBundle(ctx context.Context, recordID string) (model.ProofBund
 		return model.ProofBundle{}, trusterr.New(trusterr.CodeInvalidArgument, "record_id is required")
 	}
 	var bundle model.ProofBundle
-	found, err := s.readCBOR(bundleKey(recordID), &bundle)
+	bundle, found, err := s.readStoredProofBundle(bundleV2Key(recordID))
 	if err != nil {
 		return model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "read proof bundle", err)
 	}
-	if !found {
-		return model.ProofBundle{}, trusterr.New(trusterr.CodeNotFound, "proof bundle not found")
+	if found {
+		return bundle, nil
 	}
-	return bundle, nil
+	found, err = s.readCBOR(bundleKey(recordID), &bundle)
+	if err != nil {
+		return model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "read legacy proof bundle", err)
+	}
+	if found {
+		return bundle, nil
+	}
+	return model.ProofBundle{}, trusterr.New(trusterr.CodeNotFound, "proof bundle not found")
 }
 
 func (s *Store) GetRecordIndex(ctx context.Context, recordID string) (model.RecordIndex, bool, error) {
@@ -346,8 +656,8 @@ func (s *Store) ListRecordIndexes(ctx context.Context, opts model.RecordListOpti
 		if len(records) >= limit {
 			break
 		}
-		var idx model.RecordIndex
-		if err := cborx.UnmarshalLimit(iter.Value(), &idx, maxStoredObjectBytes); err != nil {
+		idx, err := s.readRecordIndexScanValue(iter.Value())
+		if err != nil {
 			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode record index", err)
 		}
 		if recordRangeExhausted(idx, opts, desc) {
@@ -372,17 +682,44 @@ func (s *Store) PutRoot(ctx context.Context, root model.BatchRoot) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put root canceled", err)
 	}
+	root, err := normalizeBatchRoot(root, 0)
+	if err != nil {
+		return err
+	}
+	if err := s.writeCBOR(rootKey(root.ClosedAtUnixN, root.BatchID), root); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "write batch root", err)
+	}
+	return nil
+}
+
+func normalizeBatchRoot(root model.BatchRoot, expectedTreeSize int) (model.BatchRoot, error) {
 	if root.BatchID == "" {
-		return trusterr.New(trusterr.CodeInvalidArgument, "batch root batch_id is required")
+		return model.BatchRoot{}, trusterr.New(trusterr.CodeInvalidArgument, "batch root batch_id is required")
 	}
 	if root.SchemaVersion == "" {
 		root.SchemaVersion = model.SchemaBatchRoot
 	}
+	if expectedTreeSize > 0 {
+		if root.TreeSize == 0 {
+			root.TreeSize = uint64(expectedTreeSize)
+		}
+		if root.TreeSize != uint64(expectedTreeSize) {
+			return model.BatchRoot{}, trusterr.New(trusterr.CodeInvalidArgument, "batch root tree_size does not match bundle count")
+		}
+	}
 	if root.ClosedAtUnixN == 0 {
 		root.ClosedAtUnixN = time.Now().UTC().UnixNano()
 	}
-	if err := s.writeCBOR(rootKey(root.ClosedAtUnixN, root.BatchID), root); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "write batch root", err)
+	return root, nil
+}
+
+func (s *Store) stageRoot(batch *pdb.Batch, root model.BatchRoot) error {
+	rootData, err := cborx.Marshal(root)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "encode batch root", err)
+	}
+	if err := stageSet(batch, rootKey(root.ClosedAtUnixN, root.BatchID), rootData); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage batch root", err)
 	}
 	return nil
 }
@@ -1876,14 +2213,14 @@ func recordRangeExhausted(idx model.RecordIndex, opts model.RecordListOptions, d
 }
 
 func (s *Store) stageRecordIndexReplace(batch *pdb.Batch, idx, old model.RecordIndex, oldFound bool) error {
-	idx.ProofLevel = model.RecordIndexProofLevel(idx)
-	if idx.SchemaVersion == "" {
-		idx.SchemaVersion = model.SchemaRecordIndex
-	}
-	indexData, err := cborx.Marshal(idx)
+	encoded, err := encodeRecordIndexArtifact(idx)
 	if err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "encode record index", err)
+		return err
 	}
+	return s.stageEncodedRecordIndexReplace(batch, encoded, old, oldFound)
+}
+
+func (s *Store) stageEncodedRecordIndexReplace(batch *pdb.Batch, idx encodedRecordIndex, old model.RecordIndex, oldFound bool) error {
 	if oldFound {
 		for _, key := range recordIndexKeys(old) {
 			if err := batch.Delete(key, nil); err != nil {
@@ -1891,9 +2228,24 @@ func (s *Store) stageRecordIndexReplace(batch *pdb.Batch, idx, old model.RecordI
 			}
 		}
 	}
-	for _, key := range recordIndexKeys(idx) {
-		if err := batch.Set(key, indexData, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index", err)
+	return s.stageEncodedRecordIndexSet(batch, idx)
+}
+
+func (s *Store) stageRecordIndexSet(batch *pdb.Batch, idx model.RecordIndex) error {
+	encoded, err := encodeRecordIndexArtifact(idx)
+	if err != nil {
+		return err
+	}
+	return s.stageEncodedRecordIndexSet(batch, encoded)
+}
+
+func (s *Store) stageEncodedRecordIndexSet(batch *pdb.Batch, idx encodedRecordIndex) error {
+	if err := stageSet(batch, idx.primaryKey, idx.value); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage record index", err)
+	}
+	for _, key := range idx.secondaryKeys {
+		if err := stageSet(batch, key, idx.refValue); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage secondary record index", err)
 		}
 	}
 	return nil
@@ -1931,25 +2283,53 @@ func (s *Store) promoteBatchRecords(ctx context.Context, batchID, proofLevel str
 		return nil
 	}
 	prefix := prefixRecordByBatch + recordSecondaryPart(batchID) + "/"
-	updates := make([]model.RecordIndex, 0, 16)
+	updates := make([]recordIndexPromotion, 0, 16)
 	err := s.scanPrefix(ctx, prefix, func(value []byte) error {
-		var idx model.RecordIndex
-		if err := cborx.UnmarshalLimit(value, &idx, maxStoredObjectBytes); err != nil {
+		idx, err := s.readRecordIndexScanValue(value)
+		if err != nil {
 			return err
 		}
 		if model.ProofLevelRank(model.RecordIndexProofLevel(idx)) >= model.ProofLevelRank(proofLevel) {
 			return nil
 		}
-		idx.ProofLevel = proofLevel
-		updates = append(updates, idx)
+		next := idx
+		next.ProofLevel = proofLevel
+		updates = append(updates, recordIndexPromotion{old: idx, next: next})
 		return nil
 	})
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "scan batch record indexes", err)
 	}
-	for _, idx := range updates {
-		if err := s.PutRecordIndex(ctx, idx); err != nil {
-			return err
+	return s.commitRecordIndexPromotions(ctx, updates)
+}
+
+type recordIndexPromotion struct {
+	old  model.RecordIndex
+	next model.RecordIndex
+}
+
+func (s *Store) commitRecordIndexPromotions(ctx context.Context, updates []recordIndexPromotion) error {
+	for start := 0; start < len(updates); start += batchArtifactChunkSize {
+		end := start + batchArtifactChunkSize
+		if end > len(updates) {
+			end = len(updates)
+		}
+		if err := ctx.Err(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore promote batch records canceled", err)
+		}
+		batch := s.db.NewBatch()
+		for i := start; i < end; i++ {
+			if err := s.stageRecordIndexReplace(batch, updates[i].next, updates[i].old, true); err != nil {
+				_ = batch.Close()
+				return err
+			}
+		}
+		if err := batch.Commit(pdb.Sync); err != nil {
+			_ = batch.Close()
+			return trusterr.Wrap(trusterr.CodeDataLoss, "commit promoted record indexes", err)
+		}
+		if err := batch.Close(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "close promoted record indexes", err)
 		}
 	}
 	return nil

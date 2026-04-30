@@ -26,6 +26,13 @@ func (t *httpTransport) Endpoint() string {
 	return t.baseURL
 }
 
+func (t *httpTransport) Close() error {
+	if t.httpClient != nil {
+		t.httpClient.CloseIdleConnections()
+	}
+	return nil
+}
+
 func (t *httpTransport) CheckHealth(ctx context.Context) HealthStatus {
 	start := time.Now()
 	var out struct {

@@ -93,6 +93,9 @@ func TestRunBenchIngest(t *testing.T) {
 	if result.QuerySamples.Ready != 2 || result.ProofSamples.Ready != 2 {
 		t.Fatalf("query/proof samples = %+v %+v", result.QuerySamples, result.ProofSamples)
 	}
+	if result.ImmediateQuerySamples.Ready != 2 || result.PostProofQuerySamples.Ready != 2 {
+		t.Fatalf("split query samples = %+v %+v", result.ImmediateQuerySamples, result.PostProofQuerySamples)
+	}
 	if result.SubmitLatency.Count != 4 {
 		t.Fatalf("submit latency count = %+v", result.SubmitLatency)
 	}
@@ -101,6 +104,50 @@ func TestRunBenchIngest(t *testing.T) {
 	}
 	if result.DurationSeconds < 0 || result.ThroughputPerSec < 0 {
 		t.Fatalf("duration/throughput = %v %v", result.DurationSeconds, result.ThroughputPerSec)
+	}
+}
+
+func TestRunBenchIngestSplitsImmediateAndPostProofQueries(t *testing.T) {
+	t.Parallel()
+
+	_, priv, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key() error = %v", err)
+	}
+	client, err := sdk.NewClientWithTransport(&fakeBenchVisibilityTransport{})
+	if err != nil {
+		t.Fatalf("NewClientWithTransport() error = %v", err)
+	}
+
+	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
+		Endpoint:      "bench://fake",
+		Transport:     "http",
+		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Count:         1,
+		Concurrency:   1,
+		PayloadBytes:  128,
+		ProgressEvery: 0,
+		Samples:       1,
+		ProofLevel:    sdk.ProofLevelL3,
+		ProofTimeout:  500 * time.Millisecond,
+		Settle:        0,
+		EventType:     "bench.synthetic",
+		Source:        "bench-test",
+	})
+	if err != nil {
+		t.Fatalf("runBenchIngest() error = %v", err)
+	}
+	if result.ImmediateQuerySamples.Failed != 1 || result.ImmediateQuerySamples.Ready != 0 {
+		t.Fatalf("immediate query samples = %+v", result.ImmediateQuerySamples)
+	}
+	if result.ProofSamples.Ready != 1 || result.PostProofQuerySamples.Ready != 1 || result.PostProofQuerySamples.Failed != 0 {
+		t.Fatalf("proof/post-proof samples = %+v %+v", result.ProofSamples, result.PostProofQuerySamples)
+	}
+	if result.QuerySamples.Failed != result.ImmediateQuerySamples.Failed {
+		t.Fatalf("legacy query samples should alias immediate query: %+v vs %+v", result.QuerySamples, result.ImmediateQuerySamples)
+	}
+	if len(result.ErrorSamples) == 0 || !strings.Contains(result.ErrorSamples[0], "immediate query") {
+		t.Fatalf("error samples = %+v", result.ErrorSamples)
 	}
 }
 
@@ -129,6 +176,16 @@ func TestWriteBenchIngestText(t *testing.T) {
 			Ready:   2,
 			Latency: benchLatencySummary{AvgMs: 5, P95Ms: 9},
 		},
+		ImmediateQuerySamples: benchQuerySummary{
+			Samples: 2,
+			Ready:   2,
+			Latency: benchLatencySummary{AvgMs: 5, P95Ms: 9},
+		},
+		PostProofQuerySamples: benchQuerySummary{
+			Samples: 2,
+			Ready:   2,
+			Latency: benchLatencySummary{AvgMs: 6, P95Ms: 10},
+		},
 		ProofSamples: benchProofSummary{
 			Samples:     2,
 			TargetLevel: sdk.ProofLevelL4,
@@ -141,6 +198,8 @@ func TestWriteBenchIngestText(t *testing.T) {
 	for _, want := range []string{
 		"endpoint: http://127.0.0.1:8080",
 		"throughput_per_sec: 100.50",
+		"immediate_query_samples: total=2 ready=2 failed=0",
+		"post_proof_query_samples: total=2 ready=2 failed=0",
 		"proof_samples: total=2 target=L4 ready=2",
 		`trustdb_ingest_requests_total{result="accepted"} delta=10.000000 after=10.000000`,
 	} {
@@ -154,6 +213,25 @@ type fakeBenchTransport struct {
 	mu           sync.Mutex
 	submits      int
 	metricsCalls int
+}
+
+type fakeBenchVisibilityTransport struct {
+	fakeBenchTransport
+	recordMu    sync.Mutex
+	recordCalls map[string]int
+}
+
+func (f *fakeBenchVisibilityTransport) GetRecord(_ context.Context, recordID string) (sdk.RecordIndex, error) {
+	f.recordMu.Lock()
+	defer f.recordMu.Unlock()
+	if f.recordCalls == nil {
+		f.recordCalls = make(map[string]int)
+	}
+	f.recordCalls[recordID]++
+	if f.recordCalls[recordID] == 1 {
+		return model.RecordIndex{}, &sdk.Error{StatusCode: 404, Code: "NOT_FOUND", Message: "record not visible yet"}
+	}
+	return model.RecordIndex{RecordID: recordID, BatchID: "batch-bench-1"}, nil
 }
 
 func (f *fakeBenchTransport) Endpoint() string { return "bench://fake" }

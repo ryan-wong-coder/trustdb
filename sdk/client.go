@@ -14,6 +14,7 @@ import (
 )
 
 const defaultHTTPTimeout = 15 * time.Second
+const defaultHTTPConcurrency = 64
 
 type Transport interface {
 	Endpoint() string
@@ -55,6 +56,39 @@ func WithUserAgent(userAgent string) Option {
 	}
 }
 
+func WithHTTPTransport(transport http.RoundTripper) Option {
+	return func(t *httpTransport) {
+		if transport != nil {
+			t.httpClient.Transport = transport
+		}
+	}
+}
+
+func NewHTTPClientForConcurrency(concurrency int) *http.Client {
+	return &http.Client{
+		Timeout:   defaultHTTPTimeout,
+		Transport: NewHTTPTransportForConcurrency(concurrency),
+	}
+}
+
+func NewHTTPTransportForConcurrency(concurrency int) *http.Transport {
+	if concurrency <= 0 {
+		concurrency = defaultHTTPConcurrency
+	}
+	maxPerHost := concurrency * 2
+	if maxPerHost < defaultHTTPConcurrency {
+		maxPerHost = defaultHTTPConcurrency
+	}
+	base, _ := http.DefaultTransport.(*http.Transport)
+	transport := base.Clone()
+	transport.MaxIdleConns = maxPerHost * 2
+	transport.MaxIdleConnsPerHost = maxPerHost
+	transport.MaxConnsPerHost = maxPerHost
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.ForceAttemptHTTP2 = true
+	return transport
+}
+
 func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	trimmed := strings.TrimSpace(baseURL)
 	if trimmed == "" {
@@ -68,11 +102,9 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("sdk: server url must include scheme and host: %s", trimmed)
 	}
 	transport := &httpTransport{
-		baseURL: strings.TrimRight(trimmed, "/"),
-		httpClient: &http.Client{
-			Timeout: defaultHTTPTimeout,
-		},
-		userAgent: "trustdb-go-sdk",
+		baseURL:    strings.TrimRight(trimmed, "/"),
+		httpClient: NewHTTPClientForConcurrency(defaultHTTPConcurrency),
+		userAgent:  "trustdb-go-sdk",
 	}
 	for _, apply := range opts {
 		apply(transport)

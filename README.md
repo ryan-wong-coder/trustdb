@@ -16,6 +16,13 @@ github.com/ryan-wong-coder/trustdb
 
 License: AGPL-3.0-only. See [LICENSE](LICENSE).
 
+## Performance Report
+
+The optimized single-node CVM performance test report is available in English and Chinese:
+
+- [TrustDB Optimized Single-Node Performance Report](docs/performance/trustdb-performance-report-2026-04-30.en.md)
+- [TrustDB 优化后单机性能测试报告](docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md)
+
 ## Desktop Client
 
 ![TrustDB desktop client overview](assets/readme/desktop-overview.png)

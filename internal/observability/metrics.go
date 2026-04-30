@@ -16,6 +16,7 @@ type Metrics struct {
 	QueueDepth         *prometheus.GaugeVec
 	BatchSizeRecords   prometheus.Histogram
 	BatchCommitLatency prometheus.Histogram
+	BatchStageLatency  *prometheus.HistogramVec
 	MerkleBuildLatency prometheus.Histogram
 	AnchorPending      prometheus.Gauge
 	AnchorLatency      prometheus.Histogram
@@ -116,6 +117,11 @@ func NewMetrics() *Metrics {
 			Help:    "Batch commit latency in seconds.",
 			Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
 		}),
+		BatchStageLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "trustdb_batch_stage_latency_seconds",
+			Help:    "Batch worker stage latency in seconds.",
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 18),
+		}, []string{"stage"}),
 		MerkleBuildLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "trustdb_merkle_build_latency_seconds",
 			Help:    "Merkle tree build latency in seconds.",
@@ -186,6 +192,7 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 		m.QueueDepth,
 		m.BatchSizeRecords,
 		m.BatchCommitLatency,
+		m.BatchStageLatency,
 		m.MerkleBuildLatency,
 		m.AnchorPending,
 		m.AnchorLatency,

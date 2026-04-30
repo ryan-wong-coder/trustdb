@@ -109,7 +109,7 @@ func newBenchIngestCommand(rt *runtimeConfig) *cobra.Command {
 			}
 			cfg.Identity.PrivateKey = priv
 
-			client, err := newBenchSDKClient(cfg.Transport, cfg.Endpoint)
+			client, err := newBenchSDKClient(cfg.Transport, cfg.Endpoint, cfg.Concurrency)
 			if err != nil {
 				return err
 			}
@@ -162,25 +162,34 @@ type benchIngestConfig struct {
 }
 
 type benchIngestResult struct {
-	SchemaVersion    string              `json:"schema_version"`
-	Endpoint         string              `json:"endpoint"`
-	Transport        string              `json:"transport"`
-	Count            int                 `json:"count"`
-	Concurrency      int                 `json:"concurrency"`
-	PayloadBytes     int                 `json:"payload_bytes"`
-	StartedAt        time.Time           `json:"started_at"`
-	FinishedAt       time.Time           `json:"finished_at"`
-	DurationSeconds  float64             `json:"duration_seconds"`
-	Submitted        int                 `json:"submitted"`
-	Failed           int                 `json:"failed"`
-	BatchErrors      int                 `json:"batch_errors"`
-	ThroughputPerSec float64             `json:"throughput_per_sec"`
-	SubmitLatency    benchLatencySummary `json:"submit_latency"`
-	QuerySamples     benchQuerySummary   `json:"query_samples"`
-	ProofSamples     benchProofSummary   `json:"proof_samples"`
-	Metrics          []benchMetricDelta  `json:"metrics"`
-	ErrorSamples     []string            `json:"error_samples,omitempty"`
-	Records          []benchRecordSample `json:"records,omitempty"`
+	SchemaVersion                 string              `json:"schema_version"`
+	Endpoint                      string              `json:"endpoint"`
+	Transport                     string              `json:"transport"`
+	Count                         int                 `json:"count"`
+	Concurrency                   int                 `json:"concurrency"`
+	PayloadBytes                  int                 `json:"payload_bytes"`
+	StartedAt                     time.Time           `json:"started_at"`
+	FinishedAt                    time.Time           `json:"finished_at"`
+	DurationSeconds               float64             `json:"duration_seconds"`
+	SubmitDurationSeconds         float64             `json:"submit_duration_seconds,omitempty"`
+	SubmitThroughputPerSec        float64             `json:"submit_throughput_per_sec,omitempty"`
+	QueryDurationSeconds          float64             `json:"query_duration_seconds,omitempty"`
+	ImmediateQueryDurationSeconds float64             `json:"immediate_query_duration_seconds,omitempty"`
+	PostProofQueryDurationSeconds float64             `json:"post_proof_query_duration_seconds,omitempty"`
+	ProofWaitDurationSeconds      float64             `json:"proof_wait_duration_seconds,omitempty"`
+	SettleDurationSeconds         float64             `json:"settle_duration_seconds,omitempty"`
+	Submitted                     int                 `json:"submitted"`
+	Failed                        int                 `json:"failed"`
+	BatchErrors                   int                 `json:"batch_errors"`
+	ThroughputPerSec              float64             `json:"throughput_per_sec"`
+	SubmitLatency                 benchLatencySummary `json:"submit_latency"`
+	QuerySamples                  benchQuerySummary   `json:"query_samples"`
+	ImmediateQuerySamples         benchQuerySummary   `json:"immediate_query_samples"`
+	PostProofQuerySamples         benchQuerySummary   `json:"post_proof_query_samples"`
+	ProofSamples                  benchProofSummary   `json:"proof_samples"`
+	Metrics                       []benchMetricDelta  `json:"metrics"`
+	ErrorSamples                  []string            `json:"error_samples,omitempty"`
+	Records                       []benchRecordSample `json:"records,omitempty"`
 }
 
 type benchLatencySummary struct {
@@ -240,7 +249,8 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 
 	started := time.Now().UTC()
 	submitStats := newBenchLatencyHistogram()
-	recordStats := newBenchLatencyHistogram()
+	immediateQueryStats := newBenchLatencyHistogram()
+	postProofQueryStats := newBenchLatencyHistogram()
 	proofStats := newBenchLatencyHistogram()
 	jobCh := make(chan int)
 	outcomeCh := make(chan benchSubmitOutcome, cfg.Concurrency)
@@ -345,23 +355,33 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 				Msg("bench ingest progress")
 		}
 	}
+	submitFinished := time.Now().UTC()
+	submitDuration := submitFinished.Sub(started)
 
-	queryReady := 0
-	queryFailed := 0
+	immediateQueryReady := 0
+	immediateQueryFailed := 0
+	postProofQueryReady := 0
+	postProofQueryFailed := 0
+	postProofQuerySamples := 0
 	proofReady := 0
 	proofFailed := 0
 	proofTimeouts := 0
+	var immediateQueryDuration time.Duration
+	var postProofQueryDuration time.Duration
+	var proofWaitDuration time.Duration
 	for i := range samples {
 		recordStart := time.Now()
 		record, err := client.GetRecord(ctx, samples[i].RecordID)
+		recordElapsed := time.Since(recordStart)
+		immediateQueryDuration += recordElapsed
 		if err != nil {
-			queryFailed++
+			immediateQueryFailed++
 			if len(errorSamples) < cap(errorSamples) {
-				errorSamples = append(errorSamples, fmt.Sprintf("get record %s: %v", samples[i].RecordID, err))
+				errorSamples = append(errorSamples, fmt.Sprintf("immediate query %s: %v", samples[i].RecordID, err))
 			}
 		} else {
-			queryReady++
-			recordStats.Observe(time.Since(recordStart))
+			immediateQueryReady++
+			immediateQueryStats.Observe(recordElapsed)
 			samples[i].BatchID = record.BatchID
 		}
 
@@ -370,10 +390,27 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 		}
 		proofStart := time.Now()
 		waitErr := waitForBenchProofLevel(ctx, client, samples[i].RecordID, cfg.ProofLevel, cfg.ProofTimeout)
+		proofElapsed := time.Since(proofStart)
+		proofWaitDuration += proofElapsed
 		switch {
 		case waitErr == nil:
 			proofReady++
-			proofStats.Observe(time.Since(proofStart))
+			proofStats.Observe(proofElapsed)
+			postProofQuerySamples++
+			recordStart := time.Now()
+			record, err := client.GetRecord(ctx, samples[i].RecordID)
+			recordElapsed := time.Since(recordStart)
+			postProofQueryDuration += recordElapsed
+			if err != nil {
+				postProofQueryFailed++
+				if len(errorSamples) < cap(errorSamples) {
+					errorSamples = append(errorSamples, fmt.Sprintf("post-proof query %s: %v", samples[i].RecordID, err))
+				}
+			} else {
+				postProofQueryReady++
+				postProofQueryStats.Observe(recordElapsed)
+				samples[i].BatchID = record.BatchID
+			}
 		case errors.Is(waitErr, errBenchProofTimeout):
 			proofTimeouts++
 			if len(errorSamples) < cap(errorSamples) {
@@ -387,9 +424,12 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 		}
 	}
 
+	var settleDuration time.Duration
 	if cfg.Settle > 0 {
+		settleStart := time.Now()
 		select {
 		case <-time.After(cfg.Settle):
+			settleDuration = time.Since(settleStart)
 		case <-ctx.Done():
 			return benchIngestResult{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "bench ingest canceled during settle", ctx.Err())
 		}
@@ -403,35 +443,46 @@ func runBenchIngest(ctx context.Context, rt *runtimeConfig, client *sdk.Client, 
 	finished := time.Now().UTC()
 	duration := finished.Sub(started)
 	result := benchIngestResult{
-		SchemaVersion:   benchIngestReportSchema,
-		Endpoint:        cfg.Endpoint,
-		Transport:       cfg.Transport,
-		Count:           cfg.Count,
-		Concurrency:     cfg.Concurrency,
-		PayloadBytes:    cfg.PayloadBytes,
-		StartedAt:       started,
-		FinishedAt:      finished,
-		DurationSeconds: duration.Seconds(),
-		Submitted:       submitted,
-		Failed:          failed,
-		BatchErrors:     batchErrors,
-		SubmitLatency:   submitStats.Summary(),
-		QuerySamples:    benchQuerySummary{Samples: len(samples), Ready: queryReady, Failed: queryFailed, Latency: recordStats.Summary()},
-		ProofSamples:    benchProofSummary{Samples: len(samples), TargetLevel: cfg.ProofLevel, Ready: proofReady, Timeouts: proofTimeouts, Failed: proofFailed, Latency: proofStats.Summary()},
-		Metrics:         diffBenchMetrics(beforeMetrics, afterMetrics),
-		ErrorSamples:    errorSamples,
-		Records:         samples,
+		SchemaVersion:                 benchIngestReportSchema,
+		Endpoint:                      cfg.Endpoint,
+		Transport:                     cfg.Transport,
+		Count:                         cfg.Count,
+		Concurrency:                   cfg.Concurrency,
+		PayloadBytes:                  cfg.PayloadBytes,
+		StartedAt:                     started,
+		FinishedAt:                    finished,
+		DurationSeconds:               duration.Seconds(),
+		SubmitDurationSeconds:         submitDuration.Seconds(),
+		QueryDurationSeconds:          immediateQueryDuration.Seconds(),
+		ImmediateQueryDurationSeconds: immediateQueryDuration.Seconds(),
+		PostProofQueryDurationSeconds: postProofQueryDuration.Seconds(),
+		ProofWaitDurationSeconds:      proofWaitDuration.Seconds(),
+		SettleDurationSeconds:         settleDuration.Seconds(),
+		Submitted:                     submitted,
+		Failed:                        failed,
+		BatchErrors:                   batchErrors,
+		SubmitLatency:                 submitStats.Summary(),
+		QuerySamples:                  benchQuerySummary{Samples: len(samples), Ready: immediateQueryReady, Failed: immediateQueryFailed, Latency: immediateQueryStats.Summary()},
+		ImmediateQuerySamples:         benchQuerySummary{Samples: len(samples), Ready: immediateQueryReady, Failed: immediateQueryFailed, Latency: immediateQueryStats.Summary()},
+		PostProofQuerySamples:         benchQuerySummary{Samples: postProofQuerySamples, Ready: postProofQueryReady, Failed: postProofQueryFailed, Latency: postProofQueryStats.Summary()},
+		ProofSamples:                  benchProofSummary{Samples: len(samples), TargetLevel: cfg.ProofLevel, Ready: proofReady, Timeouts: proofTimeouts, Failed: proofFailed, Latency: proofStats.Summary()},
+		Metrics:                       diffBenchMetrics(beforeMetrics, afterMetrics),
+		ErrorSamples:                  errorSamples,
+		Records:                       samples,
 	}
 	if duration > 0 {
 		result.ThroughputPerSec = float64(submitted) / duration.Seconds()
 	}
+	if submitDuration > 0 {
+		result.SubmitThroughputPerSec = float64(submitted) / submitDuration.Seconds()
+	}
 	return result, nil
 }
 
-func newBenchSDKClient(transport, endpoint string) (*sdk.Client, error) {
+func newBenchSDKClient(transport, endpoint string, concurrency int) (*sdk.Client, error) {
 	switch strings.ToLower(strings.TrimSpace(transport)) {
 	case "http":
-		return sdk.NewClient(endpoint)
+		return sdk.NewClient(endpoint, sdk.WithHTTPClient(sdk.NewHTTPClientForConcurrency(concurrency)))
 	case "grpc":
 		return sdk.NewGRPCClient(endpoint)
 	default:
@@ -496,6 +547,7 @@ var benchMetricPrefixes = []string{
 	"trustdb_wal_append_latency_seconds",
 	"trustdb_wal_fsync_latency_seconds",
 	"trustdb_batch_commit_latency_seconds",
+	"trustdb_batch_stage_latency_seconds",
 	"trustdb_batch_size_records",
 	"trustdb_merkle_build_latency_seconds",
 	"trustdb_anchor_published_total",
@@ -716,6 +768,13 @@ func writeBenchIngestText(w io.Writer, result benchIngestResult) {
 	fmt.Fprintf(w, "batch_errors: %d\n", result.BatchErrors)
 	fmt.Fprintf(w, "duration_seconds: %.3f\n", result.DurationSeconds)
 	fmt.Fprintf(w, "throughput_per_sec: %.2f\n", result.ThroughputPerSec)
+	fmt.Fprintf(w, "submit_duration_seconds: %.3f\n", result.SubmitDurationSeconds)
+	fmt.Fprintf(w, "submit_throughput_per_sec: %.2f\n", result.SubmitThroughputPerSec)
+	fmt.Fprintf(w, "query_duration_seconds: %.3f\n", result.QueryDurationSeconds)
+	fmt.Fprintf(w, "immediate_query_duration_seconds: %.3f\n", result.ImmediateQueryDurationSeconds)
+	fmt.Fprintf(w, "post_proof_query_duration_seconds: %.3f\n", result.PostProofQueryDurationSeconds)
+	fmt.Fprintf(w, "proof_wait_duration_seconds: %.3f\n", result.ProofWaitDurationSeconds)
+	fmt.Fprintf(w, "settle_duration_seconds: %.3f\n", result.SettleDurationSeconds)
 	fmt.Fprintf(w, "submit_latency_ms: avg=%.2f min=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f\n",
 		result.SubmitLatency.AvgMs,
 		result.SubmitLatency.MinMs,
@@ -724,12 +783,19 @@ func writeBenchIngestText(w io.Writer, result benchIngestResult) {
 		result.SubmitLatency.P99Ms,
 		result.SubmitLatency.MaxMs,
 	)
-	fmt.Fprintf(w, "record_query_samples: total=%d ready=%d failed=%d avg_ms=%.2f p95_ms=%.2f\n",
-		result.QuerySamples.Samples,
-		result.QuerySamples.Ready,
-		result.QuerySamples.Failed,
-		result.QuerySamples.Latency.AvgMs,
-		result.QuerySamples.Latency.P95Ms,
+	fmt.Fprintf(w, "immediate_query_samples: total=%d ready=%d failed=%d avg_ms=%.2f p95_ms=%.2f\n",
+		result.ImmediateQuerySamples.Samples,
+		result.ImmediateQuerySamples.Ready,
+		result.ImmediateQuerySamples.Failed,
+		result.ImmediateQuerySamples.Latency.AvgMs,
+		result.ImmediateQuerySamples.Latency.P95Ms,
+	)
+	fmt.Fprintf(w, "post_proof_query_samples: total=%d ready=%d failed=%d avg_ms=%.2f p95_ms=%.2f\n",
+		result.PostProofQuerySamples.Samples,
+		result.PostProofQuerySamples.Ready,
+		result.PostProofQuerySamples.Failed,
+		result.PostProofQuerySamples.Latency.AvgMs,
+		result.PostProofQuerySamples.Latency.P95Ms,
 	)
 	fmt.Fprintf(w, "proof_samples: total=%d target=%s ready=%d timeouts=%d failed=%d avg_ms=%.2f p95_ms=%.2f\n",
 		result.ProofSamples.Samples,

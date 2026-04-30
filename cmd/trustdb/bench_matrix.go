@@ -83,17 +83,37 @@ type benchMatrixCaseResult struct {
 }
 
 type benchMatrixSummary struct {
-	CaseCount                int     `json:"case_count"`
-	TotalSubmitted           int     `json:"total_submitted"`
-	TotalFailed              int     `json:"total_failed"`
-	AverageThroughputPerSec  float64 `json:"average_throughput_per_sec"`
-	FastestCaseName          string  `json:"fastest_case_name,omitempty"`
-	FastestThroughputPerSec  float64 `json:"fastest_throughput_per_sec,omitempty"`
-	SlowestSubmitP95CaseName string  `json:"slowest_submit_p95_case_name,omitempty"`
-	SlowestSubmitP95Ms       float64 `json:"slowest_submit_p95_ms,omitempty"`
+	CaseCount                     int     `json:"case_count"`
+	TotalSubmitted                int     `json:"total_submitted"`
+	TotalFailed                   int     `json:"total_failed"`
+	TotalImmediateQueryFailed     int     `json:"total_immediate_query_failed"`
+	TotalPostProofQueryFailed     int     `json:"total_post_proof_query_failed"`
+	TotalProofTimeouts            int     `json:"total_proof_timeouts"`
+	TotalProofFailed              int     `json:"total_proof_failed"`
+	AverageThroughputPerSec       float64 `json:"average_throughput_per_sec"`
+	AverageSubmitThroughputPerSec float64 `json:"average_submit_throughput_per_sec"`
+	FastestCaseName               string  `json:"fastest_case_name,omitempty"`
+	FastestThroughputPerSec       float64 `json:"fastest_throughput_per_sec,omitempty"`
+	FastestSubmitCaseName         string  `json:"fastest_submit_case_name,omitempty"`
+	FastestSubmitThroughputPerSec float64 `json:"fastest_submit_throughput_per_sec,omitempty"`
+	SlowestSubmitP95CaseName      string  `json:"slowest_submit_p95_case_name,omitempty"`
+	SlowestSubmitP95Ms            float64 `json:"slowest_submit_p95_ms,omitempty"`
 }
 
 type benchMatrixCaseRun func(context.Context, benchIngestConfig) (benchIngestResult, error)
+
+func maxBenchMatrixConcurrency(base benchIngestConfig, matrix benchMatrixFile) int {
+	maxConcurrency := base.Concurrency
+	if matrix.Defaults.Concurrency != nil && *matrix.Defaults.Concurrency > maxConcurrency {
+		maxConcurrency = *matrix.Defaults.Concurrency
+	}
+	for _, item := range matrix.Cases {
+		if item.Concurrency != nil && *item.Concurrency > maxConcurrency {
+			maxConcurrency = *item.Concurrency
+		}
+	}
+	return maxConcurrency
+}
 
 func newBenchMatrixCommand(rt *runtimeConfig) *cobra.Command {
 	var cfg benchMatrixConfig
@@ -177,7 +197,7 @@ func newBenchMatrixCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, err := newBenchSDKClient(cfg.Base.Transport, cfg.Base.Endpoint)
+			client, err := newBenchSDKClient(cfg.Base.Transport, cfg.Base.Endpoint, maxBenchMatrixConcurrency(cfg.Base, matrix))
 			if err != nil {
 				return err
 			}
@@ -350,20 +370,32 @@ func buildBenchMatrixSummary(cases []benchMatrixCaseResult) benchMatrixSummary {
 		return summary
 	}
 	var throughputSum float64
+	var submitThroughputSum float64
 	for i, item := range cases {
-		summary.TotalSubmitted += item.Result.Submitted
-		summary.TotalFailed += item.Result.Failed
-		throughputSum += item.Result.ThroughputPerSec
-		if i == 0 || item.Result.ThroughputPerSec > summary.FastestThroughputPerSec {
-			summary.FastestThroughputPerSec = item.Result.ThroughputPerSec
+		result := normalizeBenchIngestResult(item.Result)
+		summary.TotalSubmitted += result.Submitted
+		summary.TotalFailed += result.Failed
+		summary.TotalImmediateQueryFailed += result.ImmediateQuerySamples.Failed
+		summary.TotalPostProofQueryFailed += result.PostProofQuerySamples.Failed
+		summary.TotalProofTimeouts += result.ProofSamples.Timeouts
+		summary.TotalProofFailed += result.ProofSamples.Failed
+		throughputSum += result.ThroughputPerSec
+		submitThroughputSum += result.SubmitThroughputPerSec
+		if i == 0 || result.ThroughputPerSec > summary.FastestThroughputPerSec {
+			summary.FastestThroughputPerSec = result.ThroughputPerSec
 			summary.FastestCaseName = item.Name
 		}
-		if summary.SlowestSubmitP95CaseName == "" || item.Result.SubmitLatency.P95Ms > summary.SlowestSubmitP95Ms {
+		if i == 0 || result.SubmitThroughputPerSec > summary.FastestSubmitThroughputPerSec {
+			summary.FastestSubmitThroughputPerSec = result.SubmitThroughputPerSec
+			summary.FastestSubmitCaseName = item.Name
+		}
+		if summary.SlowestSubmitP95CaseName == "" || result.SubmitLatency.P95Ms > summary.SlowestSubmitP95Ms {
 			summary.SlowestSubmitP95CaseName = item.Name
-			summary.SlowestSubmitP95Ms = item.Result.SubmitLatency.P95Ms
+			summary.SlowestSubmitP95Ms = result.SubmitLatency.P95Ms
 		}
 	}
 	summary.AverageThroughputPerSec = throughputSum / float64(len(cases))
+	summary.AverageSubmitThroughputPerSec = submitThroughputSum / float64(len(cases))
 	return summary
 }
 
@@ -388,29 +420,42 @@ func writeBenchMatrixText(w io.Writer, result benchMatrixResult) {
 	fmt.Fprintf(w, "duration_seconds: %.3f\n", result.DurationSeconds)
 	fmt.Fprintln(w, "cases:")
 	for _, item := range result.Cases {
+		caseResult := normalizeBenchIngestResult(item.Result)
 		line := fmt.Sprintf(
-			"  %s count=%d concurrency=%d payload_bytes=%d submitted=%d failed=%d throughput_per_sec=%.2f submit_p95_ms=%.2f",
+			"  %s count=%d concurrency=%d payload_bytes=%d submitted=%d failed=%d throughput_per_sec=%.2f submit_p95_ms=%.2f immediate_query_failed=%d post_proof_query_failed=%d proof_timeouts=%d",
 			item.Name,
 			item.Count,
 			item.Concurrency,
 			item.PayloadBytes,
-			item.Result.Submitted,
-			item.Result.Failed,
-			item.Result.ThroughputPerSec,
-			item.Result.SubmitLatency.P95Ms,
+			caseResult.Submitted,
+			caseResult.Failed,
+			caseResult.ThroughputPerSec,
+			caseResult.SubmitLatency.P95Ms,
+			caseResult.ImmediateQuerySamples.Failed,
+			caseResult.PostProofQuerySamples.Failed,
+			caseResult.ProofSamples.Timeouts,
 		)
 		if item.ReportFile != "" {
 			line += " report_file=" + item.ReportFile
 		}
+		line += fmt.Sprintf(" submit_throughput_per_sec=%.2f", caseResult.SubmitThroughputPerSec)
 		fmt.Fprintln(w, line)
 	}
 	fmt.Fprintln(w, "summary:")
 	fmt.Fprintf(w, "  case_count: %d\n", result.Summary.CaseCount)
 	fmt.Fprintf(w, "  total_submitted: %d\n", result.Summary.TotalSubmitted)
 	fmt.Fprintf(w, "  total_failed: %d\n", result.Summary.TotalFailed)
+	fmt.Fprintf(w, "  total_immediate_query_failed: %d\n", result.Summary.TotalImmediateQueryFailed)
+	fmt.Fprintf(w, "  total_post_proof_query_failed: %d\n", result.Summary.TotalPostProofQueryFailed)
+	fmt.Fprintf(w, "  total_proof_timeouts: %d\n", result.Summary.TotalProofTimeouts)
+	fmt.Fprintf(w, "  total_proof_failed: %d\n", result.Summary.TotalProofFailed)
 	fmt.Fprintf(w, "  average_throughput_per_sec: %.2f\n", result.Summary.AverageThroughputPerSec)
+	fmt.Fprintf(w, "  average_submit_throughput_per_sec: %.2f\n", result.Summary.AverageSubmitThroughputPerSec)
 	if result.Summary.FastestCaseName != "" {
 		fmt.Fprintf(w, "  fastest_case: %s (%.2f/s)\n", result.Summary.FastestCaseName, result.Summary.FastestThroughputPerSec)
+	}
+	if result.Summary.FastestSubmitCaseName != "" {
+		fmt.Fprintf(w, "  fastest_submit_case: %s (%.2f/s)\n", result.Summary.FastestSubmitCaseName, result.Summary.FastestSubmitThroughputPerSec)
 	}
 	if result.Summary.SlowestSubmitP95CaseName != "" {
 		fmt.Fprintf(w, "  slowest_submit_p95_case: %s (%.2f ms)\n", result.Summary.SlowestSubmitP95CaseName, result.Summary.SlowestSubmitP95Ms)
