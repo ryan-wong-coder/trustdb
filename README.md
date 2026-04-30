@@ -6,7 +6,7 @@
 
 ![TrustDB system architecture](assets/readme/system-architecture.png)
 
-TrustDB is a single-node verifiable evidence database. It turns local file claims into signed receipts, Merkle batch proofs, global transparency-log proofs, and optional external STH anchors.
+TrustDB is a verifiable evidence database that can run as a simple single-node service or as a horizontally scalable deployment with storage-compute separation. It turns local file claims into signed receipts, Merkle batch proofs, global transparency-log proofs, and optional external STH anchors.
 
 Current repository module:
 
@@ -41,7 +41,7 @@ The Wails + Vue desktop client provides local identity setup, HTTP/gRPC server c
 - Global Transparency Log that appends committed batch roots, persists STHs, and serves inclusion/consistency proofs.
 - L5 anchor pipeline that anchors only `SignedTreeHead` / global roots, not per-batch roots.
 - Anchor sinks for `off`, `noop`, local file output, and OpenTimestamps, with OTS upgrade worker support.
-- Proofstore backends for local file storage and Pebble; the production profile uses Pebble.
+- Proofstore backends for local file storage, Pebble, and experimental TiKV; TiKV lets multiple compute nodes share durable proof data for storage-compute separation.
 - Paginated server-side record and root APIs with cursor/range-oriented access paths.
 - Portable `.tdbackup` create, verify, and resumable restore flow.
 - Public Go SDK for claim signing, server calls, proof export, and local verification.
@@ -66,14 +66,14 @@ For exchange and desktop verification, `.sproof` is the main single-file proof f
 
 ## Architecture
 
-The current implementation is a single-node architecture with these main paths:
+TrustDB's default deployment is single-node, while the TiKV proofstore backend supports a distributed storage-compute separated topology. In that mode, multiple TrustDB compute nodes can ingest, batch, serve proofs, and expose HTTP/gRPC APIs against the same TiKV-backed proofstore, with `node_id` / `log_id` metadata preserving source identity.
 
 - Client path: CLI or desktop computes the file hash, signs a claim, and submits it to the HTTP server or local CLI flow.
 - Ingest path: server validates signatures and key status, records durable acceptance in WAL, and returns an accepted receipt.
 - Batch path: committed records are grouped into Merkle batches and stored as proof bundles plus record indexes.
 - Global log path: committed batch roots are appended into a global transparency log, producing persisted STHs and global proofs.
 - Anchor path: STH/global roots are queued and published by the anchor worker when an anchor sink is configured.
-- Storage path: proof data is stored in file or Pebble proofstore backends; production config defaults to Pebble.
+- Storage path: proof data is stored in file, Pebble, or TiKV proofstore backends; TiKV is the shared storage layer for horizontally scaled compute nodes.
 - Backup path: proofstore data can be exported to `.tdbackup`, verified, and restored with resume checkpoints.
 - Observability path: `/metrics` exposes ingest, batch, global log, anchor, WAL, backup, and storage metrics.
 
@@ -189,14 +189,14 @@ Two example profiles are included:
 | File | Intended use |
 | --- | --- |
 | `configs/development.yaml` | Local development and demos. Uses file proofstore and `noop` anchor sink. |
-| `configs/production.yaml` | Single-node production profile. Uses Pebble proofstore, directory WAL, group fsync, global log, and OTS anchor sink. |
+| `configs/production.yaml` | Baseline production profile. Uses Pebble proofstore, directory WAL, group fsync, global log, and OTS anchor sink; switch the proofstore to TiKV for shared storage and horizontal compute-node scaling. |
 
 Important configuration groups:
 
 | Group | Purpose |
 | --- | --- |
 | `paths` | Data, key registry, WAL, object, and proof directories. |
-| `metastore` / `metastore_path` | Proofstore backend selection: `file`, `pebble`, or experimental `tikv`; for TiKV, `metastore_path` may provide comma-separated PD endpoints. |
+| `metastore` / `metastore_path` | Proofstore backend selection: `file`, `pebble`, or experimental `tikv`; for TiKV, `metastore_path` may provide comma-separated PD endpoints for the shared storage cluster. |
 | `wal` | Fsync strategy and group-commit interval. |
 | `server` | HTTP listen address, optional gRPC listen address, queue size, workers, and timeouts. |
 | `batch` | Batch queue, max records, and max delay. |
