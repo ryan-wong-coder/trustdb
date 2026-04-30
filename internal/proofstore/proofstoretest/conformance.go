@@ -40,6 +40,10 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("CheckpointMissing", func(t *testing.T) { testCheckpointMissing(t, newStore) })
 	t.Run("ConcurrentPutBundle", func(t *testing.T) { testConcurrentPutBundle(t, newStore) })
 	t.Run("GlobalLogRoundTrip", func(t *testing.T) { testGlobalLogRoundTrip(t, newStore) })
+	t.Run("GlobalLogAppendCommitRoundTrip", func(t *testing.T) { testGlobalLogAppendCommitRoundTrip(t, newStore) })
+	t.Run("GlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite", func(t *testing.T) {
+		testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t, newStore)
+	})
 	t.Run("GlobalLogPagedStateRoundTrip", func(t *testing.T) { testGlobalLogPagedStateRoundTrip(t, newStore) })
 	t.Run("GlobalLeafListPagePaginates", func(t *testing.T) { testGlobalLeafListPagePaginates(t, newStore) })
 	t.Run("GlobalLogTileRoundTrip", func(t *testing.T) { testGlobalLogTileRoundTrip(t, newStore) })
@@ -594,6 +598,137 @@ func testGlobalLogRoundTrip(t *testing.T, newStore Factory) {
 	}
 	if latest.TreeSize != 1 {
 		t.Fatalf("LatestSignedTreeHead tree_size = %d, want 1", latest.TreeSize)
+	}
+}
+
+func testGlobalLogAppendCommitRoundTrip(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	leaf := model.GlobalLogLeaf{
+		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		BatchID:            "batch-append-1",
+		BatchRoot:          []byte{1, 2, 3},
+		BatchTreeSize:      3,
+		BatchClosedAtUnixN: 99,
+		LeafIndex:          0,
+		LeafHash:           []byte{9},
+		AppendedAtUnixN:    100,
+	}
+	node := model.GlobalLogNode{
+		SchemaVersion:  model.SchemaGlobalLogNode,
+		Level:          0,
+		StartIndex:     0,
+		Width:          1,
+		Hash:           []byte{9},
+		CreatedAtUnixN: 101,
+	}
+	state := model.GlobalLogState{
+		SchemaVersion:  model.SchemaGlobalLogState,
+		TreeSize:       1,
+		RootHash:       []byte{9},
+		Frontier:       [][]byte{{9}},
+		UpdatedAtUnixN: 102,
+	}
+	sth := model.SignedTreeHead{
+		SchemaVersion:  model.SchemaSignedTreeHead,
+		TreeSize:       1,
+		RootHash:       []byte{9},
+		TimestampUnixN: 103,
+	}
+	if err := store.CommitGlobalLogAppend(ctx, model.GlobalLogAppend{
+		Leaf:  leaf,
+		Nodes: []model.GlobalLogNode{node},
+		State: state,
+		STH:   sth,
+	}); err != nil {
+		t.Fatalf("CommitGlobalLogAppend: %v", err)
+	}
+
+	byBatch, ok, err := store.GetGlobalLeafByBatchID(ctx, leaf.BatchID)
+	if err != nil || !ok {
+		t.Fatalf("GetGlobalLeafByBatchID ok=%v err=%v", ok, err)
+	}
+	if byBatch.LeafIndex != leaf.LeafIndex {
+		t.Fatalf("batch index leaf_index = %d, want %d", byBatch.LeafIndex, leaf.LeafIndex)
+	}
+	gotNode, ok, err := store.GetGlobalLogNode(ctx, node.Level, node.StartIndex)
+	if err != nil || !ok {
+		t.Fatalf("GetGlobalLogNode ok=%v err=%v", ok, err)
+	}
+	if gotNode.Width != node.Width {
+		t.Fatalf("GetGlobalLogNode width = %d, want %d", gotNode.Width, node.Width)
+	}
+	gotState, ok, err := store.GetGlobalLogState(ctx)
+	if err != nil || !ok {
+		t.Fatalf("GetGlobalLogState ok=%v err=%v", ok, err)
+	}
+	if gotState.TreeSize != state.TreeSize {
+		t.Fatalf("state tree_size = %d, want %d", gotState.TreeSize, state.TreeSize)
+	}
+	gotSTH, ok, err := store.GetSignedTreeHead(ctx, sth.TreeSize)
+	if err != nil || !ok {
+		t.Fatalf("GetSignedTreeHead ok=%v err=%v", ok, err)
+	}
+	if gotSTH.TreeSize != sth.TreeSize {
+		t.Fatalf("sth tree_size = %d, want %d", gotSTH.TreeSize, sth.TreeSize)
+	}
+}
+
+func testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	err := store.CommitGlobalLogAppend(ctx, model.GlobalLogAppend{
+		Leaf: model.GlobalLogLeaf{
+			SchemaVersion:      model.SchemaGlobalLogLeaf,
+			BatchID:            "batch-invalid-node",
+			BatchRoot:          []byte{1, 2, 3},
+			BatchTreeSize:      3,
+			BatchClosedAtUnixN: 99,
+			LeafIndex:          0,
+			LeafHash:           []byte{9},
+			AppendedAtUnixN:    100,
+		},
+		Nodes: []model.GlobalLogNode{{
+			SchemaVersion:  model.SchemaGlobalLogNode,
+			Level:          0,
+			StartIndex:     0,
+			Hash:           []byte{9},
+			CreatedAtUnixN: 101,
+		}},
+		State: model.GlobalLogState{
+			SchemaVersion:  model.SchemaGlobalLogState,
+			TreeSize:       1,
+			RootHash:       []byte{9},
+			Frontier:       [][]byte{{9}},
+			UpdatedAtUnixN: 102,
+		},
+		STH: model.SignedTreeHead{
+			SchemaVersion:  model.SchemaSignedTreeHead,
+			TreeSize:       1,
+			RootHash:       []byte{9},
+			TimestampUnixN: 103,
+		},
+	})
+	if got := trusterr.CodeOf(err); got != trusterr.CodeInvalidArgument {
+		t.Fatalf("CodeOf(CommitGlobalLogAppend error) = %s, want %s; err=%v", got, trusterr.CodeInvalidArgument, err)
+	}
+	if _, ok, err := store.GetGlobalLeafByBatchID(ctx, "batch-invalid-node"); err != nil || ok {
+		t.Fatalf("GetGlobalLeafByBatchID after invalid append ok=%v err=%v, want no partial leaf", ok, err)
+	}
+	if _, ok, err := store.GetGlobalLogNode(ctx, 0, 0); err != nil || ok {
+		t.Fatalf("GetGlobalLogNode after invalid append ok=%v err=%v, want no partial node", ok, err)
+	}
+	if _, ok, err := store.GetGlobalLogState(ctx); err != nil || ok {
+		t.Fatalf("GetGlobalLogState after invalid append ok=%v err=%v, want no partial state", ok, err)
+	}
+	if _, ok, err := store.GetSignedTreeHead(ctx, 1); err != nil || ok {
+		t.Fatalf("GetSignedTreeHead after invalid append ok=%v err=%v, want no partial STH", ok, err)
 	}
 }
 

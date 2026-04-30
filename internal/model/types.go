@@ -381,6 +381,17 @@ type SignedTreeHead struct {
 	Signature      Signature `cbor:"signature" json:"signature"`
 }
 
+// GlobalLogAppend is the atomic persistence unit for one Global Log append.
+// It keeps the async outbox boundary intact while allowing a proofstore
+// backend to persist leaf indexes, internal nodes, frontier state, and STH in
+// one backend transaction when supported.
+type GlobalLogAppend struct {
+	Leaf  GlobalLogLeaf   `json:"leaf"`
+	Nodes []GlobalLogNode `json:"nodes"`
+	State GlobalLogState  `json:"state"`
+	STH   SignedTreeHead  `json:"sth"`
+}
+
 type GlobalConsistencyProof struct {
 	FromTreeSize uint64   `cbor:"from_tree_size" json:"from_tree_size"`
 	ToTreeSize   uint64   `cbor:"to_tree_size" json:"to_tree_size"`

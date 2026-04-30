@@ -95,6 +95,58 @@ func TestAppendBatchRootProducesStableSTHAndInclusionProof(t *testing.T) {
 	}
 }
 
+func TestAppendBatchRootRefusesPartialExistingLeafWithoutSTH(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	svc, store := newTestService(t)
+
+	root := batchRoot("partial-batch", 1)
+	leaf := model.GlobalLogLeaf{
+		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		BatchID:            root.BatchID,
+		BatchRoot:          append([]byte(nil), root.BatchRoot...),
+		BatchTreeSize:      root.TreeSize,
+		BatchClosedAtUnixN: root.ClosedAtUnixN,
+		LeafIndex:          0,
+		AppendedAtUnixN:    time.Unix(100, 0).UTC().UnixNano(),
+	}
+	hash, err := HashLeaf(leaf)
+	if err != nil {
+		t.Fatalf("HashLeaf: %v", err)
+	}
+	leaf.LeafHash = hash
+	if err := store.PutGlobalLeaf(ctx, leaf); err != nil {
+		t.Fatalf("PutGlobalLeaf: %v", err)
+	}
+	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{
+		SchemaVersion:  model.SchemaGlobalLogState,
+		TreeSize:       1,
+		RootHash:       append([]byte(nil), hash...),
+		Frontier:       [][]byte{append([]byte(nil), hash...)},
+		UpdatedAtUnixN: time.Unix(101, 0).UTC().UnixNano(),
+	}); err != nil {
+		t.Fatalf("PutGlobalLogState: %v", err)
+	}
+
+	_, err = svc.AppendBatchRoot(ctx, root)
+	if err == nil {
+		t.Fatal("AppendBatchRoot succeeded for leaf without matching STH")
+	}
+	if got := trusterr.CodeOf(err); got != trusterr.CodeDataLoss {
+		t.Fatalf("CodeOf(err) = %s, want %s; err=%v", got, trusterr.CodeDataLoss, err)
+	}
+	if _, ok, err := store.GetGlobalLeaf(ctx, 1); err != nil || ok {
+		t.Fatalf("GetGlobalLeaf(1) ok=%v err=%v, want no duplicate append", ok, err)
+	}
+	state, ok, err := store.GetGlobalLogState(ctx)
+	if err != nil || !ok {
+		t.Fatalf("GetGlobalLogState ok=%v err=%v", ok, err)
+	}
+	if state.TreeSize != 1 {
+		t.Fatalf("state tree_size = %d, want 1", state.TreeSize)
+	}
+}
+
 func TestCompactHistoryPreservesInclusionProof(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

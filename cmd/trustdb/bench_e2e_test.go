@@ -528,7 +528,7 @@ func loadBenchSmokeGateConfig(t testing.TB) benchSmokeGateConfig {
 		MinCandidateThroughput:     benchEnvFloat(t, trustdbBenchMinCandidateThroughputEnv, 1),
 		MaxThroughputRegressionPct: benchEnvFloat(t, trustdbBenchMaxThroughputRegressionPctEnv, 80),
 		MaxDurationRegressionPct:   benchEnvFloat(t, trustdbBenchMaxDurationRegressionPctEnv, 200),
-		MaxSubmitP95RegressionPct:  benchEnvFloat(t, trustdbBenchMaxSubmitP95RegressionPctEnv, 200),
+		MaxSubmitP95RegressionPct:  benchEnvFloat(t, trustdbBenchMaxSubmitP95RegressionPctEnv, 0),
 		MaxCandidateSubmitP95Ms:    benchEnvFloat(t, trustdbBenchMaxCandidateSubmitP95MsEnv, 0),
 		MaxCandidateFailed:         benchEnvInt(t, trustdbBenchMaxCandidateFailedEnv, 0),
 		MaxCandidateBatchErrors:    benchEnvInt(t, trustdbBenchMaxCandidateBatchErrorsEnv, 0),
@@ -543,17 +543,47 @@ func (cfg benchSmokeGateConfig) CompareArgs() []string {
 		"--min-candidate-throughput", strconv.FormatFloat(cfg.MinCandidateThroughput, 'f', -1, 64),
 		"--max-throughput-regression-pct", strconv.FormatFloat(cfg.MaxThroughputRegressionPct, 'f', -1, 64),
 		"--max-duration-regression-pct", strconv.FormatFloat(cfg.MaxDurationRegressionPct, 'f', -1, 64),
-		"--max-submit-p95-regression-pct", strconv.FormatFloat(cfg.MaxSubmitP95RegressionPct, 'f', -1, 64),
 		"--max-candidate-failed", strconv.Itoa(cfg.MaxCandidateFailed),
 		"--max-candidate-batch-errors", strconv.Itoa(cfg.MaxCandidateBatchErrors),
 		"--max-candidate-query-failed", strconv.Itoa(cfg.MaxCandidateQueryFailed),
 		"--max-candidate-proof-timeouts", strconv.Itoa(cfg.MaxCandidateProofTimeouts),
 		"--max-candidate-proof-failed", strconv.Itoa(cfg.MaxCandidateProofFailed),
 	}
+	if cfg.MaxSubmitP95RegressionPct > 0 {
+		args = append(args, "--max-submit-p95-regression-pct", strconv.FormatFloat(cfg.MaxSubmitP95RegressionPct, 'f', -1, 64))
+	}
 	if cfg.MaxCandidateSubmitP95Ms > 0 {
 		args = append(args, "--max-candidate-submit-p95-ms", strconv.FormatFloat(cfg.MaxCandidateSubmitP95Ms, 'f', -1, 64))
 	}
 	return args
+}
+
+func TestBenchSmokeGateCompareArgsSkipsDisabledSubmitP95Regression(t *testing.T) {
+	t.Parallel()
+
+	args := benchSmokeGateConfig{
+		MinCandidateThroughput:     1,
+		MaxThroughputRegressionPct: 80,
+		MaxDurationRegressionPct:   200,
+	}.CompareArgs()
+
+	if hasArg(args, "--max-submit-p95-regression-pct") {
+		t.Fatalf("CompareArgs() included disabled submit p95 regression gate: %v", args)
+	}
+
+	args = benchSmokeGateConfig{MaxSubmitP95RegressionPct: 25}.CompareArgs()
+	if !hasArg(args, "--max-submit-p95-regression-pct") {
+		t.Fatalf("CompareArgs() missing enabled submit p95 regression gate: %v", args)
+	}
+}
+
+func hasArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func benchEnvFloat(t testing.TB, name string, fallback float64) float64 {
