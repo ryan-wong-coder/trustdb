@@ -18,10 +18,10 @@ github.com/ryan-wong-coder/trustdb
 
 ## 性能测试报告
 
-优化后的单机 CVM 性能测试报告提供中英文两份：
+性能优先双机内网 CVM 复测报告提供中英文两份：
 
-- [TrustDB 优化后单机性能测试报告](docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md)
-- [TrustDB Optimized Single-Node Performance Report](docs/performance/trustdb-performance-report-2026-04-30.en.md)
+- [TrustDB 性能优先双机内网复测报告](docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md)
+- [TrustDB High-Write Private-IP CVM Retest Report](docs/performance/trustdb-performance-report-2026-04-30.en.md)
 
 ## 桌面客户端
 

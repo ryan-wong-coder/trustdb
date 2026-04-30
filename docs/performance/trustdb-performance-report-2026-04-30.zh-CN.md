@@ -1,179 +1,172 @@
-# TrustDB 优化后单机性能测试报告
+# TrustDB 性能优先双机内网复测报告
 
-![AI 生成的 TrustDB 性能概览图](assets/perf-v3-ai-overview.png)
+![TrustDB 性能优先复测概览](assets/perf-highwrite-ai-overview.png)
 
 报告日期：2026-04-30
-测试 Run ID：`perf-v3-20260430T043651Z`
-代码范围：bench v3、Merkle proof、Pebble proof artifact、WAL 可观测性、SDK HTTP transport 优化后分支
-核心目标：验证当前单机写入性能，并把“提交成功”“立即查询可见”“等待 proof 后查询成功”拆成独立指标。
 
-上图是 AI 生成的报告概览视觉图。下方表格和指标图来自本轮测试产物与 benchmark 输出，是本报告的数据依据。
+测试 Run ID：`perf-semantic-20260430T071902Z`
+
+测试范围：语义可变性能开关、性能优先写入 profile、HTTP/gRPC 内网链路、旧 payload matrix 与 100k 大并发 matrix。
+
+测试目标：在不记录密码、密钥等敏感信息的前提下，验证两台 CVM 通过内网连接时，TrustDB 单服务端在性能优先配置下的提交能力与 L3 proof 物化能力。
+
+本报告替换上一版 `perf-v3` 报告。上一版以默认安全语义和 L4 proof-ready 为主；本版采用显式开启的性能优先 profile，最高 proof level 为 L3，因此不应与默认安全 profile 或 L4/L5 报告直接混读。
 
 ## 结论摘要
 
-优化后的 TrustDB 在本轮 CVM matrix 测试中没有出现提交失败、batch 错误、proof 失败、proof timeout 或等待 proof 后查询失败。
+本次有效 drain-aware 工作负载共覆盖 850,000 条记录：
 
-| 指标 | HTTP matrix | gRPC matrix | 合计 |
+- 100k 大并发 matrix：HTTP 300,000 条，gRPC 300,000 条。
+- 旧 payload matrix：HTTP 185,000 条，gRPC 65,000 条。
+- 所有有效 case 的 `failed=0`、`batch_errors=0`、`proof_timeouts=0`、`post_proof_query_failed=0`。
+
+| 指标 | HTTP | gRPC | 合计 / 范围 |
 | --- | ---: | ---: | ---: |
-| 提交记录数 | 185,000 | 65,000 | 250,000 |
+| 有效提交记录数 | 485,000 | 365,000 | 850,000 |
 | 提交失败 | 0 | 0 | 0 |
 | Batch 错误 | 0 | 0 | 0 |
 | Proof timeout | 0 | 0 | 0 |
-| Proof 失败 | 0 | 0 | 0 |
-| 等待 proof 后查询失败 | 0 | 0 | 0 |
-| 立即查询未命中 | 2 / 160 samples | 2 / 80 samples | 4 / 240 samples |
+| Proof 后查询失败 | 0 | 0 | 0 |
+| 大并发 Submit TPS | 48,186-49,150/s | 46,497-51,409/s | 46k-51k/s |
+| 旧 case Submit TPS | 17,471-53,366/s | 26,282-50,767/s | 17k-53k/s |
+| L3 materialized TPS | 2,958-5,754/s | 1,247-3,856/s | 1.2k-5.8k/s |
 
-这 4 次立即查询未命中不是业务提交失败，而是异步可见性现象：记录已经被 L2 接受，但在立即读取采样点，L3/L4 proof 与 record index 尚未全部完成。等待 proof ready 后，所有采样记录都可以正常读取。
+核心判断：提交路径表现很好，当前主要瓶颈已经转移到异步 L3 proof materialization 和 Pebble proof artifact 写入。也就是说，系统可以很快返回 L2 accepted receipt，但若业务要求“proof 全量就绪吞吐”，瓶颈仍在 proofstore artifact 物化阶段。
 
-![TrustDB 吞吐图](assets/perf-v3-throughput.png)
+![Submit 与 L3 物化吞吐对比](assets/perf-highwrite-submit-proof.png)
 
 ## 测试环境
 
 | 项目 | 配置 |
 | --- | --- |
-| 云主机 | 腾讯云 CVM |
-| 地域 / 可用区 | 南京 / 南京一区 |
-| 实例规格 | `SA5.8XLARGE64` |
-| CPU / 内存 | 32 vCPU / 64 GiB |
-| 系统镜像 | TencentOS Server 4 for x86_64 |
-| 系统盘 | 100 GiB 增强型 SSD 云硬盘 |
-| 数据盘 | 未挂载 |
-| TrustDB 服务 | `trustdb-perf.service`，状态 active |
-| 健康检查 | `{"ok":true}` |
-| 本轮运行目录大小 | 1.9 GiB |
-| 微基准 Go 版本 | Go 1.26.2 linux/amd64 |
-| benchmark 识别 CPU | AMD EPYC 9754 128-Core Processor |
+| 机器数量 | 2 台 CVM，一台服务端，一台客户端 |
+| 服务端 | 32 vCPU / 64 GiB，TencentOS Server 4 |
+| 客户端 | 32 vCPU / 64 GiB，TencentOS Server 4 |
+| 网络 | 同 VPC / 同子网，客户端通过内网 IP 访问服务端 |
+| 服务端监听 | HTTP `10.206.0.9:8080`，gRPC `10.206.0.9:9090` |
+| 客户端内网 IP | `10.206.0.4` |
+| 数据盘 | `/mnt/datadisk0`，ext4，约 70 GiB |
+| 运行目录 | `/mnt/datadisk0/trustdb-perf-semantic-20260430T071902Z` |
+| 二进制 | 当前分支交叉编译 linux/amd64 |
+| Go 版本 | `go1.26.2` |
 
-本报告不记录服务器密码、密钥或敏感访问凭据。
+本报告不记录服务器密码、私钥、客户端私钥或其它敏感凭据。
+
+## 性能优先 Profile
+
+| 配置项 | 值 | 语义影响 |
+| --- | --- | --- |
+| `wal.fsync_mode` | `batch` | unsafe 高吞吐模式；机器崩溃或掉电窗口内可能丢失已返回成功的记录 |
+| `batch.proof_mode` | `async` | L2 提交返回与 L3 proof 物化解耦 |
+| `proofstore.record_index_mode` | `time_only` | 只写基础索引与时间索引，减少写入放大；复杂查询可能更慢 |
+| `proofstore.artifact_sync_mode` | `batch` | artifact 依赖 manifest + WAL 恢复补齐，减少逐 chunk sync 压力 |
+| `global_log.enabled` | `false` | 关闭 L4 global log，最高 proof level 为 L3 |
+| `anchor-sink` | `off` | 关闭 L5 anchor |
+| `batch_queue_size` | `1,048,576` | 避免 10 万条瞬时提交下 batch queue full |
+| `batch_max_records` | `8,192` | 减少 batch 数量和 proofstore 写入批次 |
+
+这组配置适合高写入压测，不是默认生产安全 profile。若业务要求崩溃后已确认提交绝不丢失，应回到 `wal.fsync_mode=group` 或 `strict`，并重新按安全 profile 测试。
 
 ## 测试口径
 
-Bench report 使用 `trustdb.bench.ingest.v3`。
-
 | 指标 | 含义 |
 | --- | --- |
-| `submit_duration_seconds` / `submit_throughput_per_sec` | 接收 signed claim 并返回 accepted receipt 的提交路径，不等待异步 proof ready。 |
-| `immediate_query_samples` | 提交后立刻执行 `GetRecord` 的采样结果，用于观察异步可见性延迟。 |
-| `proof_wait_duration_seconds` / `proof_samples` | 等待指定 proof 目标，本轮为 L4。 |
-| `post_proof_query_samples` | proof ready 后再次执行 `GetRecord` 的采样结果，这是 proof-ready 查询正确性的主要信号。 |
-| `throughput_per_sec` | 兼容旧报告的端到端吞吐字段，包含提交、等待 proof、查询采样和 settle 时间。 |
+| Submit TPS | 只统计提交 signed claim 并返回 accepted receipt 的 L2 路径，不等待 proof。 |
+| L3 materialized TPS | 每个 case 提交后继续等待 WAL checkpoint 增加满本 case 记录数，并确认队列深度归零，表示该 case 已完成 L3 proof 物化。 |
+| Immediate 查询失败 | 提交后立即 `GetRecord` 的采样未命中，只表示异步可见性延迟，不等于提交失败。 |
+| Post-proof 查询失败 | proof ready 后再次 `GetRecord` 的失败数，这是异步 proof 架构下更关键的正确性指标。 |
+| Proof timeout | 等待目标 proof level，本轮目标为 L3。 |
 
-拆分这些口径后，报告不会再把“异步 proof 尚未完成”误读成“业务提交失败”。
+## 100k 大并发 Matrix
 
-![TrustDB 可见性图](assets/perf-v3-visibility.png)
+每个 case 提交 100,000 条、payload 为 1 KiB。该组用于观察高并发下纯提交路径与全量 L3 物化之间的差距。
 
-## Matrix 测试结果
+| 协议 | 并发 | 提交数 | Submit TPS | Submit p95 | L3 materialized TPS | Drain 秒 | 失败 | Batch 错误 | Proof timeout | Post-proof 查询失败 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| HTTP | 64 | 100,000 | 48,186/s | 5 ms | 3,880/s | 25.8 | 0 | 0 | 0 | 0 |
+| HTTP | 128 | 100,000 | 49,150/s | 5 ms | 3,357/s | 29.8 | 0 | 0 | 0 | 0 |
+| HTTP | 256 | 100,000 | 48,616/s | 10 ms | 3,459/s | 28.9 | 0 | 0 | 0 | 0 |
+| gRPC | 64 | 100,000 | 46,497/s | 5 ms | 3,444/s | 29.0 | 0 | 0 | 0 | 0 |
+| gRPC | 128 | 100,000 | 51,122/s | 5 ms | 2,723/s | 36.7 | 0 | 0 | 0 | 0 |
+| gRPC | 256 | 100,000 | 51,409/s | 10 ms | 2,128/s | 47.0 | 0 | 0 | 0 | 0 |
+
+## 旧 Payload Matrix 复测
+
+`p1k-c32` 表示 payload 为 1 KiB、并发为 32。本组复用上一版报告里的 case 口径，但按新的性能优先 profile 重新测。
+
+![旧 Payload Matrix 复测](assets/perf-highwrite-legacy-cases.png)
 
 ### HTTP
 
-| Case | 记录数 | 并发 | Payload | 端到端吞吐 | 提交吞吐 | 提交 p95 | 立即查询未命中 | Proof 后查询失败 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `p1k-c8` | 10,000 | 8 | 1 KiB | 2,485.09/s | 10,088.53/s | 5 ms | 0 | 0 |
-| `p1k-c16` | 20,000 | 16 | 1 KiB | 4,340.70/s | 12,779.60/s | 5 ms | 0 | 0 |
-| `p1k-c32` | 30,000 | 32 | 1 KiB | 2,735.06/s | 14,728.02/s | 10 ms | 0 | 0 |
-| `p1k-c64` | 30,000 | 64 | 1 KiB | 1,488.97/s | 19,570.34/s | 10 ms | 1 | 0 |
-| `p1k-c128` | 30,000 | 128 | 1 KiB | 1,600.20/s | 26,237.86/s | 10 ms | 0 | 0 |
-| `p4k-c32` | 20,000 | 32 | 4 KiB | 1,636.06/s | 16,403.38/s | 5 ms | 0 | 0 |
-| `p4k-c64` | 20,000 | 64 | 4 KiB | 1,829.18/s | 20,121.75/s | 10 ms | 0 | 0 |
-| `p16k-c32` | 10,000 | 32 | 16 KiB | 898.30/s | 16,496.42/s | 5 ms | 0 | 0 |
-| `p16k-c64` | 10,000 | 64 | 16 KiB | 1,984.24/s | 21,055.81/s | 10 ms | 0 | 0 |
-| `p64k-c32` | 5,000 | 32 | 64 KiB | 678.74/s | 17,054.48/s | 5 ms | 1 | 0 |
-
-HTTP 汇总：
-
-| 指标 | 数值 |
-| --- | ---: |
-| 平均端到端吞吐 | 1,967.65/s |
-| 平均提交吞吐 | 17,453.62/s |
-| 最快端到端 case | `p1k-c16`，4,340.70/s |
-| 最快提交 case | `p1k-c128`，26,237.86/s |
-| 最慢提交 p95 | 10 ms |
+| Case | 提交数 | 并发 | Payload | Submit TPS | Submit p95 | L3 materialized TPS | 失败 | Batch 错误 | Proof timeout | Post-proof 查询失败 | Immediate 查询失败 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `p1k-c8` | 10,000 | 8 | 1 KiB | 17,471/s | 1 ms | 5,133/s | 0 | 0 | 0 | 0 | 0 |
+| `p1k-c16` | 20,000 | 16 | 1 KiB | 28,584/s | 1 ms | 3,067/s | 0 | 0 | 0 | 0 | 0 |
+| `p1k-c32` | 30,000 | 32 | 1 KiB | 41,568/s | 2 ms | 3,441/s | 0 | 0 | 0 | 0 | 0 |
+| `p1k-c64` | 30,000 | 64 | 1 KiB | 44,506/s | 5 ms | 3,053/s | 0 | 0 | 0 | 0 | 0 |
+| `p1k-c128` | 30,000 | 128 | 1 KiB | 53,366/s | 5 ms | 4,688/s | 0 | 0 | 0 | 0 | 0 |
+| `p4k-c32` | 20,000 | 32 | 4 KiB | 39,895/s | 2 ms | 3,876/s | 0 | 0 | 0 | 0 | 0 |
+| `p4k-c64` | 20,000 | 64 | 4 KiB | 46,475/s | 5 ms | 3,049/s | 0 | 0 | 0 | 0 | 0 |
+| `p16k-c32` | 10,000 | 32 | 16 KiB | 39,589/s | 2 ms | 3,514/s | 0 | 0 | 0 | 0 | 0 |
+| `p16k-c64` | 10,000 | 64 | 16 KiB | 46,792/s | 5 ms | 5,754/s | 0 | 0 | 0 | 0 | 0 |
+| `p64k-c32` | 5,000 | 32 | 64 KiB | 36,323/s | 2 ms | 2,958/s | 0 | 0 | 0 | 0 | 1 |
 
 ### gRPC
 
-| Case | 记录数 | 并发 | Payload | 端到端吞吐 | 提交吞吐 | 提交 p95 | 立即查询未命中 | Proof 后查询失败 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `p1k-c16` | 10,000 | 16 | 1 KiB | 2,708.57/s | 15,120.64/s | 5 ms | 0 | 0 |
-| `p1k-c32` | 20,000 | 32 | 1 KiB | 2,537.51/s | 18,641.82/s | 5 ms | 0 | 0 |
-| `p1k-c64` | 20,000 | 64 | 1 KiB | 1,272.46/s | 24,294.90/s | 10 ms | 1 | 0 |
-| `p4k-c32` | 10,000 | 32 | 4 KiB | 887.78/s | 19,521.52/s | 5 ms | 0 | 0 |
-| `p16k-c32` | 5,000 | 32 | 16 KiB | 1,074.05/s | 17,649.55/s | 5 ms | 1 | 0 |
+| Case | 提交数 | 并发 | Payload | Submit TPS | Submit p95 | L3 materialized TPS | 失败 | Batch 错误 | Proof timeout | Post-proof 查询失败 | Immediate 查询失败 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `p1k-c16` | 10,000 | 16 | 1 KiB | 26,282/s | 1 ms | 3,255/s | 0 | 0 | 0 | 0 | 0 |
+| `p1k-c32` | 20,000 | 32 | 1 KiB | 40,104/s | 2 ms | 3,856/s | 0 | 0 | 0 | 0 | 0 |
+| `p1k-c64` | 20,000 | 64 | 1 KiB | 50,767/s | 2 ms | 3,639/s | 0 | 0 | 0 | 0 | 1 |
+| `p4k-c32` | 10,000 | 32 | 4 KiB | 38,005/s | 2 ms | 3,500/s | 0 | 0 | 0 | 0 | 0 |
+| `p16k-c32` | 5,000 | 32 | 16 KiB | 34,675/s | 2 ms | 1,247/s | 0 | 0 | 0 | 0 | 1 |
 
-gRPC 汇总：
+## 正确性与可见性
 
-| 指标 | 数值 |
-| --- | ---: |
-| 平均端到端吞吐 | 1,696.07/s |
-| 平均提交吞吐 | 19,045.69/s |
-| 最快端到端 case | `p1k-c16`，2,708.57/s |
-| 最快提交 case | `p1k-c64`，24,294.90/s |
-| 最慢提交 p95 | 10 ms |
+![复测正确性信号](assets/perf-highwrite-correctness.png)
 
-## 热路径微基准
+本轮复测中，post-proof 查询失败为 0。这比 immediate 查询更重要，因为当前 profile 明确采用异步 L3 proof 物化。少量 immediate miss 出现在 HTTP `p64k-c32`、gRPC `p1k-c64`、gRPC `p16k-c32` 等 case 中，属于提交后立即读取时索引尚未完成的可见性窗口；等待 proof ready 后均可读取成功。
 
-![TrustDB 微基准图](assets/perf-v3-microbench.png)
+## 性能解读
 
-| Benchmark | 平均耗时 | 平均 B/op | 平均 allocs/op |
-| --- | ---: | ---: | ---: |
-| `BenchmarkCommitBatchSynthetic1024` | 32.51 ms/op | 3.92 MB/op | 21,526 |
-| `BenchmarkPebblePutBatchArtifacts1024` | 36.12 ms/op | 35.48 MB/op | 237,146 |
-| `BenchmarkPebblePutBatchArtifacts8192` | 295.30 ms/op | 282.19 MB/op | 1,895,782 |
-| `BenchmarkPebbleGetBundleV2` | 41.48 us/op | 41.63 KiB/op | 163 |
-| `BenchmarkWALAppendGroup` | 3.77 us/op | 1,152 B/op | 1 |
+这次结果可以概括为：写入入口已经足够快，proof artifact 物化是下一阶段重点。
 
-当前实现保持了 WAL group append 的低开销，同时没有改变默认持久化边界。剩余最明显的内存压力仍集中在 proof artifact 持久化，尤其是大 batch 的 bundle/index 编码与落盘路径。
+- 如果看业务提交：HTTP/gRPC 在 64-256 并发下能稳定达到约 46k-51k/s，旧 case 中最高 Submit TPS 为 HTTP `p1k-c128` 的 53,366/s 和 gRPC `p1k-c64` 的 50,767/s。
+- 如果看 proof 全量就绪：L3 materialized TPS 多数在 3k-5k/s，gRPC `p16k-c32` 降到 1,247/s，说明大 payload 和 proofstore 写入仍会压低物化吞吐。
+- 如果看延迟：Submit p95 大多为 1-5 ms，100k 大并发 256 档到 10 ms，仍处于低毫秒级。
+- 如果看稳定性：提交失败、batch 错误、proof timeout、post-proof 查询失败均为 0。之前标准 matrix 中出现的 batch queue full 已通过扩大 batch 队列后消除。
 
-## 当前性能解读
+## 本轮代码修复
 
-在本次 CVM 规格下，TrustDB 当前已经可以稳定完成单机 proof-ready ingest 测试：
+复测过程中发现并修复了一个真实稳定性问题：当 `global_log.enabled=false` 时，HTTP/gRPC 的 optional global-log service 可能以 typed nil interface 形式进入 handler/server，导致 L4/L5 探测路径 panic。修复后，关闭 L4/L5 时相关 HTTP 路由不注册，gRPC 返回明确的 failed precondition，而不是 panic。
 
-- HTTP/gRPC 的平均提交吞吐约 17K 到 19K records/s。
-- 端到端 proof-ready 吞吐低于纯提交吞吐，这是预期现象，因为它额外包含 proof wait、record 查询校验和 settle 时间。
-- 所有采样记录都成功达到 L4 proof ready，没有 proof timeout。
-- Proof ready 后的 record 查询全部成功，这是异步证明架构下最关键的正确性信号。
-- 各 matrix case 的提交 p95 在 5 ms 到 10 ms 之间。
+修复提交：`f947823 fix: handle disabled global log services`。
 
-这轮报告最重要的变化是：立即查询未命中被单独归类为异步可见性，而不是被混入通用查询失败或提交失败。
+## 验证状态
 
-## 已验证的优化点
+| 验证项 | 结果 |
+| --- | --- |
+| 服务端 `/healthz` | `{"ok":true}` |
+| 服务端 panic/fatal/segfault 检查 | 未发现 |
+| 最终 batch queue depth | 0 |
+| 最终 ingest queue depth | 0 |
+| 最终 WAL checkpoint | `1,451,000` |
+| `go test -p 1 ./...` | 通过 |
+| `go test -p 1 -tags=e2e ./cmd/trustdb` | 通过 |
+| `git diff --check` | 通过 |
 
-本轮测试覆盖并验证了以下优化：
+## 后续优化建议
 
-- Bench schema v3 拆分 immediate visibility 与 post-proof visibility。
-- Merkle proof 生成避免重复递归计算，并支持 batch proof 生成。
-- Pebble proof artifact 使用 v2 压缩 envelope，同时保留 legacy bundle 读取兼容。
-- Pebble batch artifact 写入按 1024 条记录 chunk sync commit，并复用编码路径。
-- 二级 record index 使用 compact reference，旧格式仍可读取。
-- WAL append/fsync 指标接入 writer 路径，不改变默认 group fsync 语义。
-- SDK 与 benchmark HTTP transport 默认连接池更适合高并发压测，同时保留 `WithHTTPClient` 自定义能力。
-- Batch stage metrics 覆盖 collect、build、artifacts、checkpoint、manifest 与 outbox 边界。
+1. 继续优化 `PutBatchArtifacts`：重点减少 ProofBundle CBOR/snappy 编码、record index 写入和 Pebble batch staging 的分配与写放大。
+2. 做 proof materializer 并行化专项：当前 L2 提交吞吐远高于 L3 物化吞吐，需要让 materialization 能更充分利用 32 vCPU。
+3. 对大 payload 单独建压测 profile：`p16k` / `p64k` 的 L3 materialized TPS 更容易暴露 artifact 路径瓶颈。
+4. 分离 WAL 与 Pebble 数据盘：当前虽然使用了数据盘目录，但 WAL、Pebble WAL、SST、proof artifact 和 compaction 仍共享同一块盘；生产压测建议分盘或至少做 IO profile。
+5. 默认安全 profile 需要单独复测：本报告是性能优先 unsafe profile，不代表 `wal.fsync_mode=group`、L4/L5 开启时的生产安全吞吐。
 
-## 后续风险与建议
-
-当前测试主机没有独立数据盘。WAL、Pebble WAL、table flush、proof artifact 与 compaction 都共用 100 GiB 系统盘。若后续要做更长时间、更高压力或更接近生产 SLO 的测试，建议把 WAL 与 Pebble 数据目录放到独立高性能数据盘。
-
-软件侧下一步优先优化 `PutBatchArtifacts` 的内存占用，尤其是大 batch 的 bundle/index 编码。第二个关注点是大 payload 下的 proof-ready 延迟，本轮 HTTP `p64k-c32` 的 proof wait 平均值为 253.82 ms，单个采样记录最长等待约 4.04 秒才达到 proof-ready。
-
-## 验证命令
-
-优化分支已通过：
-
-```powershell
-go test -p 1 ./...
-go test -p 1 -tags=e2e ./cmd/trustdb
-go test -race -tags='integration e2e' ./...
-```
-
-远端微基准命令：
-
-```bash
-go test -run '^$' -bench 'BenchmarkCommitBatchSynthetic1024' -benchmem -count=6 ./internal/app
-go test -run '^$' -bench 'BenchmarkPebblePutBatchArtifacts1024|BenchmarkPebblePutBatchArtifacts8192|BenchmarkPebbleGetBundleV2' -benchmem -count=6 ./internal/proofstore/pebble
-go test -run '^$' -bench 'BenchmarkWALAppendGroup' -benchmem -count=6 ./internal/wal
-```
-
-本地保留的主要测试产物目录：
+## 测试产物
 
 ```text
-.localdeploy/perf-v3-20260430T043651Z/reports/
+.localdeploy/perf-semantic-20260430T071902Z/reports/
+.localdeploy/perf-semantic-20260430T071902Z/reports/drain-summary.json
+.localdeploy/perf-semantic-20260430T071902Z/reports/legacy-drain-summary.json
 ```
