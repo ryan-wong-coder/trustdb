@@ -1,0 +1,67 @@
+# Local development TiKV + PD for TrustDB integration tests.
+# PD and TiKV share the PD container's network namespace so 127.0.0.1 works
+# for advertise URLs from both processes and from the host (Go tests).
+#
+# Usage:
+#   docker compose -f docker-compose.tikv.yml --project-name trustdb-tikv-dev up -d
+#   or: ./scripts/tikv-dev.sh up   /   .\scripts\tikv-dev.ps1 up
+#
+# Image tags: override TRUSTDB_TIKV_PD_IMAGE / TRUSTDB_TIKV_TIKV_IMAGE (e.g. in repo-root .env;
+# see scripts/tikv-dev.env.example). Same variables are read by tikv-dev.ps1 / tikv-dev.sh native mode.
+#
+# Not a production topology.
+
+name: trustdb-tikv-dev
+
+services:
+  pd:
+    image: ${TRUSTDB_TIKV_PD_IMAGE:-pingcap/pd:v7.5.0}
+    container_name: trustdb-tikv-dev-pd
+    volumes:
+      - trustdb-tikv-pd:/data
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+      - "20160:20160"
+      - "20180:20180"
+    command:
+      - --name=pd
+      - --data-dir=/data/pd
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://127.0.0.1:2379
+      - --advertise-peer-urls=http://127.0.0.1:2380
+      - --initial-cluster=pd=http://127.0.0.1:2380
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:2379/pd/api/v1/health"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 20s
+
+  tikv:
+    image: ${TRUSTDB_TIKV_TIKV_IMAGE:-pingcap/tikv:v7.5.0}
+    container_name: trustdb-tikv-dev-tikv
+    network_mode: "service:pd"
+    depends_on:
+      pd:
+        condition: service_healthy
+    volumes:
+      - trustdb-tikv-data:/data/tikv
+    command:
+      # Bind on 0.0.0.0 so host-published ports (and pod publish) reach TiKV; PD still uses advertise addr in-netns.
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=127.0.0.1:20160
+      - --status-addr=0.0.0.0:20180
+      - --pd=127.0.0.1:2379
+      - --data-dir=/data/tikv
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:20180/status"]
+      interval: 5s
+      timeout: 4s
+      retries: 40
+      start_period: 45s
+
+volumes:
+  trustdb-tikv-pd:
+  trustdb-tikv-data:

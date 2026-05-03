@@ -138,6 +138,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("proofstore.record_index_mode", defaults.Proofstore.RecordIndexMode)
 	v.SetDefault("proofstore.tikv_pd_endpoints", defaults.Proofstore.TiKVPDAddresses)
 	v.SetDefault("proofstore.tikv_keyspace", defaults.Proofstore.TiKVKeyspace)
+	v.SetDefault("proofstore.tikv_namespace", defaults.Proofstore.TiKVNamespace)
 	v.SetDefault("proofstore.index_storage_tokens", true)
 	v.SetDefault("log.level", defaults.Log.Level)
 	v.SetDefault("log.format", defaults.Log.Format)
@@ -205,6 +206,7 @@ func setDefaults(v *viper.Viper) {
 	bindEnv(v, "proofstore.record_index_mode", "TRUSTDB_PROOFSTORE_RECORD_INDEX_MODE")
 	bindEnv(v, "proofstore.tikv_pd_endpoints", "TRUSTDB_PROOFSTORE_TIKV_PD_ENDPOINTS", "TRUSTDB_TIKV_PD_ENDPOINTS")
 	bindEnv(v, "proofstore.tikv_keyspace", "TRUSTDB_PROOFSTORE_TIKV_KEYSPACE", "TRUSTDB_TIKV_KEYSPACE")
+	bindEnv(v, "proofstore.tikv_namespace", "TRUSTDB_PROOFSTORE_TIKV_NAMESPACE", "TRUSTDB_TIKV_NAMESPACE")
 	bindEnv(v, "proofstore.index_storage_tokens", "TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS")
 	bindEnv(v, "log.level", "TRUSTDB_LOG_LEVEL")
 	bindEnv(v, "log.format", "TRUSTDB_LOG_FORMAT")
@@ -330,6 +332,7 @@ func loadConfig(v *viper.Viper) trustconfig.Config {
 			RecordIndexMode:  proofstoreRecordIndexMode(v),
 			TiKVPDAddresses:  splitCSV(strings.Join(v.GetStringSlice("proofstore.tikv_pd_endpoints"), ",")),
 			TiKVKeyspace:     v.GetString("proofstore.tikv_keyspace"),
+			TiKVNamespace:    v.GetString("proofstore.tikv_namespace"),
 		},
 		Log: trustconfig.Log{
 			Level:  v.GetString("log.level"),
@@ -555,6 +558,8 @@ func configString(cfg trustconfig.Config, key string) string {
 		return cfg.Proofstore.RecordIndexMode
 	case "proofstore.tikv_keyspace":
 		return cfg.Proofstore.TiKVKeyspace
+	case "proofstore.tikv_namespace":
+		return cfg.Proofstore.TiKVNamespace
 	case "backup.compression":
 		return cfg.Backup.Compression
 	case "log.level":

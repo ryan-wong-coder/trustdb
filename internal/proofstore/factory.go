@@ -26,6 +26,7 @@ type Config struct {
 	Path                         string
 	TiKVPDAddresses              []string
 	TiKVKeyspace                 string
+	TiKVNamespace                string
 	RecordIndexMode              string
 	ArtifactSyncMode             string
 	IndexStorageTokens           bool
@@ -57,6 +58,7 @@ func Open(cfg Config) (Store, error) {
 			PDAddresses:                  cfg.TiKVPDAddresses,
 			PDAddressText:                cfg.Path,
 			Keyspace:                     cfg.TiKVKeyspace,
+			Namespace:                    cfg.TiKVNamespace,
 			RecordIndexMode:              cfg.RecordIndexMode,
 			ArtifactSyncMode:             cfg.ArtifactSyncMode,
 			IndexStorageTokens:           cfg.IndexStorageTokens,

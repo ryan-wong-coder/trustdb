@@ -373,6 +373,8 @@ go test -tags=integration ./...
 go test -tags=e2e ./...
 ```
 
+TiKV proofstore changes should also be validated against a real PD/TiKV when possible: start the local stack with [`docker-compose.tikv.yml`](docker-compose.tikv.yml) and run `./scripts/tikv-dev.sh test` (Linux/macOS) or `.\scripts\tikv-dev.ps1 test` (Windows). CI runs the same package when TiKV-related paths change (workflow [`.github/workflows/tikv-integration.yml`](.github/workflows/tikv-integration.yml)). See the README “Local TiKV via Docker” section.
+
 Desktop client changes usually require:
 
 ```powershell

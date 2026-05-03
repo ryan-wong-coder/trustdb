@@ -26,6 +26,12 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
+const (
+	defaultNamespace      = "default"
+	namespacePrefix       = "trustdb/proofstore/v1/ns/"
+	namespaceMetadataName = "trustdb/proofstore/v1/metadata"
+)
+
 // maxStoredObjectBytes caps decode input size to guard against corrupt
 // values that claim to be multi-gigabyte CBOR payloads. Mirrors the same
 // constant in the file backend.
@@ -52,7 +58,8 @@ type valueCloser struct{}
 func (valueCloser) Close() error { return nil }
 
 type tikvDB struct {
-	client *txnkv.Client
+	client    *txnkv.Client
+	namespace []byte
 }
 
 func (db *tikvDB) Close() error {
@@ -66,6 +73,10 @@ func (db *tikvDB) Get(key []byte) ([]byte, valueCloser, error) {
 	if db == nil || db.client == nil {
 		return nil, valueCloser{}, trusterr.New(trusterr.CodeFailedPrecondition, "tikv proofstore is closed")
 	}
+	return db.rawGet(db.physicalKey(key))
+}
+
+func (db *tikvDB) rawGet(key []byte) ([]byte, valueCloser, error) {
 	ctx := context.Background()
 	ts, err := db.client.GetTimestamp(ctx)
 	if err != nil {
@@ -98,6 +109,23 @@ func (db *tikvDB) NewIter(opts *iterOptions) (*tikvIter, error) {
 	if db == nil || db.client == nil {
 		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "tikv proofstore is closed")
 	}
+	var physicalOpts *iterOptions
+	if opts != nil {
+		physicalOpts = &iterOptions{
+			LowerBound: db.physicalKey(opts.LowerBound),
+			UpperBound: db.physicalKey(opts.UpperBound),
+		}
+	}
+	iter, err := db.rawNewIter(physicalOpts)
+	if err != nil {
+		return nil, err
+	}
+	iter.namespace = db.namespace
+	iter.stripNamespace = true
+	return iter, nil
+}
+
+func (db *tikvDB) rawNewIter(opts *iterOptions) (*tikvIter, error) {
 	ctx := context.Background()
 	ts, err := db.client.GetTimestamp(ctx)
 	if err != nil {
@@ -109,6 +137,30 @@ func (db *tikvDB) NewIter(opts *iterOptions) (*tikvIter, error) {
 		iter.upper = append([]byte(nil), opts.UpperBound...)
 	}
 	return iter, nil
+}
+
+func (db *tikvDB) physicalKey(key []byte) []byte {
+	out := make([]byte, 0, len(db.namespace)+len(key))
+	out = append(out, db.namespace...)
+	return append(out, key...)
+}
+
+func (db *tikvDB) rawSet(key, value []byte) error {
+	batch := &tikvBatch{db: db, raw: true}
+	defer batch.Close()
+	if err := batch.Set(key, value, nil); err != nil {
+		return err
+	}
+	return batch.Commit(syncWrite)
+}
+
+func (db *tikvDB) rawDelete(key []byte) error {
+	batch := &tikvBatch{db: db, raw: true}
+	defer batch.Close()
+	if err := batch.Delete(key, nil); err != nil {
+		return err
+	}
+	return batch.Commit(syncWrite)
 }
 
 type batchOp struct {
@@ -128,6 +180,7 @@ func (op deferredSet) Finish() error { return op.batch.Set(op.Key, op.Value, nil
 type tikvBatch struct {
 	db  *tikvDB
 	ops []batchOp
+	raw bool
 }
 
 func (b *tikvBatch) SetDeferred(keyLen, valueLen int) deferredSet {
@@ -135,11 +188,17 @@ func (b *tikvBatch) SetDeferred(keyLen, valueLen int) deferredSet {
 }
 
 func (b *tikvBatch) Set(key, value []byte, _ any) error {
+	if !b.raw {
+		key = b.db.physicalKey(key)
+	}
 	b.ops = append(b.ops, batchOp{key: append([]byte(nil), key...), value: append([]byte(nil), value...)})
 	return nil
 }
 
 func (b *tikvBatch) Delete(key []byte, _ any) error {
+	if !b.raw {
+		key = b.db.physicalKey(key)
+	}
 	b.ops = append(b.ops, batchOp{key: append([]byte(nil), key...), delete: true})
 	return nil
 }
@@ -190,20 +249,22 @@ type iterOptions struct {
 }
 
 type tikvIter struct {
-	snapshot *txnsnapshot.KVSnapshot
-	lower    []byte
-	upper    []byte
-	scanner  tikvclient.Iterator
-	key      []byte
-	value    []byte
-	err      error
+	snapshot       *txnsnapshot.KVSnapshot
+	namespace      []byte
+	stripNamespace bool
+	lower          []byte
+	upper          []byte
+	scanner        tikvclient.Iterator
+	key            []byte
+	value          []byte
+	err            error
 }
 
 func (it *tikvIter) First() bool { return it.openForward(it.lower) }
 func (it *tikvIter) Last() bool  { return it.openReverse(it.upper) }
 
 func (it *tikvIter) SeekGE(key []byte) bool {
-	start := key
+	start := it.physicalKey(key)
 	if len(it.lower) > 0 && kv.CmpKey(start, it.lower) < 0 {
 		start = it.lower
 	}
@@ -211,7 +272,7 @@ func (it *tikvIter) SeekGE(key []byte) bool {
 }
 
 func (it *tikvIter) SeekLT(key []byte) bool {
-	end := key
+	end := it.physicalKey(key)
 	if len(it.upper) > 0 && (len(end) == 0 || kv.CmpKey(end, it.upper) > 0) {
 		end = it.upper
 	}
@@ -233,7 +294,7 @@ func (it *tikvIter) Prev() bool {
 	if len(it.key) == 0 {
 		return false
 	}
-	return it.openReverse(it.key)
+	return it.openReverse(it.physicalKey(it.key))
 }
 
 func (it *tikvIter) Value() []byte { return it.value }
@@ -294,9 +355,19 @@ func (it *tikvIter) captureReverse() bool {
 }
 
 func (it *tikvIter) captureCurrent() bool {
-	it.key = append(it.key[:0], it.scanner.Key()...)
+	key := it.scanner.Key()
+	if it.stripNamespace && bytes.HasPrefix(key, it.namespace) {
+		key = key[len(it.namespace):]
+	}
+	it.key = append(it.key[:0], key...)
 	it.value = append(it.value[:0], it.scanner.Value()...)
 	return true
+}
+
+func (it *tikvIter) physicalKey(key []byte) []byte {
+	out := make([]byte, 0, len(it.namespace)+len(key))
+	out = append(out, it.namespace...)
+	return append(out, key...)
 }
 
 const (
@@ -356,6 +427,7 @@ type Options struct {
 	PDAddresses                  []string
 	PDAddressText                string
 	Keyspace                     string
+	Namespace                    string
 	RecordIndexMode              string
 	ArtifactSyncMode             string
 	IndexStorageTokens           bool
@@ -404,6 +476,7 @@ type Store struct {
 func Open(pdAddresses []string) (*Store, error) {
 	return OpenWithOptions(Options{
 		PDAddresses:      pdAddresses,
+		Namespace:        defaultNamespace,
 		RecordIndexMode:  RecordIndexModeFull,
 		ArtifactSyncMode: ArtifactSyncModeChunk,
 	})
@@ -423,10 +496,154 @@ func OpenWithOptions(opts Options) (*Store, error) {
 		return nil, trusterr.Wrap(trusterr.CodeInternal, "open tikv proofstore", err)
 	}
 	return &Store{
-		db:               &tikvDB{client: client},
+		db:               &tikvDB{client: client, namespace: namespaceKeyPrefix(opts.Namespace)},
 		recordIndexMode:  normalizeRecordIndexMode(opts),
 		artifactSyncMode: normalizeArtifactSyncMode(opts.ArtifactSyncMode),
 	}, nil
+}
+
+func NormalizeNamespace(namespace string) string {
+	trimmed := strings.TrimSpace(namespace)
+	if trimmed == "" {
+		return defaultNamespace
+	}
+	return trimmed
+}
+
+func namespaceKeyPrefix(namespace string) []byte {
+	normalized := NormalizeNamespace(namespace)
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(normalized))
+	out := make([]byte, 0, len(namespacePrefix)+len(encoded)+1)
+	out = append(out, namespacePrefix...)
+	out = append(out, encoded...)
+	return append(out, '/')
+}
+
+type MigrationOptions struct {
+	Overwrite    bool
+	DeleteLegacy bool
+}
+
+type MigrationReport struct {
+	Scanned int
+	Copied  int
+	Skipped int
+	Deleted int
+}
+
+// MigrateLegacyKeys copies keys written by the first TiKV backend, which used
+// Pebble-compatible bare keys, into this store's namespaced key prefix. It is
+// intentionally opt-in so operators can validate copied data before deleting
+// the legacy key range.
+func (s *Store) MigrateLegacyKeys(ctx context.Context, opts MigrationOptions) (MigrationReport, error) {
+	if s == nil || s.db == nil {
+		return MigrationReport{}, trusterr.New(trusterr.CodeFailedPrecondition, "tikv proofstore is closed")
+	}
+	var report MigrationReport
+	for _, key := range legacyScalarKeys() {
+		if err := ctx.Err(); err != nil {
+			return report, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "tikv legacy migration canceled", err)
+		}
+		value, _, err := s.db.rawGet(key)
+		if err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			return report, trusterr.Wrap(trusterr.CodeDataLoss, "read legacy tikv key", err)
+		}
+		if err := s.migrateLegacyKey(key, value, opts, &report); err != nil {
+			return report, err
+		}
+	}
+	for _, prefix := range legacyPrefixes() {
+		if err := ctx.Err(); err != nil {
+			return report, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "tikv legacy migration canceled", err)
+		}
+		lower, upper := prefixBounds(prefix)
+		iter, err := s.db.rawNewIter(&iterOptions{LowerBound: lower, UpperBound: upper})
+		if err != nil {
+			return report, trusterr.Wrap(trusterr.CodeDataLoss, "open legacy tikv iterator", err)
+		}
+		for ok := iter.First(); ok; ok = iter.Next() {
+			if err := ctx.Err(); err != nil {
+				_ = iter.Close()
+				return report, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "tikv legacy migration canceled", err)
+			}
+			key := append([]byte(nil), iter.key...)
+			value := append([]byte(nil), iter.Value()...)
+			if err := s.migrateLegacyKey(key, value, opts, &report); err != nil {
+				_ = iter.Close()
+				return report, err
+			}
+		}
+		if err := iter.Error(); err != nil {
+			_ = iter.Close()
+			return report, trusterr.Wrap(trusterr.CodeDataLoss, "iterate legacy tikv keys", err)
+		}
+		if err := iter.Close(); err != nil {
+			return report, trusterr.Wrap(trusterr.CodeDataLoss, "close legacy tikv iterator", err)
+		}
+	}
+	return report, nil
+}
+
+func (s *Store) migrateLegacyKey(key, value []byte, opts MigrationOptions, report *MigrationReport) error {
+	report.Scanned++
+	target := s.db.physicalKey(key)
+	if !opts.Overwrite {
+		if _, _, err := s.db.rawGet(target); err == nil {
+			report.Skipped++
+			return nil
+		} else if !isNotFound(err) {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "check migrated tikv key", err)
+		}
+	}
+	if err := s.db.rawSet(target, value); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "write migrated tikv key", err)
+	}
+	report.Copied++
+	if opts.DeleteLegacy {
+		if err := s.db.rawDelete(key); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "delete legacy tikv key", err)
+		}
+		report.Deleted++
+	}
+	return nil
+}
+
+func legacyScalarKeys() [][]byte {
+	return [][]byte{
+		[]byte(checkpointKey),
+		[]byte(globalStateKey),
+		[]byte(namespaceMetadataName),
+	}
+}
+
+func legacyPrefixes() []string {
+	return []string{
+		prefixBundle,
+		prefixBundleV2,
+		prefixRecordByID,
+		prefixRecordByTime,
+		prefixRecordByBatch,
+		prefixRecordByLevel,
+		prefixRecordByTenant,
+		prefixRecordByClient,
+		prefixRecordByHash,
+		prefixRecordByToken,
+		prefixManifest,
+		prefixRoot,
+		prefixGlobalLeaf,
+		prefixGlobalBatch,
+		prefixGlobalNode,
+		prefixSTH,
+		prefixGlobalTile,
+		prefixGlobalOutbox,
+		prefixGlobalStatus,
+		prefixAnchorOutbox,
+		prefixAnchorStatus,
+		prefixAnchorResult,
+	}
 }
 
 func normalizeRecordIndexMode(opts Options) string {

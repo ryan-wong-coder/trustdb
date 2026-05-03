@@ -1,0 +1,77 @@
+# Runs real PD+TiKV against proofstore/tikv integration tests (not skipped).
+# PRs only run when TiKV-related paths change; use workflow_dispatch for manual runs.
+
+name: TiKV integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/tikv-integration.yml"
+      - "docker-compose.tikv.yml"
+      - "internal/proofstore/factory.go"
+      - "internal/proofstore/tikv/**"
+      - "scripts/tikv-dev.sh"
+      - "scripts/tikv-dev.ps1"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/tikv-integration.yml"
+      - "docker-compose.tikv.yml"
+      - "internal/proofstore/factory.go"
+      - "internal/proofstore/tikv/**"
+      - "scripts/tikv-dev.sh"
+      - "scripts/tikv-dev.ps1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tikv-integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proofstore-tikv:
+    name: proofstore/tikv (PD+TiKV)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Start PD+TiKV
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker compose -f docker-compose.tikv.yml up -d
+          deadline=$((SECONDS + 240))
+          while (( SECONDS < deadline )); do
+            if curl -fsS --max-time 3 http://127.0.0.1:2379/pd/api/v1/health >/dev/null 2>&1 \
+              && curl -fsS --max-time 3 http://127.0.0.1:20180/status >/dev/null 2>&1; then
+              echo "PD and TiKV are healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::timed out waiting for PD/TiKV"
+          docker compose -f docker-compose.tikv.yml ps || true
+          docker compose -f docker-compose.tikv.yml logs || true
+          exit 1
+
+      - name: Run TiKV integration tests
+        env:
+          TRUSTDB_TIKV_PD_ENDPOINTS: 127.0.0.1:2379
+        run: go test -count=1 -mod=readonly -tags=integration ./internal/proofstore/tikv
+
+      - name: Tear down PD+TiKV
+        if: always()
+        shell: bash
+        run: docker compose -f docker-compose.tikv.yml down -v

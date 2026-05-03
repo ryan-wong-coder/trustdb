@@ -1,10 +1,10 @@
 # TrustDB
 
-![CI](https://github.com/ryan-wong-coder/trustdb/actions/workflows/ci.yml/badge.svg)
+CI
 
 [中文说明](README.zh-CN.md) | [Blog](https://www.blog.ryan-wong.cn/)
 
-![TrustDB system architecture](assets/readme/system-architecture.png)
+TrustDB system architecture
 
 TrustDB is a verifiable evidence database that can run as a simple single-node service or as a horizontally scalable deployment with storage-compute separation. It turns local file claims into signed receipts, Merkle batch proofs, global transparency-log proofs, and optional external STH anchors.
 
@@ -25,7 +25,7 @@ The high-write private-IP CVM retest report is available in English and Chinese:
 
 ## Desktop Client
 
-![TrustDB desktop client overview](assets/readme/desktop-overview.png)
+TrustDB desktop client overview
 
 The Wails + Vue desktop client provides local identity setup, HTTP/gRPC server configuration, file attestation, record and proof management, `.sproof` export, and local proof verification.
 
@@ -41,7 +41,7 @@ The Wails + Vue desktop client provides local identity setup, HTTP/gRPC server c
 - Global Transparency Log that appends committed batch roots, persists STHs, and serves inclusion/consistency proofs.
 - L5 anchor pipeline that anchors only `SignedTreeHead` / global roots, not per-batch roots.
 - Anchor sinks for `off`, `noop`, local file output, and OpenTimestamps, with OTS upgrade worker support.
-- Proofstore backends for local file storage, Pebble, and experimental TiKV; TiKV lets multiple compute nodes share durable proof data for storage-compute separation.
+- Proofstore backends for local file storage, Pebble, and optional TiKV (shared PD/TiKV cluster) so multiple compute nodes can share durable proof data for storage-compute separation.
 - Paginated server-side record and root APIs with cursor/range-oriented access paths.
 - Portable `.tdbackup` create, verify, and resumable restore flow.
 - Public Go SDK for claim signing, server calls, proof export, and local verification.
@@ -50,17 +50,19 @@ The Wails + Vue desktop client provides local identity setup, HTTP/gRPC server c
 
 ## Proof Levels
 
-![TrustDB proof levels](assets/readme/proof-levels.png)
+TrustDB proof levels
 
 TrustDB uses layered proof semantics:
 
-| Level | Meaning | Main artifact |
-| --- | --- | --- |
-| L1 | Client signs a file claim containing content hash and metadata. | `SignedClaim` / `.tdclaim` |
-| L2 | Server validates the claim and accepts it into WAL. | `AcceptedReceipt` |
-| L3 | Claim is committed into a batch Merkle tree. | `ProofBundle` / `.tdproof` |
-| L4 | The batch root is included in the Global Transparency Log and a target STH. | `GlobalLogProof` / `.tdgproof` |
-| L5 | The corresponding STH/global root is externally anchored. | `STHAnchorResult` / `.tdanchor-result` |
+
+| Level | Meaning                                                                     | Main artifact                          |
+| ----- | --------------------------------------------------------------------------- | -------------------------------------- |
+| L1    | Client signs a file claim containing content hash and metadata.             | `SignedClaim` / `.tdclaim`             |
+| L2    | Server validates the claim and accepts it into WAL.                         | `AcceptedReceipt`                      |
+| L3    | Claim is committed into a batch Merkle tree.                                | `ProofBundle` / `.tdproof`             |
+| L4    | The batch root is included in the Global Transparency Log and a target STH. | `GlobalLogProof` / `.tdgproof`         |
+| L5    | The corresponding STH/global root is externally anchored.                   | `STHAnchorResult` / `.tdanchor-result` |
+
 
 For exchange and desktop verification, `.sproof` is the main single-file proof format. It can contain the L3 `ProofBundle`, optional L4 `GlobalLogProof`, and optional L5 `STHAnchorResult` together. The stable v1 format is documented in [formats/SPROOF_V1.md](formats/SPROOF_V1.md).
 
@@ -81,21 +83,23 @@ TrustDB's default deployment is single-node, while the TiKV proofstore backend s
 
 Implemented HTTP endpoints include:
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /healthz` | Health check. |
-| `POST /v1/claims` | Submit a signed claim. |
-| `GET /v1/records` | Paginated record list and search. |
-| `GET /v1/records/{record_id}` | Read record index details. |
-| `GET /v1/proofs/{record_id}` | Fetch L3 proof bundle. |
-| `GET /v1/roots` | List batch roots. |
-| `GET /v1/roots/latest` | Fetch latest batch root. |
-| `GET /v1/sth/latest` | Fetch latest SignedTreeHead. |
-| `GET /v1/sth/{tree_size}` | Fetch a specific STH. |
-| `GET /v1/global-log/inclusion/{batch_id}` | Fetch global-log inclusion proof for a batch. |
-| `GET /v1/global-log/consistency?from=&to=` | Fetch global-log consistency proof. |
-| `GET /v1/anchors/sth/{tree_size}` | Fetch STH anchor status/result. |
-| `GET /metrics` | Prometheus metrics. |
+
+| Endpoint                                   | Purpose                                       |
+| ------------------------------------------ | --------------------------------------------- |
+| `GET /healthz`                             | Health check.                                 |
+| `POST /v1/claims`                          | Submit a signed claim.                        |
+| `GET /v1/records`                          | Paginated record list and search.             |
+| `GET /v1/records/{record_id}`              | Read record index details.                    |
+| `GET /v1/proofs/{record_id}`               | Fetch L3 proof bundle.                        |
+| `GET /v1/roots`                            | List batch roots.                             |
+| `GET /v1/roots/latest`                     | Fetch latest batch root.                      |
+| `GET /v1/sth/latest`                       | Fetch latest SignedTreeHead.                  |
+| `GET /v1/sth/{tree_size}`                  | Fetch a specific STH.                         |
+| `GET /v1/global-log/inclusion/{batch_id}`  | Fetch global-log inclusion proof for a batch. |
+| `GET /v1/global-log/consistency?from=&to=` | Fetch global-log consistency proof.           |
+| `GET /v1/anchors/sth/{tree_size}`          | Fetch STH anchor status/result.               |
+| `GET /metrics`                             | Prometheus metrics.                           |
+
 
 ## gRPC API
 
@@ -186,28 +190,39 @@ go run ./cmd/trustdb backup verify --file .trustdb-dev/trustdb.tdbackup
 
 Two example profiles are included:
 
-| File | Intended use |
-| --- | --- |
-| `configs/development.yaml` | Local development and demos. Uses file proofstore and `noop` anchor sink. |
-| `configs/production.yaml` | Baseline production profile. Uses Pebble proofstore, directory WAL, group fsync, global log, and OTS anchor sink; switch the proofstore to TiKV for shared storage and horizontal compute-node scaling. |
+
+| File                       | Intended use                                                                                                                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `configs/development.yaml` | Local development and demos. Uses file proofstore and `noop` anchor sink.                                                                                                                               |
+| `configs/production.yaml`  | Baseline production profile. Uses Pebble proofstore, directory WAL, group fsync, global log, and OTS anchor sink; switch the proofstore to TiKV for shared storage and horizontal compute-node scaling. |
+
 
 Important configuration groups:
 
-| Group | Purpose |
-| --- | --- |
-| `paths` | Data, key registry, WAL, object, and proof directories. |
-| `metastore` / `metastore_path` | Proofstore backend selection: `file`, `pebble`, or experimental `tikv`; for TiKV, `metastore_path` may provide comma-separated PD endpoints for the shared storage cluster. |
-| `wal` | Fsync strategy and group-commit interval. |
-| `server` | HTTP listen address, optional gRPC listen address, queue size, workers, and timeouts. |
-| `batch` | Batch queue, max records, and max delay. |
-| `global_log` | Enables the global transparency log and configures the node-local `log_id`. |
-| `anchor` | L5 anchor scope, sink, max delay, OTS calendars, and OTS upgrader. |
-| `history` | Global-log tile size and hot window. |
-| `backup` | Backup compression. |
-| `log` | Structured logging, rotation, and async logging. |
-| `keys` | Client, server, and registry key file paths. |
+
+| Group                          | Purpose                                                                                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `paths`                        | Data, key registry, WAL, object, and proof directories.                                                                                                                              |
+| `metastore` / `metastore_path` | Proofstore backend selection: `file`, `pebble`, or `tikv`; for TiKV, `metastore_path` may provide comma-separated PD endpoints for the shared storage cluster.                       |
+| `proofstore.tikv_namespace`    | Application-level TiKV key namespace. Multiple compute nodes that should share one proofstore must use the same namespace; independent tenants/logs should use different namespaces. |
+| `wal`                          | Fsync strategy and group-commit interval.                                                                                                                                            |
+| `server`                       | HTTP listen address, optional gRPC listen address, queue size, workers, and timeouts.                                                                                                |
+| `batch`                        | Batch queue, max records, and max delay.                                                                                                                                             |
+| `global_log`                   | Enables the global transparency log and configures the node-local `log_id`.                                                                                                          |
+| `anchor`                       | L5 anchor scope, sink, max delay, OTS calendars, and OTS upgrader.                                                                                                                   |
+| `history`                      | Global-log tile size and hot window.                                                                                                                                                 |
+| `backup`                       | Backup compression.                                                                                                                                                                  |
+| `log`                          | Structured logging, rotation, and async logging.                                                                                                                                     |
+| `keys`                         | Client, server, and registry key file paths.                                                                                                                                         |
+
 
 Most config values can also be overridden with `TRUSTDB_*` environment variables or command flags. Run `go run ./cmd/trustdb serve --help` for the currently implemented server flags.
+
+TiKV keys are stored under a TrustDB-managed namespace prefix. Older pre-namespace TiKV data written with bare Pebble-compatible keys can be copied into a namespace with:
+
+```powershell
+go run ./cmd/trustdb metastore tikv-migrate-legacy --pd-endpoints=127.0.0.1:2379 --namespace=default
+```
 
 ## Desktop Client
 
@@ -291,6 +306,25 @@ go test -race ./...
 cd clients/desktop; go test ./...
 cd clients/desktop/frontend; npm run build
 ```
+
+### Local TiKV via Docker (integration tests)
+
+The repo ships a minimal **single-node** PD+TiKV stack for host-run Go tests (not a production layout):
+
+- Compose: [`docker-compose.tikv.yml`](docker-compose.tikv.yml) (project name `trustdb-tikv-dev`, PD `127.0.0.1:2379`, TiKV `127.0.0.1:20160`). Override PD/TiKV images with `TRUSTDB_TIKV_PD_IMAGE` / `TRUSTDB_TIKV_TIKV_IMAGE` (environment or repo-root `.env`; see [`scripts/tikv-dev.env.example`](scripts/tikv-dev.env.example)).
+- **Linux / macOS**: `./scripts/tikv-dev.sh up` then `./scripts/tikv-dev.sh test` (optional `./scripts/tikv-dev.sh test-legacy` for legacy migration tests). `./scripts/tikv-dev.sh reset` removes volumes for a clean cluster. Backend: `TRUSTDB_TIKV_COMPOSE_VIA` = `auto` (default), `native`, `podman`, or `docker-api`. **auto** uses `podman compose` when it is available on Unix-like systems (Git Bash / MSYS on Windows uses **native** to match the PowerShell script); otherwise it uses a **Podman-only native path** (`podman pod` + `podman run`, same images/ports as the compose file—no Docker CLI). **native** always uses that path. **podman** forces `podman compose` (honours `TRUSTDB_TIKV_COMPOSE_FILE`). **docker-api** is optional: `docker compose` with `DOCKER_HOST` (e.g. Podman’s npipe on Windows); install the Docker CLI only if you use this mode.
+- **Windows (PowerShell)**: `.\scripts\tikv-dev.ps1 up` then `.\scripts\tikv-dev.ps1 test` (optional `test-legacy`). `.\scripts\tikv-dev.ps1 reset` removes volumes. Default **auto** on this script is the same as **native**: Podman only (`podman pod` + named volumes + the same PD/TiKV images), so **podman compose** and Docker CLI are not required. Use `TRUSTDB_TIKV_COMPOSE_VIA=podman` if you want compose (and a custom `TRUSTDB_TIKV_COMPOSE_FILE`); use `docker-api` only with Docker CLI + `TRUSTDB_TIKV_DOCKER_HOST` if you intentionally target a Docker-compatible API.
+- **CI**: the [TiKV integration workflow](.github/workflows/tikv-integration.yml) starts `docker-compose.tikv.yml` on GitHub-hosted runners and runs `go test -tags=integration ./internal/proofstore/tikv` when TiKV-related paths change, or when you run it manually (**Actions → TiKV integration → Run workflow**).
+
+Manual equivalent:
+
+```powershell
+docker compose -f docker-compose.tikv.yml --project-name trustdb-tikv-dev up -d
+$env:TRUSTDB_TIKV_PD_ENDPOINTS = "127.0.0.1:2379"
+go test -count=1 -tags=integration ./internal/proofstore/tikv
+```
+
+Real TiKV conformance and shared-namespace tests are enabled by setting `TRUSTDB_TIKV_PD_ENDPOINTS` before running integration tests. The legacy-key migration tests additionally require `TRUSTDB_TIKV_RUN_LEGACY_MIGRATION_TEST=1` because they intentionally read bare legacy TiKV key ranges.
 
 The repository includes tests for deterministic CBOR, claims, WAL, batch proofs, global log proofs, anchors, backup/restore, HTTP API behavior, and desktop-local storage/verification paths.
 
