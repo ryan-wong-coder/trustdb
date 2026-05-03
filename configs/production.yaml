@@ -6,6 +6,8 @@
 # - L4 global log is always enabled in current serve path.
 # - L5 anchors publish STH/global roots only.
 
+run_profile: single_node_production
+
 paths:
   data_dir: "/var/lib/trustdb"
   key_registry: "/etc/trustdb/keys/clients.tdkeys"

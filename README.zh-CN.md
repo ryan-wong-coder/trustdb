@@ -184,17 +184,21 @@ go run ./cmd/trustdb backup verify --file .trustdb-dev/trustdb.tdbackup
 
 ## 配置
 
-仓库内包含两个示例配置：
+仓库内包含三套带 `run_profile` 标签的示例配置（另见 [configs/README.md](configs/README.md)）：
 
 | 文件 | 用途 |
 | --- | --- |
-| `configs/development.yaml` | 本地开发与演示。使用 file proofstore 和 `noop` anchor sink。 |
-| `configs/production.yaml` | 基线生产配置。使用 Pebble proofstore、directory WAL、group fsync、global log 和 OTS anchor sink；切换到 TiKV proofstore 后可使用共享存储并水平扩展计算节点。 |
+| `configs/development.yaml` | `development`：本地开发与演示；file proofstore、`noop` anchor。 |
+| `configs/production.yaml` | `single_node_production`：单机生产基线；Pebble proofstore、directory WAL、group fsync、global log、OTS anchor；可换 TiKV 做共享存储与水平扩展。 |
+| `configs/benchmark.yaml` | `benchmark`：压测/吞吐实验；Pebble、`wal.fsync_mode: batch`、更大队列、async batch proof、`noop` anchor，**不**代表生产审计语义。 |
+
+可选顶层字段 `run_profile` 仅用于 `serve` 启动时输出档案说明与风险提示，不改变实际行为；详见 [configs/README.md](configs/README.md)。未设置时视为自定义部署。
 
 主要配置组：
 
 | 配置组 | 作用 |
 | --- | --- |
+| `run_profile` | 可选：`development`、`single_node_production`、`benchmark`；`serve` 仅用于启动日志提示，不改变行为。 |
 | `paths` | 数据、key registry、WAL、object、proof 目录。 |
 | `metastore` / `metastore_path` | Proofstore 后端：`file`、`pebble` 或 `tikv`；TiKV 模式下 `metastore_path` 可提供逗号分隔的 PD endpoint，连接共享存储集群。 |
 | `proofstore.tikv_namespace` | TiKV 内的应用级 key namespace。需要共享同一 proofstore 的多个计算节点必须使用同一个 namespace；独立租户或独立 log 应使用不同 namespace。 |

@@ -132,6 +132,32 @@ func TestValidateRejectsInvalidProofstoreConfig(t *testing.T) {
 	}
 }
 
+func TestValidateRunProfileAliases(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{"", "development", "DEV", "single_node_production", "prod", "benchmark", "bench"} {
+		raw := raw
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			cfg := Default()
+			cfg.RunProfile = raw
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRunProfileRejectsUnknown(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.RunProfile = "staging"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for unknown run_profile")
+	}
+}
+
 func TestRedactedHidesKeyPaths(t *testing.T) {
 	t.Parallel()
 

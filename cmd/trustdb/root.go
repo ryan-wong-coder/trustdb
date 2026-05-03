@@ -106,6 +106,7 @@ func setDefaults(v *viper.Viper) {
 	v.AutomaticEnv()
 
 	defaults := trustconfig.Default()
+	v.SetDefault("run_profile", defaults.RunProfile)
 	v.SetDefault("paths.data_dir", defaults.Paths.DataDir)
 	v.SetDefault("paths.key_registry", defaults.Paths.KeyRegistry)
 	v.SetDefault("paths.wal", defaults.Paths.WAL)
@@ -174,6 +175,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("anchor.ots.upgrade.batch_size", 0)
 	v.SetDefault("anchor.ots.upgrade.timeout", "")
 
+	bindEnv(v, "run_profile", "TRUSTDB_RUN_PROFILE")
 	bindEnv(v, "paths.data_dir", "TRUSTDB_PATHS_DATA_DIR", "TRUSTDB_DATA_DIR")
 	bindEnv(v, "paths.key_registry", "TRUSTDB_PATHS_KEY_REGISTRY", "TRUSTDB_KEY_REGISTRY")
 	bindEnv(v, "paths.wal", "TRUSTDB_PATHS_WAL", "TRUSTDB_WAL")
@@ -281,6 +283,7 @@ func (rt *runtimeConfig) close() error {
 
 func loadConfig(v *viper.Viper) trustconfig.Config {
 	return trustconfig.Config{
+		RunProfile: v.GetString("run_profile"),
 		Paths: trustconfig.Paths{
 			DataDir:     v.GetString("paths.data_dir"),
 			KeyRegistry: v.GetString("paths.key_registry"),

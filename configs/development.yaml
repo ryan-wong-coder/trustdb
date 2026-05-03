@@ -3,6 +3,8 @@
 # This profile favors inspectability over scale. It intentionally uses the
 # file proofstore and a noop anchor sink. Do not use it for high-volume data.
 
+run_profile: development
+
 paths:
   data_dir: ".trustdb-dev"
   key_registry: ".trustdb-dev/keys.tdkeys"

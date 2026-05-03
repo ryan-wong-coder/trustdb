@@ -1,0 +1,19 @@
+# TrustDB configuration templates
+
+Shipped YAML files are **starting points** only: adjust paths, keys, `server.listen`, anchor calendars, and TiKV endpoints for your environment.
+
+| File | `run_profile` | Purpose |
+| --- | --- | --- |
+| `development.yaml` | `development` | Local demos: file proofstore, `noop` anchor, debug-friendly logging. |
+| `production.yaml` | `single_node_production` | Single-node baseline: Pebble (or TiKV) proofstore, OTS anchor, JSON logs. |
+| `benchmark.yaml` | `benchmark` | Throughput experiments: Pebble, `wal.fsync_mode: batch`, async batch proofs, `noop` anchor. |
+
+## `run_profile`
+
+Optional top-level string. It **does not change behavior**; `trustdb serve` logs the label and short risk hints so operators know which template mindset they started from.
+
+Allowed values (aliases accepted): `development` (`dev`), `single_node_production` (`prod`, `production`, `single-node-prod`), `benchmark` (`bench`, `loadtest`).
+
+Override via `TRUSTDB_RUN_PROFILE`.
+
+If omitted, serve logs that the deployment is treated as **custom**.

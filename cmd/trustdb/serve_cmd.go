@@ -15,6 +15,7 @@ import (
 
 	"github.com/ryan-wong-coder/trustdb/internal/anchor"
 	"github.com/ryan-wong-coder/trustdb/internal/app"
+	trustconfig "github.com/ryan-wong-coder/trustdb/internal/config"
 	"github.com/ryan-wong-coder/trustdb/internal/batch"
 	"github.com/ryan-wong-coder/trustdb/internal/globallog"
 	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
@@ -285,6 +286,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if metaKind == string(proofstore.BackendPebble) && metastorePath == "" {
 				metaPath = proofDir + "/pebble"
 			}
+			logServeRunProfile(rt, metaKind, anchorSinkKind)
 			if metaKind == string(proofstore.BackendFile) {
 				rt.logger.Warn().Msg("file proofstore is intended for development/small datasets; use --metastore=pebble for production-scale attestations")
 			}
@@ -915,6 +917,26 @@ func walDurabilityProfile(mode string) string {
 		return "unsafe_batch"
 	default:
 		return "bounded_group"
+	}
+}
+
+func logServeRunProfile(rt *runtimeConfig, metastoreBackend, anchorSink string) {
+	canonical := trustconfig.NormalizeRunProfile(rt.cfg.RunProfile)
+	if strings.TrimSpace(rt.cfg.RunProfile) == "" {
+		rt.logger.Info().Msg("config run_profile is unset — deployment treated as custom; labelled templates live under configs/")
+		return
+	}
+	if canonical == "" {
+		return
+	}
+	if title := trustconfig.RunProfileStartupTitle(canonical); title != "" {
+		rt.logger.Info().
+			Str("run_profile", canonical).
+			Str("run_profile_raw", strings.TrimSpace(rt.cfg.RunProfile)).
+			Msg(title)
+	}
+	for _, w := range trustconfig.RunProfileWarnings(canonical, metastoreBackend, anchorSink) {
+		rt.logger.Warn().Str("run_profile", canonical).Msg(w)
 	}
 }
 

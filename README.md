@@ -188,13 +188,14 @@ go run ./cmd/trustdb backup verify --file .trustdb-dev/trustdb.tdbackup
 
 ## Configuration
 
-Two example profiles are included:
+Three labelled templates are included (see `configs/README.md` for `run_profile` semantics and startup hints):
 
 
-| File                       | Intended use                                                                                                                                                                                            |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `configs/development.yaml` | Local development and demos. Uses file proofstore and `noop` anchor sink.                                                                                                                               |
-| `configs/production.yaml`  | Baseline production profile. Uses Pebble proofstore, directory WAL, group fsync, global log, and OTS anchor sink; switch the proofstore to TiKV for shared storage and horizontal compute-node scaling. |
+| File                       | `run_profile`              | Intended use                                                                                                                                                                                            |
+| -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `configs/development.yaml` | `development`              | Local development and demos. Uses file proofstore and `noop` anchor sink.                                                                                                                               |
+| `configs/production.yaml`  | `single_node_production`   | Baseline production profile. Uses Pebble proofstore, directory WAL, group fsync, global log, and OTS anchor sink; switch the proofstore to TiKV for shared storage and horizontal compute-node scaling. |
+| `configs/benchmark.yaml`   | `benchmark`                | Load and ingest benchmarks: Pebble proofstore, `wal.fsync_mode: batch`, larger queues, async batch proofs, `noop` anchor — **not** for production audit semantics.                                       |
 
 
 Important configuration groups:
@@ -202,6 +203,7 @@ Important configuration groups:
 
 | Group                          | Purpose                                                                                                                                                                              |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `run_profile`                  | Optional operator label (`development`, `single_node_production`, `benchmark`); `trustdb serve` logs profile guidance only — it does not alter behavior.                           |
 | `paths`                        | Data, key registry, WAL, object, and proof directories.                                                                                                                              |
 | `metastore` / `metastore_path` | Proofstore backend selection: `file`, `pebble`, or `tikv`; for TiKV, `metastore_path` may provide comma-separated PD endpoints for the shared storage cluster.                       |
 | `proofstore.tikv_namespace`    | Application-level TiKV key namespace. Multiple compute nodes that should share one proofstore must use the same namespace; independent tenants/logs should use different namespaces. |

@@ -1,0 +1,102 @@
+# TrustDB load / throughput benchmark profile.
+#
+# Tuned for ingest and batch pressure tests (e.g. bench_e2e), not for production
+# audit trails. Uses Pebble proofstore, relaxed WAL fsync, async batch proofs,
+# noop anchor, and reduced proofstore indexing overhead.
+
+run_profile: benchmark
+
+paths:
+  data_dir: ".trustdb-bench"
+  key_registry: ".trustdb-bench/keys.tdkeys"
+  wal: ".trustdb-bench/wal"
+  object_dir: ".trustdb-bench/objects"
+  proof_dir: ".trustdb-bench/proofs"
+
+metastore: "pebble"
+metastore_path: ".trustdb-bench/pebble"
+
+proofstore:
+  record_index_mode: "no_storage_tokens"
+  artifact_sync_mode: "batch"
+  tikv_pd_endpoints: []
+  tikv_keyspace: ""
+  tikv_namespace: "default"
+
+wal:
+  fsync_mode: "batch"
+  group_commit_interval: "50ms"
+
+identity:
+  tenant: "default"
+  client: ""
+  key_id: ""
+
+server:
+  listen: "127.0.0.1:8080"
+  grpc_listen: ""
+  id: "trustdb-bench-1"
+  key_id: "server-key"
+  queue_size: 131072
+  workers: 16
+  read_timeout: "30s"
+  write_timeout: "120s"
+  shutdown_timeout: "30s"
+
+registry:
+  key_id: "registry-key"
+
+batch:
+  queue_size: 131072
+  max_records: 16384
+  max_delay: "50ms"
+  proof_mode: "async"
+
+global_log:
+  enabled: true
+  log_id: "trustdb-bench"
+
+anchor:
+  scope: "global"
+  max_delay: "5m"
+  sink: "noop"
+  path: ".trustdb-bench/anchors/sth-anchors.jsonl"
+  ots:
+    calendars: []
+    min_accepted: 0
+    timeout: ""
+    upgrade:
+      enabled: false
+      interval: ""
+      batch_size: 0
+      timeout: ""
+
+history:
+  tile_size: 256
+  hot_window_leaves: 262144
+
+backup:
+  compression: "gzip"
+
+log:
+  level: "warn"
+  format: "json"
+  output: "stderr"
+  file:
+    path: ".trustdb-bench/logs/trustdb.log"
+    max_size_mb: 128
+    max_backups: 4
+    max_age_days: 7
+    compress: true
+  async:
+    enabled: false
+    buffer_size: 4096
+    drop_on_full: false
+
+keys:
+  client_private: ""
+  client_public: ".trustdb-bench/client.pub"
+  server_private: ".trustdb-bench/server.key"
+  server_public: ".trustdb-bench/server.pub"
+  registry_private: ""
+  registry_public: ""

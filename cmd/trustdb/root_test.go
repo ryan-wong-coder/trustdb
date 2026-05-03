@@ -593,6 +593,31 @@ func TestKeyInspectCommand(t *testing.T) {
 	}
 }
 
+func TestShippedProfileConfigsLoad(t *testing.T) {
+	t.Parallel()
+
+	repoConfigs := filepath.Join("..", "..", "configs")
+	for _, name := range []string{"development.yaml", "production.yaml", "benchmark.yaml"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var out, errOut bytes.Buffer
+			cmd := newRootCommand(&out, &errOut)
+			cmd.SetArgs([]string{"--config", filepath.Join(repoConfigs, name), "config", "validate"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("%s: %v stderr=%s", name, err, errOut.String())
+			}
+			var got map[string]any
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatalf("%s: output not json: %q err=%v", name, out.String(), err)
+			}
+			if got["valid"] != true {
+				t.Fatalf("%s: expected valid config, got %#v", name, got)
+			}
+		})
+	}
+}
+
 func TestVersionCommand(t *testing.T) {
 	t.Parallel()
 

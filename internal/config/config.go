@@ -7,6 +7,10 @@ import (
 )
 
 const DefaultYAML = `# TrustDB local client configuration.
+# Optional: run_profile labels the deployment for serve-time hints only
+# (development | single_node_production | benchmark). See configs/README.md.
+# run_profile: ""
+
 paths:
   data_dir: ".trustdb"
   key_registry: ".trustdb/keys.tdkeys"
@@ -93,6 +97,9 @@ keys:
 `
 
 type Config struct {
+	// RunProfile is an optional operator label (development | single_node_production | benchmark)
+	// used only for startup guidance; it does not change behavior by itself.
+	RunProfile string     `mapstructure:"run_profile" json:"run_profile"`
 	Paths      Paths      `mapstructure:"paths" json:"paths"`
 	Identity   Identity   `mapstructure:"identity" json:"identity"`
 	Server     Server     `mapstructure:"server" json:"server"`
@@ -204,6 +211,7 @@ type Keys struct {
 
 func Default() Config {
 	return Config{
+		RunProfile: "",
 		Paths: Paths{
 			DataDir:     ".trustdb",
 			KeyRegistry: ".trustdb/keys.tdkeys",
@@ -289,6 +297,9 @@ func redact(value string) string {
 }
 
 func (c Config) Validate() error {
+	if err := validateRunProfileField(c.RunProfile); err != nil {
+		return err
+	}
 	if c.Paths.DataDir == "" {
 		return fmt.Errorf("paths.data_dir is required")
 	}
