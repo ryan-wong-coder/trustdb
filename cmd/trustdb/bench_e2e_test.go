@@ -527,7 +527,9 @@ func loadBenchSmokeGateConfig(t testing.TB) benchSmokeGateConfig {
 	return benchSmokeGateConfig{
 		MinCandidateThroughput:     benchEnvFloat(t, trustdbBenchMinCandidateThroughputEnv, 1),
 		MaxThroughputRegressionPct: benchEnvFloat(t, trustdbBenchMaxThroughputRegressionPctEnv, 80),
-		MaxDurationRegressionPct:   benchEnvFloat(t, trustdbBenchMaxDurationRegressionPctEnv, 200),
+		// Default is looser than bench-smoke CI (which sets TRUSTDB_BENCH_MAX_DURATION_REGRESSION_PCT)
+		// so shared e2e runners are less likely to flake on wall-clock variance.
+		MaxDurationRegressionPct:   benchEnvFloat(t, trustdbBenchMaxDurationRegressionPctEnv, 500),
 		MaxSubmitP95RegressionPct:  benchEnvFloat(t, trustdbBenchMaxSubmitP95RegressionPctEnv, 0),
 		MaxCandidateSubmitP95Ms:    benchEnvFloat(t, trustdbBenchMaxCandidateSubmitP95MsEnv, 0),
 		MaxCandidateFailed:         benchEnvInt(t, trustdbBenchMaxCandidateFailedEnv, 0),

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ryan-wong-coder/trustdb/internal/wal"
+	"github.com/spf13/viper"
 )
 
 func TestConfigInitAndShow(t *testing.T) {
@@ -601,18 +602,18 @@ func TestShippedProfileConfigsLoad(t *testing.T) {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			var out, errOut bytes.Buffer
-			cmd := newRootCommand(&out, &errOut)
-			cmd.SetArgs([]string{"--config", filepath.Join(repoConfigs, name), "config", "validate"})
-			if err := cmd.Execute(); err != nil {
-				t.Fatalf("%s: %v stderr=%s", name, err, errOut.String())
+			// Validate merged YAML without full runtimeConfig.load(), which
+			// creates loggers and may mkdir production paths like /var/log/trustdb
+			// (permission denied on CI runners).
+			v := viper.New()
+			setDefaults(v)
+			v.SetConfigFile(filepath.Join(repoConfigs, name))
+			if err := v.ReadInConfig(); err != nil {
+				t.Fatalf("ReadInConfig: %v", err)
 			}
-			var got map[string]any
-			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-				t.Fatalf("%s: output not json: %q err=%v", name, out.String(), err)
-			}
-			if got["valid"] != true {
-				t.Fatalf("%s: expected valid config, got %#v", name, got)
+			cfg := loadConfig(v)
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
 			}
 		})
 	}
