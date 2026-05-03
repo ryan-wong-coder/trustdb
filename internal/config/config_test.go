@@ -36,6 +36,9 @@ func TestDefaultYAMLIsStructured(t *testing.T) {
 	if Default().Proofstore.TiKVPDAddresses != nil {
 		t.Fatalf("default proofstore.tikv_pd_endpoints = %#v, want nil", Default().Proofstore.TiKVPDAddresses)
 	}
+	if Default().Proofstore.TiKVNamespace != "default" {
+		t.Fatalf("default proofstore.tikv_namespace = %q, want default", Default().Proofstore.TiKVNamespace)
+	}
 }
 
 func TestValidateRejectsInvalidLogConfig(t *testing.T) {

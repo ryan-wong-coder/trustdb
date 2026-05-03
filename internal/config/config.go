@@ -22,6 +22,7 @@ proofstore:
   record_index_mode: "full"
   tikv_pd_endpoints: []
   tikv_keyspace: ""
+  tikv_namespace: "default"
 
 wal:
   fsync_mode: "group"
@@ -167,6 +168,7 @@ type Proofstore struct {
 	RecordIndexMode  string   `mapstructure:"record_index_mode" json:"record_index_mode"`
 	TiKVPDAddresses  []string `mapstructure:"tikv_pd_endpoints" json:"tikv_pd_endpoints"`
 	TiKVKeyspace     string   `mapstructure:"tikv_keyspace" json:"tikv_keyspace"`
+	TiKVNamespace    string   `mapstructure:"tikv_namespace" json:"tikv_namespace"`
 }
 
 type Log struct {
@@ -249,6 +251,7 @@ func Default() Config {
 		Proofstore: Proofstore{
 			ArtifactSyncMode: "chunk",
 			RecordIndexMode:  "full",
+			TiKVNamespace:    "default",
 		},
 		Log: Log{
 			Level:  "warn",

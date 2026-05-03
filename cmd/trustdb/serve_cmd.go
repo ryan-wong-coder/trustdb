@@ -40,7 +40,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	var readTimeoutText, writeTimeoutText, shutdownTimeoutText, batchMaxDelayText string
 	var walGroupCommitIntervalText string
 	var metastoreKind, metastorePath string
-	var proofstoreTiKVPDText, proofstoreTiKVKeyspace string
+	var proofstoreTiKVPDText, proofstoreTiKVKeyspace, proofstoreTiKVNamespace string
 	var batchProofMode, proofstoreArtifactSyncMode, proofstoreRecordIndexMode string
 	var proofstoreIndexStorageTokens bool
 	var anchorSinkKind, anchorPath string
@@ -67,6 +67,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				tikvPDAddresses = splitCSV(proofstoreTiKVPDText)
 			}
 			proofstoreTiKVKeyspace = stringOrLiteral(cmd, "proofstore-tikv-keyspace", proofstoreTiKVKeyspace, rt.cfg.Proofstore.TiKVKeyspace)
+			proofstoreTiKVNamespace = stringOrLiteral(cmd, "proofstore-tikv-namespace", proofstoreTiKVNamespace, rt.cfg.Proofstore.TiKVNamespace)
 			proofstoreRecordIndexMode = stringOrLiteral(cmd, "proofstore-record-index-mode", proofstoreRecordIndexMode, rt.cfg.Proofstore.RecordIndexMode)
 			if cmd.Flags().Changed("proofstore-index-storage-tokens") {
 				proofstoreIndexStorageTokens, _ = cmd.Flags().GetBool("proofstore-index-storage-tokens")
@@ -292,6 +293,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				Path:                         metaPath,
 				TiKVPDAddresses:              tikvPDAddresses,
 				TiKVKeyspace:                 proofstoreTiKVKeyspace,
+				TiKVNamespace:                proofstoreTiKVNamespace,
 				RecordIndexMode:              proofstoreRecordIndexMode,
 				ArtifactSyncMode:             proofstoreArtifactSyncMode,
 				IndexStorageTokens:           !strings.EqualFold(proofstoreRecordIndexMode, "no_storage_tokens"),
@@ -532,10 +534,11 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().IntVar(&walKeepSegments, "wal-keep-segments", 0, "after checkpoint advance, keep this many segments older than the checkpoint-covered segment (directory mode; 0 = only retain the active segment + checkpoint-covered one)")
 	cmd.Flags().StringVar(&walFsyncMode, "wal-fsync-mode", "", "WAL fsync mode: strict, group (production default), or batch")
 	cmd.Flags().StringVar(&walGroupCommitIntervalText, "wal-group-commit-interval", "", "WAL group fsync interval when --wal-fsync-mode=group (default 10ms)")
-	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default), pebble, or tikv (experimental)")
+	cmd.Flags().StringVar(&metastoreKind, "metastore", "", "proof store backend: file (default), pebble, or tikv (shared PD/TiKV cluster)")
 	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path (defaults to --proof-dir; for tikv, accepts comma-separated PD endpoints)")
 	cmd.Flags().StringVar(&proofstoreTiKVPDText, "proofstore-tikv-pd-endpoints", "", "comma-separated TiKV PD endpoints for the tikv proofstore backend")
 	cmd.Flags().StringVar(&proofstoreTiKVKeyspace, "proofstore-tikv-keyspace", "", "TiKV keyspace for the tikv proofstore backend")
+	cmd.Flags().StringVar(&proofstoreTiKVNamespace, "proofstore-tikv-namespace", "", "application namespace prefix inside the TiKV proofstore backend")
 	cmd.Flags().StringVar(&proofstoreArtifactSyncMode, "proofstore-artifact-sync-mode", "", "proof artifact durability mode: chunk (default) or batch")
 	cmd.Flags().StringVar(&proofstoreRecordIndexMode, "proofstore-record-index-mode", "", "record secondary index mode: full (default), no_storage_tokens, or time_only")
 	cmd.Flags().BoolVar(&proofstoreIndexStorageTokens, "proofstore-index-storage-tokens", true, "write StorageURI/FileName token secondary indexes in the proofstore; disable for high-write ingest profiles")

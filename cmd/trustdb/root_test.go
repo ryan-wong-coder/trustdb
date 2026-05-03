@@ -59,6 +59,7 @@ func TestConfigEnvOverride(t *testing.T) {
 	t.Setenv("TRUSTDB_GLOBAL_LOG_ID", "node-log-a")
 	t.Setenv("TRUSTDB_TIKV_PD_ENDPOINTS", "10.0.0.1:2379,10.0.0.2:2379")
 	t.Setenv("TRUSTDB_TIKV_KEYSPACE", "trustdb-test")
+	t.Setenv("TRUSTDB_TIKV_NAMESPACE", "tenant-a/log-a")
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -112,6 +113,9 @@ func TestConfigEnvOverride(t *testing.T) {
 	if proofstore["tikv_keyspace"] != "trustdb-test" {
 		t.Fatalf("proofstore.tikv_keyspace = %v", proofstore["tikv_keyspace"])
 	}
+	if proofstore["tikv_namespace"] != "tenant-a/log-a" {
+		t.Fatalf("proofstore.tikv_namespace = %v", proofstore["tikv_namespace"])
+	}
 }
 
 func TestConfigRecordIndexModeEnvTakesPriorityOverLegacyAlias(t *testing.T) {
@@ -140,14 +144,14 @@ func TestServeAcceptsProofstoreIndexStorageTokensFlag(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"serve", "--proofstore-index-storage-tokens=false", "--batch-proof-mode=async", "--proofstore-record-index-mode=time_only", "--proofstore-artifact-sync-mode=batch", "--proofstore-tikv-pd-endpoints=127.0.0.1:2379", "--proofstore-tikv-keyspace=trustdb", "--help"})
+	cmd.SetArgs([]string{"serve", "--proofstore-index-storage-tokens=false", "--batch-proof-mode=async", "--proofstore-record-index-mode=time_only", "--proofstore-artifact-sync-mode=batch", "--proofstore-tikv-pd-endpoints=127.0.0.1:2379", "--proofstore-tikv-keyspace=trustdb", "--proofstore-tikv-namespace=tenant-a/log-a", "--help"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("serve help error = %v stderr=%s", err, errOut.String())
 	}
 	if !bytes.Contains(out.Bytes(), []byte("--proofstore-index-storage-tokens")) {
 		t.Fatalf("serve help missing proofstore token flag: %s", out.String())
 	}
-	for _, flag := range [][]byte{[]byte("--batch-proof-mode"), []byte("--proofstore-record-index-mode"), []byte("--proofstore-artifact-sync-mode"), []byte("--proofstore-tikv-pd-endpoints"), []byte("--proofstore-tikv-keyspace")} {
+	for _, flag := range [][]byte{[]byte("--batch-proof-mode"), []byte("--proofstore-record-index-mode"), []byte("--proofstore-artifact-sync-mode"), []byte("--proofstore-tikv-pd-endpoints"), []byte("--proofstore-tikv-keyspace"), []byte("--proofstore-tikv-namespace")} {
 		if !bytes.Contains(out.Bytes(), flag) {
 			t.Fatalf("serve help missing %s: %s", flag, out.String())
 		}

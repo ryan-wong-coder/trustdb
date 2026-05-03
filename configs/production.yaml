@@ -21,6 +21,7 @@ proofstore:
   artifact_sync_mode: "chunk"
   tikv_pd_endpoints: []
   tikv_keyspace: ""
+  tikv_namespace: "default"
 
 wal:
   fsync_mode: "group"
