@@ -35,7 +35,7 @@ jobs:
   proofstore-tikv:
     name: proofstore/tikv (PD+TiKV)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -51,20 +51,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          docker compose -f docker-compose.tikv.yml up -d
-          deadline=$((SECONDS + 240))
-          while (( SECONDS < deadline )); do
-            if curl -fsS --max-time 3 http://127.0.0.1:2379/pd/api/v1/health >/dev/null 2>&1 \
-              && curl -fsS --max-time 3 http://127.0.0.1:20180/status >/dev/null 2>&1; then
-              echo "PD and TiKV are healthy"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::timed out waiting for PD/TiKV"
-          docker compose -f docker-compose.tikv.yml ps || true
-          docker compose -f docker-compose.tikv.yml logs || true
-          exit 1
+          # Use compose healthchecks (see docker-compose.tikv.yml); first pull can exceed a short curl loop.
+          docker compose -f docker-compose.tikv.yml up -d --wait --wait-timeout 600
 
       - name: Run TiKV integration tests
         env:
