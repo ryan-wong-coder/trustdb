@@ -43,6 +43,13 @@ services:
     image: ${TRUSTDB_TIKV_TIKV_IMAGE:-pingcap/tikv:v7.5.0}
     container_name: trustdb-tikv-dev-tikv
     network_mode: "service:pd"
+    # GitHub-hosted Linux runners often need relaxed seccomp + high nofile or TiKV exits immediately (code 1).
+    security_opt:
+      - seccomp:unconfined
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     depends_on:
       pd:
         condition: service_healthy
