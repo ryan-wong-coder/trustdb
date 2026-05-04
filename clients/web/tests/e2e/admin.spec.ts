@@ -86,6 +86,54 @@ async function mockAdminAPI(page: Page) {
     await route.fulfill({ json: { batch_id: 'batch-1', tree_size: 2 } })
   })
 
+  await page.route('**/admin/api/proxy/v1/batches?*', async (route) => {
+    await route.fulfill({ json: { roots: [{ batch_id: 'batch-1', tree_size: 2, closed_at_unix_nano: 1_700_000_000_000_000_000, batch_root: [9] }] } })
+  })
+
+  await page.route('**/admin/api/proxy/v1/batches/batch-1', async (route) => {
+    await route.fulfill({
+      json: {
+        root: { batch_id: 'batch-1', tree_size: 2, closed_at_unix_nano: 1_700_000_000_000_000_000, batch_root: [9] },
+        manifest: { batch_id: 'batch-1', state: 'committed', tree_size: 2, batch_root: [9], record_ids: ['record-abcdef123456'] },
+        record_count: 1,
+      },
+    })
+  })
+
+  await page.route('**/admin/api/proxy/v1/batches/batch-1/tree/leaves?*', async (route) => {
+    await route.fulfill({ json: { leaves: [{ batch_id: 'batch-1', record_id: 'record-abcdef123456', leaf_index: 0, leaf_hash: [1] }] } })
+  })
+
+  await page.route('**/admin/api/proxy/v1/batches/batch-1/tree/nodes?*', async (route) => {
+    await route.fulfill({ json: { nodes: [{ batch_id: 'batch-1', level: 0, start_index: 0, width: 1, hash: [1] }, { batch_id: 'batch-1', level: 1, start_index: 0, width: 2, hash: [9] }] } })
+  })
+
+  await page.route('**/admin/api/proxy/v1/proofs/record-abcdef123456', async (route) => {
+    await route.fulfill({
+      json: {
+        record_id: 'record-abcdef123456',
+        proof_level: 'L5',
+        proof_bundle: {
+          record_id: 'record-abcdef123456',
+          committed_receipt: { batch_id: 'batch-1', leaf_index: 0, leaf_hash: [1], batch_root: [9], batch_closed_at_unix_nano: 1_700_000_000_000_000_000 },
+          batch_proof: { tree_alg: 'rfc6962-sha256', leaf_index: 0, tree_size: 2, audit_path: [[2]] },
+        },
+      },
+    })
+  })
+
+  await page.route('**/admin/api/proxy/v1/global-log/tree', async (route) => {
+    await route.fulfill({ json: { ok: true, state: { tree_size: 1, root_hash: [9] }, sth: { tree_size: 1, root_hash: [9], timestamp_unix_nano: 1_700_000_000_000_000_000 } } })
+  })
+
+  await page.route('**/admin/api/proxy/v1/global-log/tree/nodes?*', async (route) => {
+    await route.fulfill({ json: { nodes: [{ level: 0, start_index: 0, width: 1, hash: [9] }] } })
+  })
+
+  await page.route('**/admin/api/proxy/v1/global-log/tree/leaves?*', async (route) => {
+    await route.fulfill({ json: { leaves: [{ batch_id: 'batch-1', leaf_index: 0, batch_tree_size: 2, leaf_hash: [9] }] } })
+  })
+
   await page.route('**/admin/api/proxy/v1/records?*', async (route) => {
     await route.fulfill({
       json: {
@@ -152,4 +200,26 @@ test('loads settings and saves YAML through the config endpoint', async ({ page 
   await expect(page.locator('textarea')).toHaveValue(/admin:/)
   await page.getByRole('button', { name: '保存 YAML' }).click()
   await expect(page.getByText(/已保存/)).toBeVisible()
+})
+
+test('shows batch and global merkle visualizations', async ({ page }) => {
+  await page.goto('/admin/login')
+  await page.locator('input').nth(0).fill('ops')
+  await page.locator('input').nth(1).fill('secret')
+  await page.getByRole('button', { name: '登录' }).click()
+
+  await page.getByRole('link', { name: /批次/ }).click()
+  await expect(page.getByRole('heading', { name: '历史批次' })).toBeVisible()
+  await expect(page.getByText('batch-1')).toBeVisible()
+  await page.getByRole('link', { name: '查看树' }).click()
+  await expect(page.getByRole('heading', { name: '批次详情' })).toBeVisible()
+  await expect(page.getByText('Tree Explorer')).toBeVisible()
+  await page.getByText('record-abcdef123456').click()
+  await page.getByRole('button', { name: '查看 proof path' }).click()
+  await expect(page.getByText('Sibling 1')).toBeVisible()
+
+  await page.getByRole('link', { name: /全局树/ }).click()
+  await expect(page.getByRole('heading', { name: '全局 Merkle Tree' })).toBeVisible()
+  await expect(page.getByText('全局节点')).toBeVisible()
+  await expect(page.getByText('batch-1')).toBeVisible()
 })

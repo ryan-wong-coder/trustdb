@@ -1,7 +1,6 @@
 package batch
 
 import (
-	"bytes"
 	"context"
 	"strings"
 	"sync"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/ryan-wong-coder/trustdb/internal/merkle"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
@@ -40,8 +40,19 @@ func TestServiceCommitsFullBatch(t *testing.T) {
 	// visible to Proof() does not yet imply the root file has landed.
 	// Poll briefly to close that window instead of asserting immediately.
 	root := waitForLatestRoot(t, svc, 2)
-	if !bytes.Equal(root.BatchRoot, bytes.Repeat([]byte{9}, 32)) {
+	if len(root.BatchRoot) != 32 {
 		t.Fatalf("LatestRoot() = %+v", root)
+	}
+	leaves := waitForBatchTreeLeaves(t, store, root.BatchID, 2)
+	if len(leaves) != 2 || leaves[0].RecordID != "tr1a" || leaves[1].RecordID != "tr1b" {
+		t.Fatalf("ListBatchTreeLeaves() = %+v", leaves)
+	}
+	nodes, err := store.ListBatchTreeNodes(context.Background(), model.BatchTreeNodeListOptions{BatchID: root.BatchID, Level: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListBatchTreeNodes() error = %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Width != 2 {
+		t.Fatalf("ListBatchTreeNodes() = %+v", nodes)
 	}
 }
 
@@ -468,6 +479,21 @@ func waitForLatestRoot(t *testing.T, svc *Service, wantTreeSize uint64) model.Ba
 	return model.BatchRoot{}
 }
 
+func waitForBatchTreeLeaves(t *testing.T, store proofstore.LocalStore, batchID string, want int) []model.BatchTreeLeaf {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		leaves, err := store.ListBatchTreeLeaves(context.Background(), model.BatchTreeLeafListOptions{BatchID: batchID, Limit: want})
+		if err == nil && len(leaves) >= want {
+			return leaves
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	leaves, err := store.ListBatchTreeLeaves(context.Background(), model.BatchTreeLeafListOptions{BatchID: batchID, Limit: want})
+	t.Fatalf("ListBatchTreeLeaves(%q) after wait = %+v err=%v want len=%d", batchID, leaves, err, want)
+	return nil
+}
+
 func waitForProof(t *testing.T, svc *Service, recordID string) model.ProofBundle {
 	t.Helper()
 	deadline := time.Now().Add(asyncProofWaitTimeout)
@@ -487,8 +513,20 @@ type fakeEngine struct{}
 
 func (fakeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) ([]model.ProofBundle, error) {
 	out := make([]model.ProofBundle, len(records))
-	root := bytes.Repeat([]byte{9}, 32)
+	tree, err := merkle.Build(records)
+	if err != nil {
+		return nil, err
+	}
+	root := tree.Root()
 	for i := range records {
+		leaf, err := tree.LeafHash(i)
+		if err != nil {
+			return nil, err
+		}
+		proof, err := tree.Proof(i)
+		if err != nil {
+			return nil, err
+		}
 		out[i] = model.ProofBundle{
 			SchemaVersion:   model.SchemaProofBundle,
 			RecordID:        records[i].RecordID,
@@ -501,6 +539,7 @@ func (fakeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model
 				Status:        "committed",
 				BatchID:       batchID,
 				LeafIndex:     uint64(i),
+				LeafHash:      leaf,
 				BatchRoot:     root,
 				ClosedAtUnixN: closedAt.UnixNano(),
 			},
@@ -508,6 +547,7 @@ func (fakeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model
 				TreeAlg:   model.DefaultMerkleTreeAlg,
 				LeafIndex: uint64(i),
 				TreeSize:  uint64(len(records)),
+				AuditPath: proof,
 			},
 		}
 	}

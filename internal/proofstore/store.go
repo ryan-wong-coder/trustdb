@@ -29,6 +29,9 @@ type Store interface {
 	ListRootsAfter(ctx context.Context, afterClosedAtUnixN int64, limit int) ([]model.BatchRoot, error)
 	ListRootsPage(ctx context.Context, opts model.RootListOptions) ([]model.BatchRoot, error)
 	LatestRoot(ctx context.Context) (model.BatchRoot, error)
+	PutBatchTreeArtifacts(ctx context.Context, leaves []model.BatchTreeLeaf, nodes []model.BatchTreeNode) error
+	ListBatchTreeLeaves(ctx context.Context, opts model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error)
+	ListBatchTreeNodes(ctx context.Context, opts model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error)
 	PutManifest(ctx context.Context, manifest model.BatchManifest) error
 	GetManifest(ctx context.Context, batchID string) (model.BatchManifest, error)
 	ListManifests(ctx context.Context) ([]model.BatchManifest, error)

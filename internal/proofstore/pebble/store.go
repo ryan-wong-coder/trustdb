@@ -51,6 +51,8 @@ const (
 	prefixRecordByToken  = "record/by-storage-token/"
 	prefixManifest       = "manifest/"
 	prefixRoot           = "root/"
+	prefixBatchTreeLeaf  = "batch-tree/leaf/"
+	prefixBatchTreeNode  = "batch-tree/node/"
 	prefixGlobalLeaf     = "global/leaf/"
 	prefixGlobalBatch    = "global/leaf-by-batch/"
 	prefixGlobalNode     = "global/node/"
@@ -372,6 +374,14 @@ func rootKey(closedAtUnixN int64, batchID string) []byte {
 	k = append(k, '/')
 	k = append(k, batchID...)
 	return k
+}
+
+func batchTreeLeafKey(batchID string, leafIndex uint64) []byte {
+	return []byte(fmt.Sprintf("%s%s/%0*d", prefixBatchTreeLeaf, batchID, rootSortKeyWidth, leafIndex))
+}
+
+func batchTreeNodeKey(batchID string, level, startIndex uint64) []byte {
+	return []byte(fmt.Sprintf("%s%s/%0*d/%0*d", prefixBatchTreeNode, batchID, rootSortKeyWidth, level, rootSortKeyWidth, startIndex))
 }
 
 func isNotFound(err error) bool {
@@ -1140,6 +1150,184 @@ func (s *Store) LatestRoot(ctx context.Context) (model.BatchRoot, error) {
 		return model.BatchRoot{}, trusterr.New(trusterr.CodeNotFound, "batch root not found")
 	}
 	return roots[0], nil
+}
+
+func (s *Store) PutBatchTreeArtifacts(ctx context.Context, leaves []model.BatchTreeLeaf, nodes []model.BatchTreeNode) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch tree artifacts canceled", err)
+	}
+	if len(leaves) == 0 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "batch tree artifacts require at least one leaf")
+	}
+	batchID := leaves[0].BatchID
+	if batchID == "" {
+		return trusterr.New(trusterr.CodeInvalidArgument, "batch tree artifact batch_id is required")
+	}
+	now := time.Now().UTC().UnixNano()
+	for start := 0; start < len(leaves); start += batchArtifactChunkSize {
+		end := start + batchArtifactChunkSize
+		if end > len(leaves) {
+			end = len(leaves)
+		}
+		batch := s.db.NewBatch()
+		for i := start; i < end; i++ {
+			leaf := leaves[i]
+			if leaf.BatchID != batchID {
+				_ = batch.Close()
+				return trusterr.New(trusterr.CodeInvalidArgument, "batch tree leaves must share batch_id")
+			}
+			if leaf.SchemaVersion == "" {
+				leaf.SchemaVersion = model.SchemaBatchTreeLeaf
+			}
+			if leaf.CreatedAtUnixN == 0 {
+				leaf.CreatedAtUnixN = now
+			}
+			data, err := cborx.Marshal(leaf)
+			if err != nil {
+				_ = batch.Close()
+				return err
+			}
+			if err := stageSet(batch, batchTreeLeafKey(leaf.BatchID, leaf.LeafIndex), data); err != nil {
+				_ = batch.Close()
+				return trusterr.Wrap(trusterr.CodeDataLoss, "stage batch tree leaf", err)
+			}
+		}
+		if err := batch.Commit(s.artifactWriteOptions()); err != nil {
+			_ = batch.Close()
+			return trusterr.Wrap(trusterr.CodeDataLoss, "commit batch tree leaves", err)
+		}
+		if err := batch.Close(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "close batch tree leaves", err)
+		}
+	}
+	for start := 0; start < len(nodes); start += batchArtifactChunkSize {
+		end := start + batchArtifactChunkSize
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		batch := s.db.NewBatch()
+		for i := start; i < end; i++ {
+			node := nodes[i]
+			if node.BatchID != batchID {
+				_ = batch.Close()
+				return trusterr.New(trusterr.CodeInvalidArgument, "batch tree nodes must share batch_id")
+			}
+			if node.Width == 0 {
+				_ = batch.Close()
+				return trusterr.New(trusterr.CodeInvalidArgument, "batch tree node width is required")
+			}
+			if node.SchemaVersion == "" {
+				node.SchemaVersion = model.SchemaBatchTreeNode
+			}
+			if node.CreatedAtUnixN == 0 {
+				node.CreatedAtUnixN = now
+			}
+			data, err := cborx.Marshal(node)
+			if err != nil {
+				_ = batch.Close()
+				return err
+			}
+			if err := stageSet(batch, batchTreeNodeKey(node.BatchID, node.Level, node.StartIndex), data); err != nil {
+				_ = batch.Close()
+				return trusterr.Wrap(trusterr.CodeDataLoss, "stage batch tree node", err)
+			}
+		}
+		if err := batch.Commit(s.artifactWriteOptions()); err != nil {
+			_ = batch.Close()
+			return trusterr.Wrap(trusterr.CodeDataLoss, "commit batch tree nodes", err)
+		}
+		if err := batch.Close(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "close batch tree nodes", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ListBatchTreeLeaves(ctx context.Context, opts model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree leaves canceled", err)
+	}
+	if opts.BatchID == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "batch_id is required")
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	prefix := fmt.Sprintf("%s%s/", prefixBatchTreeLeaf, opts.BatchID)
+	lower, upper := prefixBounds(prefix)
+	iter, err := s.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open batch tree leaf iterator", err)
+	}
+	defer iter.Close()
+	ok := iter.First()
+	if opts.HasAfter {
+		ok = iter.SeekGE(batchTreeLeafKey(opts.BatchID, opts.AfterLeafIndex))
+	}
+	leaves := make([]model.BatchTreeLeaf, 0, limit)
+	for ; ok; ok = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree leaves canceled", err)
+		}
+		if len(leaves) >= limit {
+			break
+		}
+		var leaf model.BatchTreeLeaf
+		if err := cborx.UnmarshalLimit(iter.Value(), &leaf, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode batch tree leaf", err)
+		}
+		if opts.HasAfter && leaf.LeafIndex <= opts.AfterLeafIndex {
+			continue
+		}
+		leaves = append(leaves, leaf)
+	}
+	if err := iter.Error(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate batch tree leaves", err)
+	}
+	return leaves, nil
+}
+
+func (s *Store) ListBatchTreeNodes(ctx context.Context, opts model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree nodes canceled", err)
+	}
+	if opts.BatchID == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "batch_id is required")
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	prefix := fmt.Sprintf("%s%s/%0*d/", prefixBatchTreeNode, opts.BatchID, rootSortKeyWidth, opts.Level)
+	lower, upper := prefixBounds(prefix)
+	iter, err := s.db.NewIter(&pdb.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open batch tree node iterator", err)
+	}
+	defer iter.Close()
+	ok := iter.SeekGE(batchTreeNodeKey(opts.BatchID, opts.Level, opts.StartIndex))
+	if opts.HasAfter && opts.AfterStartIndex >= opts.StartIndex {
+		ok = iter.SeekGE(batchTreeNodeKey(opts.BatchID, opts.Level, opts.AfterStartIndex))
+	}
+	nodes := make([]model.BatchTreeNode, 0, limit)
+	for ; ok; ok = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree nodes canceled", err)
+		}
+		if len(nodes) >= limit {
+			break
+		}
+		var node model.BatchTreeNode
+		if err := cborx.UnmarshalLimit(iter.Value(), &node, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode batch tree node", err)
+		}
+		if node.StartIndex < opts.StartIndex {
+			continue
+		}
+		if opts.HasAfter && node.StartIndex <= opts.AfterStartIndex {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	if err := iter.Error(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate batch tree nodes", err)
+	}
+	return nodes, nil
 }
 
 func (s *Store) PutManifest(ctx context.Context, manifest model.BatchManifest) error {

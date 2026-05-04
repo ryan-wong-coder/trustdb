@@ -7,6 +7,9 @@ const routes: RouteRecordRaw[] = [
   { path: '/dashboard', name: 'dashboard', component: () => import('./pages/Dashboard.vue'), meta: { title: '概览' } },
   { path: '/metrics', name: 'metrics', component: () => import('./pages/Metrics.vue'), meta: { title: '指标' } },
   { path: '/records', name: 'records', component: () => import('./pages/Records.vue'), meta: { title: '记录' } },
+  { path: '/batches', name: 'batches', component: () => import('./pages/Batches.vue'), meta: { title: '批次' } },
+  { path: '/batches/:batchID', name: 'batch-detail', component: () => import('./pages/BatchDetail.vue'), meta: { title: '批次详情' } },
+  { path: '/global-tree', name: 'global-tree', component: () => import('./pages/GlobalTree.vue'), meta: { title: '全局树' } },
   { path: '/settings', name: 'settings', component: () => import('./pages/Settings.vue'), meta: { title: '系统设置' } },
 ]
 

@@ -369,6 +369,10 @@ func (s *countingGlobalStore) GetGlobalLogNode(ctx context.Context, level, start
 	return s.base.GetGlobalLogNode(ctx, level, startIndex)
 }
 
+func (s *countingGlobalStore) ListGlobalLogNodesAfter(ctx context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogNode, error) {
+	return s.base.ListGlobalLogNodesAfter(ctx, afterLevel, afterStartIndex, limit)
+}
+
 func (s *countingGlobalStore) PutGlobalLogState(ctx context.Context, state model.GlobalLogState) error {
 	return s.base.PutGlobalLogState(ctx, state)
 }
@@ -564,6 +568,37 @@ func (s *memoryGlobalStore) GetGlobalLogNode(ctx context.Context, level, startIn
 	defer s.mu.RUnlock()
 	node, ok := s.nodes[globalNodeKey{level: level, start: startIndex}]
 	return cloneGlobalLogNode(node), ok, nil
+}
+
+func (s *memoryGlobalStore) ListGlobalLogNodesAfter(ctx context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogNode, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "memory global node list canceled", err)
+	}
+	limit = normaliseMemoryLimit(limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys := make([]globalNodeKey, 0, len(s.nodes))
+	for key := range s.nodes {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].level == keys[j].level {
+			return keys[i].start < keys[j].start
+		}
+		return keys[i].level < keys[j].level
+	})
+	hasCursor := afterLevel != ^uint64(0) || afterStartIndex != ^uint64(0)
+	out := make([]model.GlobalLogNode, 0, limit)
+	for _, key := range keys {
+		if hasCursor && (key.level < afterLevel || key.level == afterLevel && key.start <= afterStartIndex) {
+			continue
+		}
+		out = append(out, cloneGlobalLogNode(s.nodes[key]))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (s *memoryGlobalStore) PutGlobalLogState(ctx context.Context, state model.GlobalLogState) error {

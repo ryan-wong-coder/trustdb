@@ -32,6 +32,7 @@ type Store interface {
 	ListGlobalLeavesPage(context.Context, model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error)
 	PutGlobalLogNode(context.Context, model.GlobalLogNode) error
 	GetGlobalLogNode(context.Context, uint64, uint64) (model.GlobalLogNode, bool, error)
+	ListGlobalLogNodesAfter(context.Context, uint64, uint64, int) ([]model.GlobalLogNode, error)
 	PutGlobalLogState(context.Context, model.GlobalLogState) error
 	GetGlobalLogState(context.Context) (model.GlobalLogState, bool, error)
 	PutSignedTreeHead(context.Context, model.SignedTreeHead) error
@@ -191,6 +192,14 @@ func (s *Service) ListSTHs(ctx context.Context, opts model.TreeHeadListOptions) 
 
 func (s *Service) ListLeaves(ctx context.Context, opts model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error) {
 	return s.store.ListGlobalLeavesPage(ctx, opts)
+}
+
+func (s *Service) State(ctx context.Context) (model.GlobalLogState, bool, error) {
+	return s.store.GetGlobalLogState(ctx)
+}
+
+func (s *Service) ListNodesAfter(ctx context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogNode, error) {
+	return s.store.ListGlobalLogNodesAfter(ctx, afterLevel, afterStartIndex, limit)
 }
 
 func (s *Service) InclusionProof(ctx context.Context, batchID string, treeSize uint64) (model.GlobalLogProof, error) {

@@ -2,10 +2,10 @@
 import { computed } from 'vue'
 import { Copy, Check } from 'lucide-vue-next'
 import { ref } from 'vue'
-import { copyToClipboard, shortHash } from '@/lib/format'
+import { bytesToHex, copyToClipboard, shortHash, type BytesLike } from '@/lib/format'
 
 const props = defineProps<{
-  value?: string
+  value?: BytesLike
   mono?: boolean
   full?: boolean
   label?: string
@@ -14,15 +14,19 @@ const props = defineProps<{
 }>()
 
 const copied = ref(false)
+const normalized = computed(() => {
+  if (typeof props.value === 'string') return props.value
+  return bytesToHex(props.value)
+})
 const display = computed(() => {
-  if (!props.value) return '—'
-  if (props.full) return props.value
-  return shortHash(props.value, props.head ?? 8, props.tail ?? 6)
+  if (!normalized.value) return '—'
+  if (props.full) return normalized.value
+  return shortHash(normalized.value, props.head ?? 8, props.tail ?? 6)
 })
 
 async function copy() {
-  if (!props.value) return
-  await copyToClipboard(props.value)
+  if (!normalized.value) return
+  await copyToClipboard(normalized.value)
   copied.value = true
   setTimeout(() => (copied.value = false), 1200)
 }
@@ -32,7 +36,7 @@ async function copy() {
   <button
     type="button"
     class="group inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 border border-white/10 bg-[#070807]/70 transition hover:border-accent/45 hover:bg-accent/10"
-    :title="value"
+    :title="normalized"
     @click="copy"
   >
     <span v-if="label" class="font-display text-[10px] uppercase tracking-[0.12em] text-ink-400">{{ label }}</span>

@@ -11,6 +11,8 @@ const (
 	SchemaRecordIndex       = "trustdb.record-index.v1"
 	SchemaBatchRoot         = "trustdb.batch-root.v1"
 	SchemaBatchManifest     = "trustdb.batch-manifest.v1"
+	SchemaBatchTreeLeaf     = "trustdb.batch-tree-leaf.v1"
+	SchemaBatchTreeNode     = "trustdb.batch-tree-node.v1"
 	SchemaWALCheckpoint     = "trustdb.wal-checkpoint.v1"
 	SchemaKeyEvent          = "trustdb.key-event.v1"
 	SchemaGlobalLogLeaf     = "trustdb.global-log-leaf.v1"
@@ -237,6 +239,22 @@ type RootListOptions struct {
 	AfterBatchID       string
 }
 
+type BatchTreeLeafListOptions struct {
+	BatchID        string
+	Limit          int
+	AfterLeafIndex uint64
+	HasAfter       bool
+}
+
+type BatchTreeNodeListOptions struct {
+	BatchID         string
+	Level           uint64
+	StartIndex      uint64
+	Limit           int
+	AfterStartIndex uint64
+	HasAfter        bool
+}
+
 type TreeHeadListOptions struct {
 	Limit         int
 	Direction     string
@@ -348,6 +366,31 @@ type BatchManifest struct {
 	ClosedAtUnixN    int64    `cbor:"closed_at_unix_nano" json:"closed_at_unix_nano"`
 	PreparedAtUnixN  int64    `cbor:"prepared_at_unix_nano" json:"prepared_at_unix_nano"`
 	CommittedAtUnixN int64    `cbor:"committed_at_unix_nano,omitempty" json:"committed_at_unix_nano,omitempty"`
+}
+
+// BatchTreeLeaf is a lightweight projection for browsing a batch Merkle tree.
+// It intentionally stores only the record binding and leaf hash so API callers
+// can page through huge batches without loading full proof bundles.
+type BatchTreeLeaf struct {
+	SchemaVersion  string `cbor:"schema_version" json:"schema_version"`
+	BatchID        string `cbor:"batch_id" json:"batch_id"`
+	RecordID       string `cbor:"record_id" json:"record_id"`
+	LeafIndex      uint64 `cbor:"leaf_index" json:"leaf_index"`
+	LeafHash       []byte `cbor:"leaf_hash" json:"leaf_hash"`
+	CreatedAtUnixN int64  `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
+}
+
+// BatchTreeNode stores complete Merkle subtrees for one batch. The pair
+// (level,start_index) is ordered for range scans; width is usually 2^level
+// except for right-edge RFC6962 subtrees in non-power-of-two batches.
+type BatchTreeNode struct {
+	SchemaVersion  string `cbor:"schema_version" json:"schema_version"`
+	BatchID        string `cbor:"batch_id" json:"batch_id"`
+	Level          uint64 `cbor:"level" json:"level"`
+	StartIndex     uint64 `cbor:"start_index" json:"start_index"`
+	Width          uint64 `cbor:"width" json:"width"`
+	Hash           []byte `cbor:"hash" json:"hash"`
+	CreatedAtUnixN int64  `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
 }
 
 // GlobalLogLeaf is the append-only global transparency log item for one

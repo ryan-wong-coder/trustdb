@@ -41,6 +41,14 @@ func (*typedNilGlobalService) ListLeaves(context.Context, model.GlobalLeafListOp
 	panic("typed nil global service should be normalized before use")
 }
 
+func (*typedNilGlobalService) State(context.Context) (model.GlobalLogState, bool, error) {
+	panic("typed nil global service should be normalized before use")
+}
+
+func (*typedNilGlobalService) ListNodesAfter(context.Context, uint64, uint64, int) ([]model.GlobalLogNode, error) {
+	panic("typed nil global service should be normalized before use")
+}
+
 func (*typedNilGlobalService) InclusionProof(context.Context, string, uint64) (model.GlobalLogProof, error) {
 	panic("typed nil global service should be normalized before use")
 }

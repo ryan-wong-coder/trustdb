@@ -105,6 +105,41 @@ func TestVerifyRejectsWrongRoot(t *testing.T) {
 	}
 }
 
+func TestTreeLeavesAndNodesExposeStableSnapshot(t *testing.T) {
+	t.Parallel()
+
+	records := []model.ServerRecord{record("a"), record("b"), record("c")}
+	tree, err := Build(records)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	leaves := tree.Leaves()
+	if len(leaves) != 3 {
+		t.Fatalf("Leaves() len = %d, want 3", len(leaves))
+	}
+	for i := range leaves {
+		if leaves[i].Index != uint64(i) || len(leaves[i].Hash) != 32 {
+			t.Fatalf("leaf %d = %+v", i, leaves[i])
+		}
+	}
+	nodes := tree.Nodes()
+	if len(nodes) != 5 {
+		t.Fatalf("Nodes() len = %d, want 5", len(nodes))
+	}
+	var rootNodeFound bool
+	for _, node := range nodes {
+		if node.StartIndex == 0 && node.Width == 3 {
+			rootNodeFound = true
+			if node.Level != 2 || !bytes.Equal(node.Hash, tree.Root()) {
+				t.Fatalf("root node = %+v", node)
+			}
+		}
+	}
+	if !rootNodeFound {
+		t.Fatalf("Nodes() missing root node: %+v", nodes)
+	}
+}
+
 func TestBuildRejectsEmptyRecords(t *testing.T) {
 	t.Parallel()
 
