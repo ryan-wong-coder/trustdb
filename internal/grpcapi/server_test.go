@@ -45,6 +45,10 @@ func (*typedNilGlobalService) State(context.Context) (model.GlobalLogState, bool
 	panic("typed nil global service should be normalized before use")
 }
 
+func (*typedNilGlobalService) Node(context.Context, uint64, uint64) (model.GlobalLogNode, bool, error) {
+	panic("typed nil global service should be normalized before use")
+}
+
 func (*typedNilGlobalService) ListNodesAfter(context.Context, uint64, uint64, int) ([]model.GlobalLogNode, error) {
 	panic("typed nil global service should be normalized before use")
 }

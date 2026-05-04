@@ -61,6 +61,7 @@ type GlobalLogService interface {
 	ListSTHs(context.Context, model.TreeHeadListOptions) ([]model.SignedTreeHead, error)
 	ListLeaves(context.Context, model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error)
 	State(context.Context) (model.GlobalLogState, bool, error)
+	Node(context.Context, uint64, uint64) (model.GlobalLogNode, bool, error)
 	ListNodesAfter(context.Context, uint64, uint64, int) ([]model.GlobalLogNode, error)
 	InclusionProof(context.Context, string, uint64) (model.GlobalLogProof, error)
 	ConsistencyProof(context.Context, uint64, uint64) (model.GlobalConsistencyProof, error)
@@ -1090,6 +1091,29 @@ func (h Handler) getGlobalTree(w http.ResponseWriter, r *http.Request) {
 func (h Handler) listGlobalTreeNodes(w http.ResponseWriter, r *http.Request) {
 	if h.Global == nil {
 		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+		return
+	}
+	if strings.TrimSpace(r.URL.Query().Get("start")) != "" {
+		level, err := parseUint64Query(r, "level", 0)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		start, err := parseUint64Query(r, "start", 0)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		node, ok, err := h.Global.Node(r.Context(), level, start)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		nodes := []model.GlobalLogNode(nil)
+		if ok {
+			nodes = append(nodes, node)
+		}
+		writeJSON(w, http.StatusOK, globalNodesResponse{Nodes: nodes, Limit: 1})
 		return
 	}
 	afterLevel, afterStart, limit, err := parseGlobalNodeListOptions(r)

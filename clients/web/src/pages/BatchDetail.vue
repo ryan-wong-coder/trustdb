@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import Card from '@/components/Card.vue'
 import Button from '@/components/Button.vue'
@@ -9,6 +9,8 @@ import ProofPathGraph from '@/components/ProofPathGraph.vue'
 import { getBatchDetail, getBatchLeaves, getBatchTreeNodes, getProofPath, type BatchTreeLeaf, type BatchTreeNode, type ProofResponse } from '@/lib/api'
 import { formatTime, nanoToDate } from '@/lib/format'
 import { RefreshCcw } from 'lucide-vue-next'
+
+type ExpandableNode = Pick<BatchTreeNode, 'level' | 'start_index' | 'width'>
 
 const route = useRoute()
 const batchID = String(route.params.batchID || '')
@@ -23,6 +25,31 @@ const recordID = ref('')
 const proof = ref<ProofResponse | null>(null)
 const loading = ref(false)
 const err = ref('')
+
+const rootLevel = computed(() => rangeLevel(detail.value?.record_count ?? detail.value?.root.tree_size ?? 0))
+
+function rangeLevel(size: number): number {
+  if (size <= 1) return 0
+  let level = 0
+  let width = 1
+  while (width < size) {
+    width <<= 1
+    level += 1
+  }
+  return level
+}
+
+function largestPowerOfTwoLessThan(size: number): number {
+  let out = 1
+  while (out << 1 < size) out <<= 1
+  return out
+}
+
+function mergeNodes(incoming: BatchTreeNode[]) {
+  const map = new Map(nodes.value.map((node) => [`${node.level}:${node.start_index}:${node.width}`, node]))
+  for (const node of incoming) map.set(`${node.level}:${node.start_index}:${node.width}`, node)
+  nodes.value = [...map.values()]
+}
 
 async function loadSummary() {
   detail.value = await getBatchDetail(batchID)
@@ -43,6 +70,34 @@ async function loadNodes(reset: boolean) {
   nodeCursor.value = body.next_cursor ?? ''
 }
 
+async function loadRootNode() {
+  if (!detail.value) return
+  level.value = rootLevel.value
+  start.value = 0
+  const body = await getBatchTreeNodes(batchID, { level: rootLevel.value, start: 0, limit: 1 })
+  nodes.value = body.nodes
+  nodeCursor.value = body.next_cursor ?? ''
+}
+
+async function expandNode(node: ExpandableNode) {
+  if (node.width <= 1) return
+  loading.value = true
+  err.value = ''
+  try {
+    const leftWidth = largestPowerOfTwoLessThan(node.width)
+    const rightWidth = node.width - leftWidth
+    const [left, right] = await Promise.all([
+      getBatchTreeNodes(batchID, { level: rangeLevel(leftWidth), start: node.start_index, limit: 1 }),
+      getBatchTreeNodes(batchID, { level: rangeLevel(rightWidth), start: node.start_index + leftWidth, limit: 1 }),
+    ])
+    mergeNodes(left.nodes.concat(right.nodes))
+  } catch (e: unknown) {
+    err.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    loading.value = false
+  }
+}
+
 async function loadProof() {
   if (!recordID.value.trim()) return
   const body = await getProofPath(recordID.value.trim())
@@ -58,7 +113,7 @@ async function refreshAll() {
   try {
     await loadSummary()
     await loadLeaves(true)
-    await loadNodes(true)
+    await loadRootNode()
   } catch (e: unknown) {
     err.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -145,7 +200,14 @@ onMounted(refreshAll)
             <input v-model.number="start" type="number" min="0" class="h-9 w-[130px] px-3 rounded-[12px] border border-white/10 bg-[#0b0d0b]/80 text-[12px] text-ink-100" placeholder="start" />
             <Button size="sm" variant="subtle" :loading="loading" @click="loadNodes(true)">读取节点</Button>
           </div>
-          <MerkleTreeExplorer :nodes="nodes" :next-cursor="nodeCursor" :loading="loading" @load-more="loadNodes(false)" />
+          <MerkleTreeExplorer
+            :nodes="nodes"
+            :tree-size="detail?.record_count || detail?.root.tree_size"
+            :next-cursor="nodeCursor"
+            :loading="loading"
+            @load-more="loadNodes(false)"
+            @expand="expandNode"
+          />
         </Card>
       </div>
     </div>

@@ -507,6 +507,20 @@ func TestGlobalTreeEndpoints(t *testing.T) {
 	if len(nodes.Nodes) != 1 || nodes.NextCursor == "" {
 		t.Fatalf("global nodes = %+v", nodes)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/global-log/tree/nodes?level=0&start=1", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("global exact node status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var exact globalNodesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &exact); err != nil {
+		t.Fatalf("decode global exact node: %v", err)
+	}
+	if len(exact.Nodes) != 1 || exact.Nodes[0].StartIndex != 1 || exact.NextCursor != "" {
+		t.Fatalf("global exact node = %+v", exact)
+	}
 }
 
 func TestGlobalRoutesAreNotRegisteredWithoutGlobalService(t *testing.T) {
@@ -808,6 +822,15 @@ func (f fakeGlobalService) State(context.Context) (model.GlobalLogState, bool, e
 		return model.GlobalLogState{}, false, nil
 	}
 	return f.state, true, nil
+}
+
+func (f fakeGlobalService) Node(_ context.Context, level, startIndex uint64) (model.GlobalLogNode, bool, error) {
+	for _, node := range f.nodes {
+		if node.Level == level && node.StartIndex == startIndex {
+			return node, true, nil
+		}
+	}
+	return model.GlobalLogNode{}, false, nil
 }
 
 func (f fakeGlobalService) ListNodesAfter(_ context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogNode, error) {

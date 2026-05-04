@@ -241,8 +241,8 @@ export async function getGlobalTree(): Promise<{ ok: boolean; state?: GlobalLogS
   return proxyJSON('/v1/global-log/tree')
 }
 
-export async function getGlobalTreeNodes(opts: { level?: number; limit?: number; cursor?: string } = {}): Promise<{ nodes: GlobalLogNode[]; next_cursor?: string }> {
-  return proxyJSON(withParams('/v1/global-log/tree/nodes', { level: opts.level, limit: opts.limit, cursor: opts.cursor }))
+export async function getGlobalTreeNodes(opts: { level?: number; start?: number; limit?: number; cursor?: string } = {}): Promise<{ nodes: GlobalLogNode[]; next_cursor?: string }> {
+  return proxyJSON(withParams('/v1/global-log/tree/nodes', { level: opts.level, start: opts.start, limit: opts.limit, cursor: opts.cursor }))
 }
 
 export async function getGlobalLeaves(opts: { limit?: number; cursor?: string } = {}): Promise<{ leaves: GlobalLogLeaf[]; next_cursor?: string }> {

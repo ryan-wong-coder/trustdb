@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getBatchDetail, getBatches, getBatchTreeNodes, getGlobalTree, getMetrics, login, proxyGet, putConfigYaml } from './api'
+import { getBatchDetail, getBatches, getBatchTreeNodes, getGlobalTree, getGlobalTreeNodes, getMetrics, login, proxyGet, putConfigYaml } from './api'
 
 const fetchMock = vi.fn()
 
@@ -75,9 +75,13 @@ describe('admin API facade', () => {
   })
 
   it('loads global tree through the proxy facade', async () => {
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, state: { tree_size: 2 } }), { status: 200 }))
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, state: { tree_size: 2 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ nodes: [{ level: 0, start_index: 1 }] }), { status: 200 }))
 
     await expect(getGlobalTree()).resolves.toMatchObject({ ok: true, state: { tree_size: 2 } })
-    expect(fetchMock).toHaveBeenCalledWith('/admin/api/proxy/v1/global-log/tree', { credentials: 'include' })
+    await expect(getGlobalTreeNodes({ level: 0, start: 1, limit: 1 })).resolves.toMatchObject({ nodes: [{ start_index: 1 }] })
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/admin/api/proxy/v1/global-log/tree', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/admin/api/proxy/v1/global-log/tree/nodes?level=0&start=1&limit=1', { credentials: 'include' })
   })
 })

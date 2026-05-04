@@ -198,6 +198,10 @@ func (s *Service) State(ctx context.Context) (model.GlobalLogState, bool, error)
 	return s.store.GetGlobalLogState(ctx)
 }
 
+func (s *Service) Node(ctx context.Context, level, startIndex uint64) (model.GlobalLogNode, bool, error) {
+	return s.store.GetGlobalLogNode(ctx, level, startIndex)
+}
+
 func (s *Service) ListNodesAfter(ctx context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogNode, error) {
 	return s.store.ListGlobalLogNodesAfter(ctx, afterLevel, afterStartIndex, limit)
 }
