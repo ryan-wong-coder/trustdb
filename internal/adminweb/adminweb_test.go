@@ -178,3 +178,41 @@ func TestProxyGETOnly(t *testing.T) {
 		t.Fatalf("POST proxy status = %d want 405", res3.StatusCode)
 	}
 }
+
+func TestAdminMountServesSPAEntrypoints(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "index.html"), []byte("<!doctype html><title>admin</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assets := filepath.Join(tmp, "assets")
+	if err := os.MkdirAll(assets, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assets, "app.js"), []byte("console.log('ok')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := Mount("/admin", http.NotFoundHandler(), spaFileServer(tmp))
+	for _, path := range []string{"/admin", "/admin/", "/admin/dashboard"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d body=%s", path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "<title>admin</title>") {
+			t.Fatalf("%s did not serve index.html: %q", path, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/assets/app.js", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("asset status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "console.log('ok')" {
+		t.Fatalf("asset body = %q", rec.Body.String())
+	}
+}

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -267,34 +266,31 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-type spaFS struct {
+type spaHandler struct {
 	root string
 }
 
 func spaFileServer(root string) http.Handler {
-	return http.FileServer(spaFS{root: root})
+	return spaHandler{root: root}
 }
 
-func (f spaFS) Open(name string) (http.File, error) {
-	if strings.Contains(name, "..") {
-		return nil, os.ErrNotExist
+func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	clean := path.Clean("/" + name)
-	rel := strings.TrimPrefix(clean, "/")
-	full := filepath.Join(f.root, filepath.FromSlash(rel))
-	fi, err := os.Stat(full)
-	if err == nil && fi.IsDir() {
-		idx := filepath.Join(full, "index.html")
-		if _, err := os.Stat(idx); err == nil {
-			return os.Open(idx)
-		}
+	clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+	if clean == "." {
+		clean = ""
 	}
-	of, err := os.Open(full)
-	if err == nil {
-		return of, nil
+	full := filepath.Join(h.root, filepath.FromSlash(clean))
+	if !strings.HasPrefix(full, filepath.Clean(h.root)) {
+		http.NotFound(w, r)
+		return
 	}
-	if os.IsNotExist(err) {
-		return os.Open(filepath.Join(f.root, "index.html"))
+	if st, err := os.Stat(full); err == nil && !st.IsDir() {
+		http.ServeFile(w, r, full)
+		return
 	}
-	return nil, err
+	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
 }
