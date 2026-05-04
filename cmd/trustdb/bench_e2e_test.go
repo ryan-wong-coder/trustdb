@@ -529,14 +529,19 @@ func loadBenchSmokeGateConfig(t testing.TB) benchSmokeGateConfig {
 		MaxThroughputRegressionPct: benchEnvFloat(t, trustdbBenchMaxThroughputRegressionPctEnv, 80),
 		// Default is looser than bench-smoke CI (which sets TRUSTDB_BENCH_MAX_DURATION_REGRESSION_PCT)
 		// so shared e2e runners are less likely to flake on wall-clock variance.
-		MaxDurationRegressionPct:   benchEnvFloat(t, trustdbBenchMaxDurationRegressionPctEnv, 500),
-		MaxSubmitP95RegressionPct:  benchEnvFloat(t, trustdbBenchMaxSubmitP95RegressionPctEnv, 0),
-		MaxCandidateSubmitP95Ms:    benchEnvFloat(t, trustdbBenchMaxCandidateSubmitP95MsEnv, 0),
-		MaxCandidateFailed:         benchEnvInt(t, trustdbBenchMaxCandidateFailedEnv, 0),
-		MaxCandidateBatchErrors:    benchEnvInt(t, trustdbBenchMaxCandidateBatchErrorsEnv, 0),
-		MaxCandidateQueryFailed:    benchEnvInt(t, trustdbBenchMaxCandidateQueryFailedEnv, 0),
-		MaxCandidateProofTimeouts:  benchEnvInt(t, trustdbBenchMaxCandidateProofTimeoutsEnv, 0),
-		MaxCandidateProofFailed:    benchEnvInt(t, trustdbBenchMaxCandidateProofFailedEnv, 0),
+		MaxDurationRegressionPct:  benchEnvFloat(t, trustdbBenchMaxDurationRegressionPctEnv, 500),
+		MaxSubmitP95RegressionPct: benchEnvFloat(t, trustdbBenchMaxSubmitP95RegressionPctEnv, 0),
+		MaxCandidateSubmitP95Ms:   benchEnvFloat(t, trustdbBenchMaxCandidateSubmitP95MsEnv, 0),
+		MaxCandidateFailed:        benchEnvInt(t, trustdbBenchMaxCandidateFailedEnv, 0),
+		MaxCandidateBatchErrors:   benchEnvInt(t, trustdbBenchMaxCandidateBatchErrorsEnv, 0),
+		// Immediate query samples intentionally happen before proof waiting and
+		// can race async record-index visibility on busy CI runners. Keep the
+		// smoke gate strict for failed submissions/batch errors/post-proof
+		// queries, but allow the single immediate sample in this tiny flow to
+		// be unavailable without failing unrelated CI jobs.
+		MaxCandidateQueryFailed:   benchEnvInt(t, trustdbBenchMaxCandidateQueryFailedEnv, 1),
+		MaxCandidateProofTimeouts: benchEnvInt(t, trustdbBenchMaxCandidateProofTimeoutsEnv, 0),
+		MaxCandidateProofFailed:   benchEnvInt(t, trustdbBenchMaxCandidateProofFailedEnv, 0),
 	}
 }
 
