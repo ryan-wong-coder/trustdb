@@ -17,3 +17,7 @@ Allowed values (aliases accepted): `development` (`dev`), `single_node_productio
 Override via `TRUSTDB_RUN_PROFILE`.
 
 If omitted, serve logs that the deployment is treated as **custom**.
+
+## Admin Web (`admin`)
+
+Optional block `admin` enables the operator UI mounted by `trustdb serve` (see repository README). Use `TRUSTDB_ADMIN_*` env vars in production; set `admin.password_hash` to a bcrypt string from `trustdb admin hash-password`, and `admin.session_secret` to at least 32 random bytes.

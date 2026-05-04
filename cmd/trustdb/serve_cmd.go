@@ -13,10 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ryan-wong-coder/trustdb/internal/adminweb"
 	"github.com/ryan-wong-coder/trustdb/internal/anchor"
 	"github.com/ryan-wong-coder/trustdb/internal/app"
-	trustconfig "github.com/ryan-wong-coder/trustdb/internal/config"
 	"github.com/ryan-wong-coder/trustdb/internal/batch"
+	trustconfig "github.com/ryan-wong-coder/trustdb/internal/config"
 	"github.com/ryan-wong-coder/trustdb/internal/globallog"
 	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
 	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
@@ -443,11 +444,31 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				defer otsUpgrader.Stop()
 			}
 			metricsHandler := observability.Handler(reg)
-			var handler http.Handler
+			var publicHandler http.Handler
 			if anchorAPI != nil {
-				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, metricsHandler, batchSvc, globalSvc, anchorAPI)
+				publicHandler = httpapi.NewWithGlobalAndAnchors(ingestSvc, metricsHandler, batchSvc, globalSvc, anchorAPI)
 			} else {
-				handler = httpapi.NewWithGlobalAndAnchors(ingestSvc, metricsHandler, batchSvc, globalSvc, nil)
+				publicHandler = httpapi.NewWithGlobalAndAnchors(ingestSvc, metricsHandler, batchSvc, globalSvc, nil)
+			}
+			handler := http.Handler(publicHandler)
+			if rt.cfg.Admin.Enabled {
+				ah, err := adminweb.New(adminweb.Options{
+					Admin:        rt.cfg.Admin,
+					Viper:        rt.viper,
+					ConfigPath:   rt.configPath,
+					EffectiveCfg: rt.cfg,
+					Public:       publicHandler,
+					Metrics:      metricsHandler,
+					Logger:       rt.logger,
+				})
+				if err != nil {
+					return err
+				}
+				bp := strings.TrimSpace(rt.cfg.Admin.BasePath)
+				if bp == "" {
+					bp = "/admin"
+				}
+				handler = adminweb.Mount(bp, publicHandler, ah)
 			}
 			server := &http.Server{
 				Addr:         listen,

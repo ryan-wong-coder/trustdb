@@ -77,6 +77,7 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 	_ = rt.viper.BindPFlag("log.async.drop_on_full", root.PersistentFlags().Lookup("log-async-drop"))
 
 	root.AddCommand(newConfigCommand(rt))
+	root.AddCommand(newAdminCommand(rt))
 	root.AddCommand(newServeCommand(rt))
 	root.AddCommand(newKeyCommand(rt))
 	root.AddCommand(newKeygenCommand(rt, false))
@@ -175,6 +176,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("anchor.ots.upgrade.batch_size", 0)
 	v.SetDefault("anchor.ots.upgrade.timeout", "")
 
+	defAdmin := defaults.Admin
+	v.SetDefault("admin.enabled", defAdmin.Enabled)
+	v.SetDefault("admin.base_path", defAdmin.BasePath)
+	v.SetDefault("admin.username", defAdmin.Username)
+	v.SetDefault("admin.password_hash", defAdmin.PasswordHash)
+	v.SetDefault("admin.session_secret", defAdmin.SessionSecret)
+	v.SetDefault("admin.web_dir", defAdmin.WebDir)
+	v.SetDefault("admin.cookie_secure", defAdmin.CookieSecure)
+	v.SetDefault("admin.session_ttl", defAdmin.SessionTTL)
+
 	bindEnv(v, "run_profile", "TRUSTDB_RUN_PROFILE")
 	bindEnv(v, "paths.data_dir", "TRUSTDB_PATHS_DATA_DIR", "TRUSTDB_DATA_DIR")
 	bindEnv(v, "paths.key_registry", "TRUSTDB_PATHS_KEY_REGISTRY", "TRUSTDB_KEY_REGISTRY")
@@ -236,6 +247,14 @@ func setDefaults(v *viper.Viper) {
 	bindEnv(v, "anchor.ots.upgrade.interval", "TRUSTDB_ANCHOR_OTS_UPGRADE_INTERVAL")
 	bindEnv(v, "anchor.ots.upgrade.batch_size", "TRUSTDB_ANCHOR_OTS_UPGRADE_BATCH_SIZE")
 	bindEnv(v, "anchor.ots.upgrade.timeout", "TRUSTDB_ANCHOR_OTS_UPGRADE_TIMEOUT")
+	bindEnv(v, "admin.enabled", "TRUSTDB_ADMIN_ENABLED")
+	bindEnv(v, "admin.base_path", "TRUSTDB_ADMIN_BASE_PATH")
+	bindEnv(v, "admin.username", "TRUSTDB_ADMIN_USERNAME")
+	bindEnv(v, "admin.password_hash", "TRUSTDB_ADMIN_PASSWORD_HASH")
+	bindEnv(v, "admin.session_secret", "TRUSTDB_ADMIN_SESSION_SECRET")
+	bindEnv(v, "admin.web_dir", "TRUSTDB_ADMIN_WEB_DIR")
+	bindEnv(v, "admin.cookie_secure", "TRUSTDB_ADMIN_COOKIE_SECURE")
+	bindEnv(v, "admin.session_ttl", "TRUSTDB_ADMIN_SESSION_TTL")
 }
 
 func bindEnv(v *viper.Viper, key string, env ...string) {
@@ -258,7 +277,7 @@ func (rt *runtimeConfig) load() error {
 			return fmt.Errorf("read config: %w", err)
 		}
 	}
-	cfg := loadConfig(rt.viper)
+	cfg := trustconfig.FromViper(rt.viper)
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
@@ -279,119 +298,6 @@ func (rt *runtimeConfig) close() error {
 	err := rt.logCloser.Close()
 	rt.logCloser = nil
 	return err
-}
-
-func loadConfig(v *viper.Viper) trustconfig.Config {
-	return trustconfig.Config{
-		RunProfile: v.GetString("run_profile"),
-		Paths: trustconfig.Paths{
-			DataDir:     v.GetString("paths.data_dir"),
-			KeyRegistry: v.GetString("paths.key_registry"),
-			WAL:         v.GetString("paths.wal"),
-			ObjectDir:   v.GetString("paths.object_dir"),
-			ProofDir:    v.GetString("paths.proof_dir"),
-		},
-		Identity: trustconfig.Identity{
-			Tenant: v.GetString("identity.tenant"),
-			Client: v.GetString("identity.client"),
-			KeyID:  v.GetString("identity.key_id"),
-		},
-		Server: trustconfig.Server{
-			Listen:          v.GetString("server.listen"),
-			ID:              v.GetString("server.id"),
-			KeyID:           v.GetString("server.key_id"),
-			QueueSize:       v.GetInt("server.queue_size"),
-			Workers:         v.GetInt("server.workers"),
-			ReadTimeout:     v.GetString("server.read_timeout"),
-			WriteTimeout:    v.GetString("server.write_timeout"),
-			ShutdownTimeout: v.GetString("server.shutdown_timeout"),
-		},
-		Registry: trustconfig.Registry{
-			KeyID: v.GetString("registry.key_id"),
-		},
-		Batch: trustconfig.Batch{
-			QueueSize:  v.GetInt("batch.queue_size"),
-			MaxRecords: v.GetInt("batch.max_records"),
-			MaxDelay:   v.GetString("batch.max_delay"),
-			ProofMode:  v.GetString("batch.proof_mode"),
-		},
-		GlobalLog: trustconfig.GlobalLog{
-			Enabled: v.GetBool("global_log.enabled"),
-			LogID:   v.GetString("global_log.log_id"),
-		},
-		Anchor: trustconfig.Anchor{
-			Scope:    v.GetString("anchor.scope"),
-			MaxDelay: v.GetString("anchor.max_delay"),
-		},
-		History: trustconfig.History{
-			TileSize:        v.GetUint64("history.tile_size"),
-			HotWindowLeaves: v.GetUint64("history.hot_window_leaves"),
-		},
-		Backup: trustconfig.Backup{
-			Compression: v.GetString("backup.compression"),
-		},
-		Proofstore: trustconfig.Proofstore{
-			ArtifactSyncMode: v.GetString("proofstore.artifact_sync_mode"),
-			RecordIndexMode:  proofstoreRecordIndexMode(v),
-			TiKVPDAddresses:  splitCSV(strings.Join(v.GetStringSlice("proofstore.tikv_pd_endpoints"), ",")),
-			TiKVKeyspace:     v.GetString("proofstore.tikv_keyspace"),
-			TiKVNamespace:    v.GetString("proofstore.tikv_namespace"),
-		},
-		Log: trustconfig.Log{
-			Level:  v.GetString("log.level"),
-			Format: v.GetString("log.format"),
-			Output: v.GetString("log.output"),
-			File: trustconfig.LogFile{
-				Path:       v.GetString("log.file.path"),
-				MaxSizeMB:  v.GetInt("log.file.max_size_mb"),
-				MaxBackups: v.GetInt("log.file.max_backups"),
-				MaxAgeDays: v.GetInt("log.file.max_age_days"),
-				Compress:   v.GetBool("log.file.compress"),
-			},
-			Async: trustconfig.LogAsync{
-				Enabled:    v.GetBool("log.async.enabled"),
-				BufferSize: v.GetInt("log.async.buffer_size"),
-				DropOnFull: v.GetBool("log.async.drop_on_full"),
-			},
-		},
-		Keys: trustconfig.Keys{
-			ClientPrivate:   v.GetString("keys.client_private"),
-			ClientPublic:    v.GetString("keys.client_public"),
-			ServerPrivate:   v.GetString("keys.server_private"),
-			ServerPublic:    v.GetString("keys.server_public"),
-			RegistryPrivate: v.GetString("keys.registry_private"),
-			RegistryPublic:  v.GetString("keys.registry_public"),
-		},
-	}
-}
-
-func proofstoreRecordIndexMode(v *viper.Viper) string {
-	mode := strings.TrimSpace(v.GetString("proofstore.record_index_mode"))
-	if envIsSet("TRUSTDB_PROOFSTORE_RECORD_INDEX_MODE") && mode != "" {
-		return mode
-	}
-	if envIsSet("TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS") && !v.GetBool("proofstore.index_storage_tokens") {
-		return "no_storage_tokens"
-	}
-	if v.InConfig("proofstore.record_index_mode") && mode != "" {
-		return mode
-	}
-	if v.InConfig("proofstore.index_storage_tokens") && !v.GetBool("proofstore.index_storage_tokens") {
-		return "no_storage_tokens"
-	}
-	if mode != "" {
-		return mode
-	}
-	return "full"
-}
-
-func envIsSet(names ...string) bool {
-	for _, name := range names {
-		if _, ok := os.LookupEnv(name); ok {
-			return true
-		}
-	}
-	return false
 }
 
 func (rt *runtimeConfig) writeJSON(v any) error {

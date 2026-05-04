@@ -1,0 +1,296 @@
+package adminweb
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
+	trustconfig "github.com/ryan-wong-coder/trustdb/internal/config"
+	"github.com/spf13/viper"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// Options configures the admin HTTP subtree.
+type Options struct {
+	Admin        trustconfig.Admin
+	Viper        *viper.Viper
+	ConfigPath   string
+	EffectiveCfg trustconfig.Config
+	Public       http.Handler
+	Metrics      http.Handler
+	Logger       zerolog.Logger
+}
+
+type handler struct {
+	opts Options
+}
+
+// New returns the admin subtree handler (paths relative to admin base, e.g. /api/...).
+func New(opts Options) (http.Handler, error) {
+	if !opts.Admin.Enabled {
+		return nil, errors.New("adminweb.New called with admin disabled")
+	}
+	webDir := strings.TrimSpace(opts.Admin.WebDir)
+	st, err := os.Stat(filepath.Join(webDir, "index.html"))
+	if err != nil || st.IsDir() {
+		return nil, fmt.Errorf("admin.web_dir must contain index.html: %w", err)
+	}
+	if opts.Viper == nil {
+		return nil, errors.New("adminweb.Options.Viper is required")
+	}
+	if opts.Public == nil {
+		return nil, errors.New("adminweb.Options.Public is required")
+	}
+	if opts.Metrics == nil {
+		return nil, errors.New("adminweb.Options.Metrics is required")
+	}
+	h := &handler{opts: opts}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/session", h.getSession)
+	mux.HandleFunc("POST /api/session", h.postSession)
+	mux.HandleFunc("DELETE /api/session", h.deleteSession)
+	mux.Handle("GET /api/metrics", h.withAuth(http.HandlerFunc(h.getMetricsJSON)))
+	mux.Handle("GET /api/config", h.withAuth(http.HandlerFunc(h.getConfig)))
+	mux.Handle("GET /api/config/raw", h.withAuth(http.HandlerFunc(h.getConfigRaw)))
+	mux.Handle("PUT /api/config", h.withAuth(http.HandlerFunc(h.putConfig)))
+	mux.Handle("GET /api/overlays", h.withAuth(http.HandlerFunc(h.getOverlays)))
+
+	proxy := http.StripPrefix("/api/proxy", getOnlyHandler{h: opts.Public})
+	mux.Handle("/api/proxy/", h.withAuth(proxy))
+
+	mux.Handle("/", spaFileServer(webDir))
+	return mux, nil
+}
+
+type getOnlyHandler struct{ h http.Handler }
+
+func (g getOnlyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	g.h.ServeHTTP(w, r)
+}
+
+func (h *handler) getSession(w http.ResponseWriter, r *http.Request) {
+	if u, ok := h.authedUser(r); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": u})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": false})
+}
+
+type loginBody struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (h *handler) postSession(w http.ResponseWriter, r *http.Request) {
+	var body loginBody
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json"})
+		return
+	}
+	wantUser := strings.TrimSpace(h.opts.Admin.Username)
+	if subtleStringEq(wantUser, strings.TrimSpace(body.Username)) != 1 {
+		// still run bcrypt to reduce user enumeration timing a little
+		_ = bcrypt.CompareHashAndPassword([]byte(h.opts.Admin.PasswordHash), []byte("invalid"))
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(h.opts.Admin.PasswordHash), []byte(body.Password)); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return
+	}
+	ttl := sessionTTL(h.opts.Admin.SessionTTL)
+	token, err := issueSessionToken([]byte(h.opts.Admin.SessionSecret), wantUser, ttl)
+	if err != nil {
+		h.opts.Logger.Error().Err(err).Msg("admin session issue failed")
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "internal"})
+		return
+	}
+	w.Header().Set("Set-Cookie", buildSessionCookie(h.opts.Admin.BasePath, token, h.opts.Admin.CookieSecure, ttl))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func subtleStringEq(a, b string) int {
+	if len(a) != len(b) {
+		return 0
+	}
+	var v byte
+	for i := 0; i < len(a); i++ {
+		v |= a[i] ^ b[i]
+	}
+	if v == 0 {
+		return 1
+	}
+	return 0
+}
+
+func (h *handler) deleteSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Set-Cookie", clearSessionCookie(h.opts.Admin.BasePath, h.opts.Admin.CookieSecure))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *handler) authedUser(r *http.Request) (string, bool) {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil || c.Value == "" {
+		return "", false
+	}
+	return verifySessionToken([]byte(h.opts.Admin.SessionSecret), c.Value)
+}
+
+func (h *handler) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := h.authedUser(r); !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (h *handler) getMetricsJSON(w http.ResponseWriter, r *http.Request) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(r.Context(), http.MethodGet, "/metrics", nil)
+	h.opts.Metrics.ServeHTTP(rr, req)
+	if rr.Code < 200 || rr.Code >= 300 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "metrics unavailable"})
+		return
+	}
+	metrics := ParseMetricsText(rr.Body.String())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "metrics": metrics})
+}
+
+func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"config":      h.opts.EffectiveCfg.Redacted(),
+		"config_path": h.opts.ConfigPath,
+		"notes": []string{
+			"Most fields require restarting trustdb serve to take effect.",
+			"Use GET /admin/api/config/raw to fetch the on-disk YAML when --config is set.",
+		},
+	})
+}
+
+func (h *handler) getConfigRaw(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(h.opts.ConfigPath) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "no --config path; raw file API disabled"})
+		return
+	}
+	b, err := os.ReadFile(h.opts.ConfigPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-yaml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
+func (h *handler) putConfig(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(h.opts.ConfigPath) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "no --config path; cannot write"})
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "read body"})
+		return
+	}
+	v2 := viper.New()
+	v2.SetConfigType("yaml")
+	if err := v2.ReadConfig(bytes.NewReader(body)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("yaml: %v", err)})
+		return
+	}
+	cfg := trustconfig.FromViper(v2)
+	if err := cfg.Validate(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	dir := filepath.Dir(h.opts.ConfigPath)
+	backup := filepath.Join(dir, filepath.Base(h.opts.ConfigPath)+fmt.Sprintf(".bak.%d", time.Now().UnixNano()))
+	prev, err := os.ReadFile(h.opts.ConfigPath)
+	if err == nil && len(prev) > 0 {
+		if err := os.WriteFile(backup, prev, 0o600); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": fmt.Sprintf("backup: %v", err)})
+			return
+		}
+	}
+	tmp := h.opts.ConfigPath + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if err := os.Rename(tmp, h.opts.ConfigPath); err != nil {
+		_ = os.Remove(tmp)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	h.opts.Logger.Info().Str("path", h.opts.ConfigPath).Str("backup", backup).Msg("admin wrote config file")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "backup": backup})
+}
+
+func (h *handler) getOverlays(w http.ResponseWriter, r *http.Request) {
+	v := h.opts.Viper
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"overlays": map[string]any{
+			"server": map[string]any{
+				"grpc_listen": strings.TrimSpace(v.GetString("server.grpc_listen")),
+			},
+			"metastore":      strings.TrimSpace(v.GetString("metastore")),
+			"metastore_path": strings.TrimSpace(v.GetString("metastore_path")),
+			"anchor": map[string]any{
+				"sink": strings.TrimSpace(v.GetString("anchor.sink")),
+				"path": strings.TrimSpace(v.GetString("anchor.path")),
+			},
+		},
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+type spaHandler struct {
+	root string
+}
+
+func spaFileServer(root string) http.Handler {
+	return spaHandler{root: root}
+}
+
+func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+	if clean == "." {
+		clean = ""
+	}
+	full := filepath.Join(h.root, filepath.FromSlash(clean))
+	if !strings.HasPrefix(full, filepath.Clean(h.root)) {
+		http.NotFound(w, r)
+		return
+	}
+	if st, err := os.Stat(full); err == nil && !st.IsDir() {
+		http.ServeFile(w, r, full)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
+}
