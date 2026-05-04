@@ -44,8 +44,9 @@ async function save() {
   busy.value = true
   try {
     const r = await putConfigYaml(rawYaml.value)
-    msg.value = r.backup ? `已保存，备份：${r.backup}` : '已保存'
+    const success = r.backup ? `已保存，备份：${r.backup}` : '已保存'
     await load()
+    msg.value = success
   } catch (e: unknown) {
     err.value = e instanceof Error ? e.message : String(e)
   } finally {

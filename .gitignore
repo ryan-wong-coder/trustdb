@@ -28,6 +28,8 @@ node_modules/
 .pnpm-store/
 .yarn/
 .vite/
+test-results/
+playwright-report/
 
 # Logs and temporary files
 *.log

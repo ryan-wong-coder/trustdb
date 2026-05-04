@@ -361,6 +361,18 @@ jobs:
         working-directory: clients/web
         run: npm ci
 
+      - name: Install Playwright browsers
+        working-directory: clients/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run admin web unit and component tests
+        working-directory: clients/web
+        run: npm run test:unit
+
+      - name: Run admin web e2e tests
+        working-directory: clients/web
+        run: npm run test:e2e
+
       - name: Build admin web
         working-directory: clients/web
         run: npm run build
