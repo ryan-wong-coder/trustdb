@@ -47,6 +47,7 @@ The Wails + Vue desktop client provides local identity setup, HTTP/gRPC server c
 - Public Go SDK for claim signing, server calls, proof export, and local verification.
 - Desktop client built with Wails + Vue that supports onboarding, local identity, server settings, file attestation, record management, proof refresh, local verification, and `.sproof` export.
 - Desktop local record storage backed by Pebble with indexes for list/search/filter paths.
+- Optional **Admin Web** (`clients/web`, Vue + Vite) served by `trustdb serve` under `/admin` for metrics, read-only data browsing via the existing HTTP API, and YAML config maintenance when started with `--config`.
 
 ## Proof Levels
 

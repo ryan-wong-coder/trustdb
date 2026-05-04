@@ -29,6 +29,16 @@ github.com/ryan-wong-coder/trustdb
 
 Wails + Vue 桌面客户端提供本地身份初始化、HTTP/gRPC 服务配置、文件存证、记录与证明管理、`.sproof` 导出和离线验证能力。
 
+## Admin Web（运维控制台）
+
+可选的 **Vue 运维 Web**（`clients/web`）由 `trustdb serve` 在同一 HTTP 端口挂载，用于指标、只读业务查询与配置文件运维（需 `--config` 才能写回 YAML）。
+
+1. 生成 bcrypt 密码哈希：`go run ./cmd/trustdb admin hash-password`（或设置 `TRUSTDB_ADMIN_PASSWORD_HASH`）。
+2. 构建前端：`cd clients/web && npm ci && npm run build`。
+3. 在 YAML 或环境中启用并填写 `admin.*`（见 `internal/config/config.go` 默认值与 `TRUSTDB_ADMIN_*` 环境变量），至少包含：`enabled`、`username`、`password_hash`、`session_secret`（≥32 字符）、`web_dir`（指向包含 `index.html` 的目录，一般为 `clients/web/dist`）。
+
+开发联调：另开终端 `cd clients/web && npm run dev`，Vite 将把 `/admin/api` 代理到本机 `127.0.0.1:8080`；先按上一步启用 Admin 并启动 `serve`。
+
 ## 当前功能
 
 - 使用确定性 CBOR 编码 claim、receipt、proof bundle、global-log proof、STH、anchor result 和 `.sproof` 单文件证明。

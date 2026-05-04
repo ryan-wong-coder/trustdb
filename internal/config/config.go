@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -94,6 +96,18 @@ keys:
   server_public: ""
   registry_private: ""
   registry_public: ""
+
+# Admin Web (disabled by default). When enabled, set username, bcrypt
+# password_hash, session_secret, and web_dir to the built SPA assets.
+# admin:
+#   enabled: false
+#   base_path: "/admin"
+#   username: ""
+#   password_hash: ""
+#   session_secret: ""
+#   web_dir: ""
+#   cookie_secure: false
+#   session_ttl: "8h"
 `
 
 type Config struct {
@@ -112,6 +126,19 @@ type Config struct {
 	Proofstore Proofstore `mapstructure:"proofstore" json:"proofstore"`
 	Log        Log        `mapstructure:"log" json:"log"`
 	Keys       Keys       `mapstructure:"keys" json:"keys"`
+	Admin      Admin      `mapstructure:"admin" json:"admin"`
+}
+
+// Admin configures the optional operator web console mounted by trustdb serve.
+type Admin struct {
+	Enabled       bool   `mapstructure:"enabled" json:"enabled"`
+	BasePath      string `mapstructure:"base_path" json:"base_path"`
+	Username      string `mapstructure:"username" json:"username"`
+	PasswordHash  string `mapstructure:"password_hash" json:"password_hash"`
+	SessionSecret string `mapstructure:"session_secret" json:"session_secret"`
+	WebDir        string `mapstructure:"web_dir" json:"web_dir"`
+	CookieSecure  bool   `mapstructure:"cookie_secure" json:"cookie_secure"`
+	SessionTTL    string `mapstructure:"session_ttl" json:"session_ttl"`
 }
 
 type Paths struct {
@@ -261,6 +288,10 @@ func Default() Config {
 			RecordIndexMode:  "full",
 			TiKVNamespace:    "default",
 		},
+		Admin: Admin{
+			BasePath:   "/admin",
+			SessionTTL: "8h",
+		},
 		Log: Log{
 			Level:  "warn",
 			Format: "json",
@@ -286,6 +317,8 @@ func (c Config) Redacted() Config {
 	c.Keys.ServerPublic = redact(c.Keys.ServerPublic)
 	c.Keys.RegistryPrivate = redact(c.Keys.RegistryPrivate)
 	c.Keys.RegistryPublic = redact(c.Keys.RegistryPublic)
+	c.Admin.PasswordHash = redact(c.Admin.PasswordHash)
+	c.Admin.SessionSecret = redact(c.Admin.SessionSecret)
 	return c
 }
 
@@ -417,6 +450,49 @@ func (c Config) Validate() error {
 	}
 	if c.Log.Async.BufferSize <= 0 {
 		return fmt.Errorf("log.async.buffer_size must be greater than 0")
+	}
+	if err := validateAdmin(c.Admin); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAdmin(a Admin) error {
+	if !a.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(a.Username) == "" {
+		return fmt.Errorf("admin.username is required when admin.enabled is true")
+	}
+	hash := strings.TrimSpace(a.PasswordHash)
+	if hash == "" {
+		return fmt.Errorf("admin.password_hash is required when admin.enabled is true")
+	}
+	if !strings.HasPrefix(hash, "$2a$") && !strings.HasPrefix(hash, "$2b$") && !strings.HasPrefix(hash, "$2y$") {
+		return fmt.Errorf("admin.password_hash must be a bcrypt hash (use `trustdb admin hash-password`)")
+	}
+	secret := strings.TrimSpace(a.SessionSecret)
+	if len(secret) < 32 {
+		return fmt.Errorf("admin.session_secret must be at least 32 bytes when admin.enabled is true")
+	}
+	webDir := strings.TrimSpace(a.WebDir)
+	if webDir == "" {
+		return fmt.Errorf("admin.web_dir is required when admin.enabled is true")
+	}
+	if _, err := os.Stat(filepath.Join(webDir, "index.html")); err != nil {
+		return fmt.Errorf("admin.web_dir must contain index.html: %w", err)
+	}
+	if a.SessionTTL != "" {
+		if _, err := time.ParseDuration(a.SessionTTL); err != nil {
+			return fmt.Errorf("admin.session_ttl must be a valid duration: %w", err)
+		}
+	}
+	bp := strings.TrimSpace(a.BasePath)
+	if bp == "" {
+		return fmt.Errorf("admin.base_path is required when admin.enabled is true")
+	}
+	if !strings.HasPrefix(bp, "/") {
+		return fmt.Errorf("admin.base_path must start with /")
 	}
 	return nil
 }

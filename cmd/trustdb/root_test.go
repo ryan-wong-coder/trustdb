@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	trustconfig "github.com/ryan-wong-coder/trustdb/internal/config"
 	"github.com/ryan-wong-coder/trustdb/internal/wal"
 	"github.com/spf13/viper"
 )
@@ -611,7 +612,7 @@ func TestShippedProfileConfigsLoad(t *testing.T) {
 			if err := v.ReadInConfig(); err != nil {
 				t.Fatalf("ReadInConfig: %v", err)
 			}
-			cfg := loadConfig(v)
+			cfg := trustconfig.FromViper(v)
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate: %v", err)
 			}
