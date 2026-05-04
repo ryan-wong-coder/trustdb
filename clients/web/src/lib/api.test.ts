@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getMetrics, login, proxyGet, putConfigYaml } from './api'
+import { getBatchDetail, getBatches, getBatchTreeNodes, getGlobalTree, getGlobalTreeNodes, getMetrics, login, proxyGet, putConfigYaml } from './api'
 
 const fetchMock = vi.fn()
 
@@ -57,5 +57,31 @@ describe('admin API facade', () => {
     await proxyGet('/v1/records?limit=5')
 
     expect(fetchMock).toHaveBeenCalledWith('/admin/api/proxy/v1/records?limit=5', { credentials: 'include' })
+  })
+
+  it('loads batch and tree endpoints through the proxy facade', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ roots: [{ batch_id: 'batch-a' }], next_cursor: 'c1' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ root: { batch_id: 'batch-a' }, manifest: { batch_id: 'batch-a' }, record_count: 2 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ nodes: [{ level: 0, start_index: 0, width: 1 }] }), { status: 200 }))
+
+    await expect(getBatches({ limit: 10 })).resolves.toMatchObject({ next_cursor: 'c1' })
+    await expect(getBatchDetail('batch-a')).resolves.toMatchObject({ record_count: 2 })
+    await expect(getBatchTreeNodes('batch-a', { level: 0, start: 0 })).resolves.toMatchObject({ nodes: [{ level: 0 }] })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/admin/api/proxy/v1/batches?limit=10', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/admin/api/proxy/v1/batches/batch-a', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/admin/api/proxy/v1/batches/batch-a/tree/nodes?level=0&start=0', { credentials: 'include' })
+  })
+
+  it('loads global tree through the proxy facade', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, state: { tree_size: 2 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ nodes: [{ level: 0, start_index: 1 }] }), { status: 200 }))
+
+    await expect(getGlobalTree()).resolves.toMatchObject({ ok: true, state: { tree_size: 2 } })
+    await expect(getGlobalTreeNodes({ level: 0, start: 1, limit: 1 })).resolves.toMatchObject({ nodes: [{ start_index: 1 }] })
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/admin/api/proxy/v1/global-log/tree', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/admin/api/proxy/v1/global-log/tree/nodes?level=0&start=1&limit=1', { credentials: 'include' })
   })
 })

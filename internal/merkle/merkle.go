@@ -16,6 +16,18 @@ type Tree struct {
 	nodes      map[nodeRange][sha256.Size]byte
 }
 
+type Leaf struct {
+	Index uint64
+	Hash  []byte
+}
+
+type Node struct {
+	Level      uint64
+	StartIndex uint64
+	Width      uint64
+	Hash       []byte
+}
+
 func Build(records []model.ServerRecord) (Tree, error) {
 	if len(records) == 0 {
 		return Tree{}, errors.New("merkle: cannot build empty tree")
@@ -94,6 +106,30 @@ func (t Tree) LeafHash(index int) ([]byte, error) {
 		return nil, fmt.Errorf("merkle: leaf index out of range: %d", index)
 	}
 	return cloneHash(t.leafHashes[index]), nil
+}
+
+func (t Tree) Leaves() []Leaf {
+	out := make([]Leaf, len(t.leafHashes))
+	for i := range t.leafHashes {
+		out[i] = Leaf{
+			Index: uint64(i),
+			Hash:  cloneHash(t.leafHashes[i]),
+		}
+	}
+	return out
+}
+
+func (t Tree) Nodes() []Node {
+	out := make([]Node, 0, len(t.nodes))
+	for r, hash := range t.nodes {
+		out = append(out, Node{
+			Level:      rangeLevel(r.size),
+			StartIndex: uint64(r.start),
+			Width:      uint64(r.size),
+			Hash:       cloneHash(hash),
+		})
+	}
+	return out
 }
 
 func (t Tree) Proof(index int) ([][]byte, error) {
@@ -265,4 +301,17 @@ func largestPowerOfTwoLessThan(n int) int {
 		k <<= 1
 	}
 	return k
+}
+
+func rangeLevel(size int) uint64 {
+	if size <= 1 {
+		return 0
+	}
+	level := uint64(0)
+	width := 1
+	for width < size {
+		width <<= 1
+		level++
+	}
+	return level
 }

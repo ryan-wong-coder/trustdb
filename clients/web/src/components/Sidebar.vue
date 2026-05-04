@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { LayoutDashboard, Activity, ScrollText, Settings as SettingsIcon, LogOut } from 'lucide-vue-next'
+import { LayoutDashboard, Activity, ScrollText, Settings as SettingsIcon, LogOut, GitBranch, Network } from 'lucide-vue-next'
 import { computed } from 'vue'
 import TrustDBLogo from './TrustDBLogo.vue'
 import { useAuth } from '@/stores/auth'
@@ -16,6 +16,8 @@ const navGroups = [
       { to: '/dashboard', label: '概览', icon: LayoutDashboard },
       { to: '/metrics', label: '指标', icon: Activity },
       { to: '/records', label: '记录', icon: ScrollText },
+      { to: '/batches', label: '批次', icon: GitBranch },
+      { to: '/global-tree', label: '全局树', icon: Network },
       { to: '/settings', label: '系统设置', icon: SettingsIcon },
     ],
   },
@@ -24,7 +26,7 @@ const navGroups = [
 const activePath = computed(() => route.path)
 
 function isActive(to: string): boolean {
-  return activePath.value === to || (to === '/dashboard' && activePath.value === '/')
+  return activePath.value === to || (to === '/dashboard' && activePath.value === '/') || (to === '/batches' && activePath.value.startsWith('/batches/'))
 }
 
 async function doLogout() {

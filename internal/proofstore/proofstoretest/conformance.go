@@ -37,6 +37,7 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("RootListAcceptsHugeLimit", func(t *testing.T) { testRootListAcceptsHugeLimit(t, newStore) })
 	t.Run("LatestRootSelectsNewest", func(t *testing.T) { testLatestRoot(t, newStore) })
 	t.Run("RootListPagePaginates", func(t *testing.T) { testRootListPagePaginates(t, newStore) })
+	t.Run("BatchTreeArtifactsRoundTrip", func(t *testing.T) { testBatchTreeArtifactsRoundTrip(t, newStore) })
 	t.Run("CheckpointRoundTrip", func(t *testing.T) { testCheckpointRoundTrip(t, newStore) })
 	t.Run("CheckpointMissing", func(t *testing.T) { testCheckpointMissing(t, newStore) })
 	t.Run("ConcurrentPutBundle", func(t *testing.T) { testConcurrentPutBundle(t, newStore) })
@@ -509,6 +510,56 @@ func testRootListPagePaginates(t *testing.T, newStore Factory) {
 	}
 	if len(next) != 1 || next[0].BatchID != "batch-1" {
 		t.Fatalf("next roots page = %+v", next)
+	}
+}
+
+func testBatchTreeArtifactsRoundTrip(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	leaves := []model.BatchTreeLeaf{
+		{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-tree", RecordID: "rec-0", LeafIndex: 0, LeafHash: []byte{1}},
+		{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-tree", RecordID: "rec-1", LeafIndex: 1, LeafHash: []byte{2}},
+		{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-tree", RecordID: "rec-2", LeafIndex: 2, LeafHash: []byte{3}},
+	}
+	nodes := []model.BatchTreeNode{
+		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 0, StartIndex: 0, Width: 1, Hash: []byte{1}},
+		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 0, StartIndex: 1, Width: 1, Hash: []byte{2}},
+		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 1, StartIndex: 0, Width: 2, Hash: []byte{4}},
+		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 2, StartIndex: 0, Width: 3, Hash: []byte{5}},
+	}
+	if err := store.PutBatchTreeArtifacts(ctx, leaves, nodes); err != nil {
+		t.Fatalf("PutBatchTreeArtifacts: %v", err)
+	}
+	firstLeaves, err := store.ListBatchTreeLeaves(ctx, model.BatchTreeLeafListOptions{BatchID: "batch-tree", Limit: 2})
+	if err != nil {
+		t.Fatalf("ListBatchTreeLeaves first: %v", err)
+	}
+	if len(firstLeaves) != 2 || firstLeaves[0].RecordID != "rec-0" || firstLeaves[1].RecordID != "rec-1" {
+		t.Fatalf("first leaves page = %+v", firstLeaves)
+	}
+	nextLeaves, err := store.ListBatchTreeLeaves(ctx, model.BatchTreeLeafListOptions{BatchID: "batch-tree", Limit: 2, AfterLeafIndex: firstLeaves[1].LeafIndex, HasAfter: true})
+	if err != nil {
+		t.Fatalf("ListBatchTreeLeaves next: %v", err)
+	}
+	if len(nextLeaves) != 1 || nextLeaves[0].RecordID != "rec-2" {
+		t.Fatalf("next leaves page = %+v", nextLeaves)
+	}
+	levelZero, err := store.ListBatchTreeNodes(ctx, model.BatchTreeNodeListOptions{BatchID: "batch-tree", Level: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListBatchTreeNodes level0: %v", err)
+	}
+	if len(levelZero) != 2 || levelZero[0].StartIndex != 0 || levelZero[1].StartIndex != 1 {
+		t.Fatalf("level0 nodes = %+v", levelZero)
+	}
+	levelOne, err := store.ListBatchTreeNodes(ctx, model.BatchTreeNodeListOptions{BatchID: "batch-tree", Level: 1, StartIndex: 0, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListBatchTreeNodes level1: %v", err)
+	}
+	if len(levelOne) != 1 || levelOne[0].Width != 2 {
+		t.Fatalf("level1 nodes = %+v", levelOne)
 	}
 }
 

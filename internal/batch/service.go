@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ryan-wong-coder/trustdb/internal/merkle"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
@@ -39,6 +40,9 @@ type Store interface {
 	ListRootsAfter(context.Context, int64, int) ([]model.BatchRoot, error)
 	ListRootsPage(context.Context, model.RootListOptions) ([]model.BatchRoot, error)
 	LatestRoot(context.Context) (model.BatchRoot, error)
+	PutBatchTreeArtifacts(context.Context, []model.BatchTreeLeaf, []model.BatchTreeNode) error
+	ListBatchTreeLeaves(context.Context, model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error)
+	ListBatchTreeNodes(context.Context, model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error)
 	PutManifest(context.Context, model.BatchManifest) error
 	GetManifest(context.Context, string) (model.BatchManifest, error)
 	ListManifests(context.Context) ([]model.BatchManifest, error)
@@ -282,6 +286,27 @@ func (s *Service) LatestRoot(ctx context.Context) (model.BatchRoot, error) {
 	return s.store.LatestRoot(ctx)
 }
 
+func (s *Service) Manifest(ctx context.Context, batchID string) (model.BatchManifest, error) {
+	if s.store == nil {
+		return model.BatchManifest{}, trusterr.New(trusterr.CodeFailedPrecondition, "proof store is not configured")
+	}
+	return s.store.GetManifest(ctx, batchID)
+}
+
+func (s *Service) BatchTreeLeaves(ctx context.Context, opts model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
+	if s.store == nil {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "proof store is not configured")
+	}
+	return s.store.ListBatchTreeLeaves(ctx, opts)
+}
+
+func (s *Service) BatchTreeNodes(ctx context.Context, opts model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
+	if s.store == nil {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "proof store is not configured")
+	}
+	return s.store.ListBatchTreeNodes(ctx, opts)
+}
+
 func (s *Service) Manifests(ctx context.Context) ([]model.BatchManifest, error) {
 	if s.store == nil {
 		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "proof store is not configured")
@@ -432,6 +457,10 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeInternal, "commit batch", err)
 	}
+	leaves, nodes, err := buildBatchTreeArtifacts(batchID, root, records)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeInternal, "build batch tree artifacts", err)
+	}
 
 	manifest := model.BatchManifest{
 		SchemaVersion:   model.SchemaBatchManifest,
@@ -459,6 +488,10 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 			s.observeBatchStage("artifacts", stageStart)
 			return err
 		}
+		if err := s.store.PutBatchTreeArtifacts(ctx, leaves, nodes); err != nil {
+			s.observeBatchStage("artifacts", stageStart)
+			return err
+		}
 		s.observeBatchStage("artifacts", stageStart)
 		itemsCopy := cloneAcceptedItems(items)
 		if s.opts.ProofMode == ProofModeAsync {
@@ -471,6 +504,9 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 	root, err = s.writeBundlesAndRoot(ctx, batchID, bundles)
 	s.observeBatchStage("artifacts", stageStart)
 	if err != nil {
+		return err
+	}
+	if err := s.store.PutBatchTreeArtifacts(ctx, leaves, nodes); err != nil {
 		return err
 	}
 	manifest.State = model.BatchStateCommitted
@@ -513,6 +549,47 @@ func (s *Service) writeBundlesAndRoot(ctx context.Context, batchID string, bundl
 		return model.BatchRoot{}, err
 	}
 	return root, nil
+}
+
+func buildBatchTreeArtifacts(batchID string, root model.BatchRoot, records []model.ServerRecord) ([]model.BatchTreeLeaf, []model.BatchTreeNode, error) {
+	tree, err := merkle.Build(records)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(root.BatchRoot) > 0 && !bytes.Equal(root.BatchRoot, tree.Root()) {
+		return nil, nil, trusterr.New(trusterr.CodeDataLoss, "batch tree root does not match committed batch root")
+	}
+	now := time.Now().UTC().UnixNano()
+	rawLeaves := tree.Leaves()
+	leaves := make([]model.BatchTreeLeaf, len(rawLeaves))
+	for i := range rawLeaves {
+		recordID := ""
+		if int(rawLeaves[i].Index) < len(records) {
+			recordID = records[rawLeaves[i].Index].RecordID
+		}
+		leaves[i] = model.BatchTreeLeaf{
+			SchemaVersion:  model.SchemaBatchTreeLeaf,
+			BatchID:        batchID,
+			RecordID:       recordID,
+			LeafIndex:      rawLeaves[i].Index,
+			LeafHash:       append([]byte(nil), rawLeaves[i].Hash...),
+			CreatedAtUnixN: now,
+		}
+	}
+	rawNodes := tree.Nodes()
+	nodes := make([]model.BatchTreeNode, len(rawNodes))
+	for i := range rawNodes {
+		nodes[i] = model.BatchTreeNode{
+			SchemaVersion:  model.SchemaBatchTreeNode,
+			BatchID:        batchID,
+			Level:          rawNodes[i].Level,
+			StartIndex:     rawNodes[i].StartIndex,
+			Width:          rawNodes[i].Width,
+			Hash:           append([]byte(nil), rawNodes[i].Hash...),
+			CreatedAtUnixN: now,
+		}
+	}
+	return leaves, nodes, nil
 }
 
 func rootFromBundles(batchID string, bundles []model.ProofBundle) model.BatchRoot {
@@ -584,7 +661,7 @@ func (s *Service) RecoverManifest(ctx context.Context, manifest model.BatchManif
 		}
 	}
 	if s.opts.ProofMode == ProofModeOnDemand {
-		root, indexes, err := s.planBatchIndexesFromItems(manifest.BatchID, time.Unix(0, manifest.ClosedAtUnixN).UTC(), items)
+		root, indexes, records, err := s.planBatchIndexesFromItems(manifest.BatchID, time.Unix(0, manifest.ClosedAtUnixN).UTC(), items)
 		if err != nil {
 			return trusterr.Wrap(trusterr.CodeInternal, "rebuild on-demand batch indexes during recovery", err)
 		}
@@ -592,6 +669,13 @@ func (s *Service) RecoverManifest(ctx context.Context, manifest model.BatchManif
 			return trusterr.New(trusterr.CodeDataLoss, "recovered on-demand batch root does not match prepared manifest")
 		}
 		if err := s.writeIndexesAndRoot(ctx, indexes, root); err != nil {
+			return err
+		}
+		leaves, nodes, err := buildBatchTreeArtifacts(manifest.BatchID, root, records)
+		if err != nil {
+			return err
+		}
+		if err := s.store.PutBatchTreeArtifacts(ctx, leaves, nodes); err != nil {
 			return err
 		}
 		return nil
@@ -673,6 +757,13 @@ func (s *Service) materializeManifest(ctx context.Context, manifest model.BatchM
 	if err != nil {
 		return model.BatchRoot{}, err
 	}
+	leaves, nodes, err := buildBatchTreeArtifacts(manifest.BatchID, root, records)
+	if err != nil {
+		return model.BatchRoot{}, err
+	}
+	if err := s.store.PutBatchTreeArtifacts(ctx, leaves, nodes); err != nil {
+		return model.BatchRoot{}, err
+	}
 	manifest.State = model.BatchStateCommitted
 	if manifest.CommittedAtUnixN == 0 {
 		manifest.CommittedAtUnixN = time.Now().UTC().UnixNano()
@@ -688,9 +779,10 @@ func (s *Service) materializeManifest(ctx context.Context, manifest model.BatchM
 	return root, nil
 }
 
-func (s *Service) planBatchIndexesFromItems(batchID string, closedAt time.Time, items []Accepted) (model.BatchRoot, []model.RecordIndex, error) {
+func (s *Service) planBatchIndexesFromItems(batchID string, closedAt time.Time, items []Accepted) (model.BatchRoot, []model.RecordIndex, []model.ServerRecord, error) {
 	signed, records, accepted := splitAcceptedItems(items)
-	return s.planBatchIndexes(batchID, closedAt, signed, records, accepted)
+	root, indexes, err := s.planBatchIndexes(batchID, closedAt, signed, records, accepted)
+	return root, indexes, records, err
 }
 
 func splitAcceptedItems(items []Accepted) ([]model.SignedClaim, []model.ServerRecord, []model.AcceptedReceipt) {

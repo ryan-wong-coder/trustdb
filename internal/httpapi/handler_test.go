@@ -389,6 +389,140 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 	}
 }
 
+func TestBatchTreeEndpoints(t *testing.T) {
+	t.Parallel()
+
+	handler := New(nil, nil, &fakeBatchService{
+		roots: []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-a", TreeSize: 2, BatchRoot: []byte{9}, ClosedAtUnixN: 100}},
+		manifests: map[string]model.BatchManifest{
+			"batch-a": {SchemaVersion: model.SchemaBatchManifest, BatchID: "batch-a", State: model.BatchStateCommitted, TreeSize: 2, BatchRoot: []byte{9}, RecordIDs: []string{"rec-a", "rec-b"}, ClosedAtUnixN: 100},
+		},
+		treeLeaves: []model.BatchTreeLeaf{
+			{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-a", RecordID: "rec-a", LeafIndex: 0, LeafHash: []byte{1}},
+			{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-a", RecordID: "rec-b", LeafIndex: 1, LeafHash: []byte{2}},
+		},
+		treeNodes: []model.BatchTreeNode{
+			{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-a", Level: 0, StartIndex: 0, Width: 1, Hash: []byte{1}},
+			{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-a", Level: 0, StartIndex: 1, Width: 1, Hash: []byte{2}},
+			{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-a", Level: 1, StartIndex: 0, Width: 2, Hash: []byte{9}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/batches/batch-a", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch detail status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var detail batchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode batch detail: %v", err)
+	}
+	if detail.RecordCount != 2 || detail.Root.BatchID != "batch-a" {
+		t.Fatalf("batch detail = %+v", detail)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/batches/batch-a/tree/leaves?limit=1", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch leaves status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var leaves batchLeavesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &leaves); err != nil {
+		t.Fatalf("decode batch leaves: %v", err)
+	}
+	if len(leaves.Leaves) != 1 || leaves.Leaves[0].RecordID != "rec-a" || leaves.NextCursor == "" {
+		t.Fatalf("batch leaves = %+v", leaves)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/batches/batch-a/tree/nodes?level=0&limit=2", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch nodes status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var nodes batchNodesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &nodes); err != nil {
+		t.Fatalf("decode batch nodes: %v", err)
+	}
+	if len(nodes.Nodes) != 2 || nodes.Nodes[0].StartIndex != 0 || nodes.NextCursor == "" {
+		t.Fatalf("batch nodes = %+v", nodes)
+	}
+}
+
+func TestBatchTreeEndpointReportsMissingIndex(t *testing.T) {
+	t.Parallel()
+
+	handler := New(nil, nil, &fakeBatchService{
+		manifests: map[string]model.BatchManifest{
+			"old-batch": {SchemaVersion: model.SchemaBatchManifest, BatchID: "old-batch", State: model.BatchStateCommitted, TreeSize: 2, RecordIDs: []string{"rec-a", "rec-b"}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/batches/old-batch/tree/leaves?limit=1", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("batch leaves status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGlobalTreeEndpoints(t *testing.T) {
+	t.Parallel()
+
+	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, fakeGlobalService{
+		sths:  []model.SignedTreeHead{{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 2, RootHash: []byte{9}}},
+		state: model.GlobalLogState{SchemaVersion: model.SchemaGlobalLogState, TreeSize: 2, RootHash: []byte{9}},
+		nodes: []model.GlobalLogNode{
+			{SchemaVersion: model.SchemaGlobalLogNode, Level: 0, StartIndex: 0, Width: 1, Hash: []byte{1}},
+			{SchemaVersion: model.SchemaGlobalLogNode, Level: 0, StartIndex: 1, Width: 1, Hash: []byte{2}},
+		},
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/global-log/tree", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("global tree status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var tree globalTreeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &tree); err != nil {
+		t.Fatalf("decode global tree: %v", err)
+	}
+	if !tree.OK || tree.State.TreeSize != 2 || tree.STH == nil {
+		t.Fatalf("global tree = %+v", tree)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/global-log/tree/nodes?limit=1", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("global nodes status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var nodes globalNodesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &nodes); err != nil {
+		t.Fatalf("decode global nodes: %v", err)
+	}
+	if len(nodes.Nodes) != 1 || nodes.NextCursor == "" {
+		t.Fatalf("global nodes = %+v", nodes)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/global-log/tree/nodes?level=0&start=1", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("global exact node status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var exact globalNodesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &exact); err != nil {
+		t.Fatalf("decode global exact node: %v", err)
+	}
+	if len(exact.Nodes) != 1 || exact.Nodes[0].StartIndex != 1 || exact.NextCursor != "" {
+		t.Fatalf("global exact node = %+v", exact)
+	}
+}
+
 func TestGlobalRoutesAreNotRegisteredWithoutGlobalService(t *testing.T) {
 	t.Parallel()
 
@@ -397,6 +531,8 @@ func TestGlobalRoutesAreNotRegisteredWithoutGlobalService(t *testing.T) {
 		"/v1/sth/latest",
 		"/v1/sth",
 		"/v1/global-log/leaves",
+		"/v1/global-log/tree",
+		"/v1/global-log/tree/nodes",
 		"/v1/global-log/inclusion/batch-1",
 		"/v1/global-log/consistency?from=1&to=2",
 	} {
@@ -418,6 +554,8 @@ func TestGlobalRoutesAreNotRegisteredWithTypedNilGlobalService(t *testing.T) {
 		"/v1/sth/latest",
 		"/v1/sth",
 		"/v1/global-log/leaves",
+		"/v1/global-log/tree",
+		"/v1/global-log/tree/nodes",
 		"/v1/global-log/inclusion/batch-1",
 		"/v1/global-log/consistency?from=1&to=2",
 	} {
@@ -440,11 +578,14 @@ func (f processorFunc) Submit(ctx context.Context, signed model.SignedClaim) (mo
 }
 
 type fakeBatchService struct {
-	mu       sync.Mutex
-	enqueued string
-	proof    model.ProofBundle
-	roots    []model.BatchRoot
-	records  []model.RecordIndex
+	mu         sync.Mutex
+	enqueued   string
+	proof      model.ProofBundle
+	roots      []model.BatchRoot
+	records    []model.RecordIndex
+	manifests  map[string]model.BatchManifest
+	treeLeaves []model.BatchTreeLeaf
+	treeNodes  []model.BatchTreeNode
 }
 
 func (f *fakeBatchService) Enqueue(ctx context.Context, signed model.SignedClaim, record model.ServerRecord, accepted model.AcceptedReceipt) error {
@@ -544,6 +685,63 @@ func (f *fakeBatchService) LatestRoot(ctx context.Context) (model.BatchRoot, err
 	return f.roots[0], nil
 }
 
+func (f *fakeBatchService) Manifest(ctx context.Context, batchID string) (model.BatchManifest, error) {
+	if f.manifests != nil {
+		if manifest, ok := f.manifests[batchID]; ok {
+			return manifest, nil
+		}
+	}
+	for _, root := range f.roots {
+		if root.BatchID == batchID {
+			return model.BatchManifest{
+				SchemaVersion: model.SchemaBatchManifest,
+				BatchID:       root.BatchID,
+				NodeID:        root.NodeID,
+				LogID:         root.LogID,
+				State:         model.BatchStateCommitted,
+				TreeSize:      root.TreeSize,
+				BatchRoot:     append([]byte(nil), root.BatchRoot...),
+				ClosedAtUnixN: root.ClosedAtUnixN,
+			}, nil
+		}
+	}
+	return model.BatchManifest{}, trusterr.New(trusterr.CodeNotFound, "batch manifest not found")
+}
+
+func (f *fakeBatchService) BatchTreeLeaves(ctx context.Context, opts model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
+	out := make([]model.BatchTreeLeaf, 0, opts.Limit)
+	for _, leaf := range f.treeLeaves {
+		if leaf.BatchID != opts.BatchID {
+			continue
+		}
+		if opts.HasAfter && leaf.LeafIndex <= opts.AfterLeafIndex {
+			continue
+		}
+		out = append(out, leaf)
+		if len(out) >= opts.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeBatchService) BatchTreeNodes(ctx context.Context, opts model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
+	out := make([]model.BatchTreeNode, 0, opts.Limit)
+	for _, node := range f.treeNodes {
+		if node.BatchID != opts.BatchID || node.Level != opts.Level || node.StartIndex < opts.StartIndex {
+			continue
+		}
+		if opts.HasAfter && node.StartIndex <= opts.AfterStartIndex {
+			continue
+		}
+		out = append(out, node)
+		if len(out) >= opts.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeBatchService) enqueuedRecordID() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -553,6 +751,8 @@ func (f *fakeBatchService) enqueuedRecordID() string {
 type fakeGlobalService struct {
 	sths   []model.SignedTreeHead
 	leaves []model.GlobalLogLeaf
+	state  model.GlobalLogState
+	nodes  []model.GlobalLogNode
 }
 
 func (f fakeGlobalService) LatestSTH(context.Context) (model.SignedTreeHead, bool, error) {
@@ -611,6 +811,37 @@ func (f fakeGlobalService) ListLeaves(_ context.Context, opts model.GlobalLeafLi
 		}
 		out = append(out, leaf)
 		if len(out) >= opts.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f fakeGlobalService) State(context.Context) (model.GlobalLogState, bool, error) {
+	if f.state.TreeSize == 0 && len(f.state.RootHash) == 0 {
+		return model.GlobalLogState{}, false, nil
+	}
+	return f.state, true, nil
+}
+
+func (f fakeGlobalService) Node(_ context.Context, level, startIndex uint64) (model.GlobalLogNode, bool, error) {
+	for _, node := range f.nodes {
+		if node.Level == level && node.StartIndex == startIndex {
+			return node, true, nil
+		}
+	}
+	return model.GlobalLogNode{}, false, nil
+}
+
+func (f fakeGlobalService) ListNodesAfter(_ context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogNode, error) {
+	out := make([]model.GlobalLogNode, 0, limit)
+	hasCursor := afterLevel != ^uint64(0) || afterStartIndex != ^uint64(0)
+	for _, node := range f.nodes {
+		if hasCursor && (node.Level < afterLevel || node.Level == afterLevel && node.StartIndex <= afterStartIndex) {
+			continue
+		}
+		out = append(out, node)
+		if len(out) >= limit {
 			break
 		}
 	}

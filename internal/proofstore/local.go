@@ -323,6 +323,157 @@ func (s LocalStore) LatestRoot(ctx context.Context) (model.BatchRoot, error) {
 	return roots[0], nil
 }
 
+func (s LocalStore) PutBatchTreeArtifacts(ctx context.Context, leaves []model.BatchTreeLeaf, nodes []model.BatchTreeNode) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch tree artifacts canceled", err)
+	}
+	if len(leaves) == 0 {
+		return trusterr.New(trusterr.CodeInvalidArgument, "batch tree artifacts require at least one leaf")
+	}
+	batchID := leaves[0].BatchID
+	if batchID == "" {
+		return trusterr.New(trusterr.CodeInvalidArgument, "batch tree artifact batch_id is required")
+	}
+	now := time.Now().UTC().UnixNano()
+	for i := range leaves {
+		if err := ctx.Err(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch tree artifacts canceled", err)
+		}
+		leaf := leaves[i]
+		if leaf.BatchID != batchID {
+			return trusterr.New(trusterr.CodeInvalidArgument, "batch tree leaves must share batch_id")
+		}
+		if leaf.SchemaVersion == "" {
+			leaf.SchemaVersion = model.SchemaBatchTreeLeaf
+		}
+		if leaf.CreatedAtUnixN == 0 {
+			leaf.CreatedAtUnixN = now
+		}
+		if err := writeCBORAtomic(s.batchTreeLeafPath(leaf.BatchID, leaf.LeafIndex), leaf); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "write batch tree leaf", err)
+		}
+	}
+	for i := range nodes {
+		if err := ctx.Err(); err != nil {
+			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch tree artifacts canceled", err)
+		}
+		node := nodes[i]
+		if node.BatchID != batchID {
+			return trusterr.New(trusterr.CodeInvalidArgument, "batch tree nodes must share batch_id")
+		}
+		if node.Width == 0 {
+			return trusterr.New(trusterr.CodeInvalidArgument, "batch tree node width is required")
+		}
+		if node.SchemaVersion == "" {
+			node.SchemaVersion = model.SchemaBatchTreeNode
+		}
+		if node.CreatedAtUnixN == 0 {
+			node.CreatedAtUnixN = now
+		}
+		if err := writeCBORAtomic(s.batchTreeNodePath(node.BatchID, node.Level, node.StartIndex), node); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "write batch tree node", err)
+		}
+	}
+	return nil
+}
+
+func (s LocalStore) ListBatchTreeLeaves(ctx context.Context, opts model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree leaves canceled", err)
+	}
+	if opts.BatchID == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "batch_id is required")
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	entries, err := os.ReadDir(s.batchTreeLeafDir(opts.BatchID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read batch tree leaf directory", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tdbtleaf") {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	leaves := make([]model.BatchTreeLeaf, 0, limit)
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree leaves canceled", err)
+		}
+		data, err := os.ReadFile(filepath.Join(s.batchTreeLeafDir(opts.BatchID), name))
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read batch tree leaf", err)
+		}
+		var leaf model.BatchTreeLeaf
+		if err := cborx.UnmarshalLimit(data, &leaf, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode batch tree leaf", err)
+		}
+		if opts.HasAfter && leaf.LeafIndex <= opts.AfterLeafIndex {
+			continue
+		}
+		leaves = append(leaves, leaf)
+		if len(leaves) >= limit {
+			break
+		}
+	}
+	return leaves, nil
+}
+
+func (s LocalStore) ListBatchTreeNodes(ctx context.Context, opts model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree nodes canceled", err)
+	}
+	if opts.BatchID == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "batch_id is required")
+	}
+	limit := normaliseRecordLimit(opts.Limit)
+	entries, err := os.ReadDir(s.batchTreeNodeLevelDir(opts.BatchID, opts.Level))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read batch tree node directory", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tdbtnode") {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	nodes := make([]model.BatchTreeNode, 0, limit)
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree nodes canceled", err)
+		}
+		data, err := os.ReadFile(filepath.Join(s.batchTreeNodeLevelDir(opts.BatchID, opts.Level), name))
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read batch tree node", err)
+		}
+		var node model.BatchTreeNode
+		if err := cborx.UnmarshalLimit(data, &node, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode batch tree node", err)
+		}
+		if node.StartIndex < opts.StartIndex {
+			continue
+		}
+		if opts.HasAfter && node.StartIndex <= opts.AfterStartIndex {
+			continue
+		}
+		nodes = append(nodes, node)
+		if len(nodes) >= limit {
+			break
+		}
+	}
+	return nodes, nil
+}
+
 func (s LocalStore) PutManifest(ctx context.Context, manifest model.BatchManifest) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put manifest canceled", err)
@@ -1567,6 +1718,22 @@ func (s LocalStore) globalLeafByBatchPath(batchID string) string {
 
 func (s LocalStore) globalNodePath(level, start uint64) string {
 	return filepath.Join(s.globalNodeDir(), fmt.Sprintf("%020d_%020d.tdgnode", level, start))
+}
+
+func (s LocalStore) batchTreeLeafDir(batchID string) string {
+	return filepath.Join(s.root(), "batch-trees", safeFileName(batchID), "leaves")
+}
+
+func (s LocalStore) batchTreeLeafPath(batchID string, index uint64) string {
+	return filepath.Join(s.batchTreeLeafDir(batchID), fmt.Sprintf("%020d.tdbtleaf", index))
+}
+
+func (s LocalStore) batchTreeNodeLevelDir(batchID string, level uint64) string {
+	return filepath.Join(s.root(), "batch-trees", safeFileName(batchID), "nodes", fmt.Sprintf("%020d", level))
+}
+
+func (s LocalStore) batchTreeNodePath(batchID string, level, start uint64) string {
+	return filepath.Join(s.batchTreeNodeLevelDir(batchID, level), fmt.Sprintf("%020d.tdbtnode", start))
 }
 
 func (s LocalStore) sthPath(treeSize uint64) string {

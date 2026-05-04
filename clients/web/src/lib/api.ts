@@ -8,6 +8,110 @@ export type Metric = {
   value: number
 }
 
+export type BatchRoot = {
+  schema_version: string
+  batch_id: string
+  node_id?: string
+  log_id?: string
+  batch_root: string | number[]
+  tree_size: number
+  closed_at_unix_nano: number
+}
+
+export type BatchManifest = {
+  schema_version: string
+  batch_id: string
+  node_id?: string
+  log_id?: string
+  state: string
+  tree_alg: string
+  tree_size: number
+  batch_root: string | number[]
+  record_ids: string[]
+  closed_at_unix_nano: number
+  prepared_at_unix_nano?: number
+  committed_at_unix_nano?: number
+  wal_range?: unknown
+}
+
+export type BatchTreeLeaf = {
+  schema_version: string
+  batch_id: string
+  record_id: string
+  leaf_index: number
+  leaf_hash: string | number[]
+  created_at_unix_nano?: number
+}
+
+export type BatchTreeNode = {
+  schema_version: string
+  batch_id: string
+  level: number
+  start_index: number
+  width: number
+  hash: string | number[]
+  created_at_unix_nano?: number
+}
+
+export type SignedTreeHead = {
+  schema_version: string
+  tree_alg: string
+  tree_size: number
+  root_hash: string | number[]
+  timestamp_unix_nano: number
+  node_id?: string
+  log_id?: string
+}
+
+export type GlobalLogState = {
+  schema_version: string
+  tree_size: number
+  root_hash?: string | number[]
+  frontier: Array<string | number[]>
+  updated_at_unix_nano: number
+}
+
+export type GlobalLogLeaf = {
+  schema_version: string
+  batch_id: string
+  batch_root: string | number[]
+  batch_tree_size: number
+  batch_closed_at_unix_nano: number
+  leaf_index: number
+  leaf_hash: string | number[]
+  appended_at_unix_nano: number
+}
+
+export type GlobalLogNode = {
+  schema_version: string
+  level: number
+  start_index: number
+  width: number
+  hash: string | number[]
+  created_at_unix_nano: number
+}
+
+export type ProofResponse = {
+  record_id: string
+  proof_level: string
+  proof_bundle: {
+    record_id: string
+    committed_receipt: {
+      batch_id: string
+      leaf_index: number
+      leaf_hash: string | number[]
+      batch_root: string | number[]
+      batch_closed_at_unix_nano: number
+    }
+    batch_proof: {
+      tree_alg: string
+      leaf_index: number
+      tree_size: number
+      audit_path: Array<string | number[]>
+    }
+  }
+}
+
 async function parseJSON<T>(res: Response): Promise<T> {
   const text = await res.text()
   try {
@@ -95,4 +199,52 @@ export async function putConfigYaml(yaml: string): Promise<{ backup?: string }> 
 export async function proxyGet(path: string): Promise<Response> {
   const p = path.startsWith('/') ? path : `/${path}`
   return fetch(adminApiPrefix + '/proxy' + p, { credentials: 'include' })
+}
+
+async function proxyJSON<T>(path: string): Promise<T> {
+  const res = await proxyGet(path)
+  const j = await parseJSON<T & { code?: string; message?: string }>(res)
+  if (!res.ok) throw new Error(j.message || res.statusText)
+  return j
+}
+
+function withParams(path: string, params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== '') qs.set(key, String(value))
+  }
+  const query = qs.toString()
+  return query ? `${path}?${query}` : path
+}
+
+export async function getBatches(opts: { limit?: number; cursor?: string } = {}): Promise<{ roots: BatchRoot[]; next_cursor?: string }> {
+  return proxyJSON(withParams('/v1/batches', { limit: opts.limit, cursor: opts.cursor }))
+}
+
+export async function getBatchDetail(batchID: string): Promise<{ root: BatchRoot; manifest: BatchManifest; record_count: number }> {
+  return proxyJSON(`/v1/batches/${encodeURIComponent(batchID)}`)
+}
+
+export async function getBatchLeaves(batchID: string, opts: { limit?: number; cursor?: string } = {}): Promise<{ leaves: BatchTreeLeaf[]; next_cursor?: string }> {
+  return proxyJSON(withParams(`/v1/batches/${encodeURIComponent(batchID)}/tree/leaves`, { limit: opts.limit, cursor: opts.cursor }))
+}
+
+export async function getBatchTreeNodes(batchID: string, opts: { level?: number; start?: number; limit?: number; cursor?: string } = {}): Promise<{ nodes: BatchTreeNode[]; next_cursor?: string }> {
+  return proxyJSON(withParams(`/v1/batches/${encodeURIComponent(batchID)}/tree/nodes`, { level: opts.level, start: opts.start, limit: opts.limit, cursor: opts.cursor }))
+}
+
+export async function getProofPath(recordID: string): Promise<ProofResponse> {
+  return proxyJSON(`/v1/proofs/${encodeURIComponent(recordID)}`)
+}
+
+export async function getGlobalTree(): Promise<{ ok: boolean; state?: GlobalLogState; sth?: SignedTreeHead }> {
+  return proxyJSON('/v1/global-log/tree')
+}
+
+export async function getGlobalTreeNodes(opts: { level?: number; start?: number; limit?: number; cursor?: string } = {}): Promise<{ nodes: GlobalLogNode[]; next_cursor?: string }> {
+  return proxyJSON(withParams('/v1/global-log/tree/nodes', { level: opts.level, start: opts.start, limit: opts.limit, cursor: opts.cursor }))
+}
+
+export async function getGlobalLeaves(opts: { limit?: number; cursor?: string } = {}): Promise<{ leaves: GlobalLogLeaf[]; next_cursor?: string }> {
+  return proxyJSON(withParams('/v1/global-log/tree/leaves', { limit: opts.limit, cursor: opts.cursor }))
 }

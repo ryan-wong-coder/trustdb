@@ -151,6 +151,18 @@ func (benchmarkBatchStore) LatestRoot(context.Context) (model.BatchRoot, error) 
 	return model.BatchRoot{}, trusterr.New(trusterr.CodeNotFound, "batch root not found")
 }
 
+func (benchmarkBatchStore) PutBatchTreeArtifacts(context.Context, []model.BatchTreeLeaf, []model.BatchTreeNode) error {
+	return nil
+}
+
+func (benchmarkBatchStore) ListBatchTreeLeaves(context.Context, model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
+	return nil, nil
+}
+
+func (benchmarkBatchStore) ListBatchTreeNodes(context.Context, model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
+	return nil, nil
+}
+
 func (benchmarkBatchStore) PutManifest(context.Context, model.BatchManifest) error { return nil }
 
 func (benchmarkBatchStore) GetManifest(context.Context, string) (model.BatchManifest, error) {

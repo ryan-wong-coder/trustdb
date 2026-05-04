@@ -157,3 +157,15 @@ func (grpcTestBatch) RootsPage(context.Context, model.RootListOptions) ([]model.
 func (grpcTestBatch) LatestRoot(context.Context) (model.BatchRoot, error) {
 	return model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-latest", TreeSize: 3}, nil
 }
+
+func (grpcTestBatch) Manifest(context.Context, string) (model.BatchManifest, error) {
+	return model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "batch-1", TreeSize: 1}, nil
+}
+
+func (grpcTestBatch) BatchTreeLeaves(context.Context, model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
+	return []model.BatchTreeLeaf{{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-1", RecordID: "tr1record", LeafIndex: 0}}, nil
+}
+
+func (grpcTestBatch) BatchTreeNodes(context.Context, model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
+	return []model.BatchTreeNode{{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-1", Level: 0, StartIndex: 0, Width: 1}}, nil
+}
