@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
@@ -22,7 +23,12 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
-const maxClaimBytes = 1 << 20
+const (
+	maxClaimBytes        = 1 << 20
+	maxClaimBatchBytes   = 16 << 20
+	maxClaimBatchItems   = 1000
+	maxClaimBatchWorkers = 64
+)
 
 type Handler struct {
 	Ingest  *ingest.Service
@@ -80,6 +86,22 @@ type submitClaimResponse struct {
 	BatchError      string                `json:"batch_error,omitempty"`
 	ServerRecord    model.ServerRecord    `json:"server_record"`
 	AcceptedReceipt model.AcceptedReceipt `json:"accepted_receipt"`
+}
+
+type submitClaimsBatchRequest struct {
+	Claims []model.SignedClaim `cbor:"claims" json:"claims"`
+}
+
+type submitClaimsBatchResponse struct {
+	Results   []submitClaimsBatchItemResponse `json:"results"`
+	Submitted int                             `json:"submitted"`
+	Failed    int                             `json:"failed"`
+}
+
+type submitClaimsBatchItemResponse struct {
+	Index  int                  `json:"index"`
+	Result *submitClaimResponse `json:"result,omitempty"`
+	Error  *errorResponse       `json:"error,omitempty"`
 }
 
 type proofResponse struct {
@@ -208,6 +230,7 @@ func buildMux(h Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/claims", h.submitClaim)
+	mux.HandleFunc("POST /v1/claims/batch", h.submitClaimsBatch)
 	mux.HandleFunc("GET /v1/records", h.listRecords)
 	mux.HandleFunc("GET /v1/records/{record_id}", h.getRecordIndex)
 	mux.HandleFunc("GET /v1/proofs/{record_id}", h.getProof)
@@ -269,10 +292,6 @@ func (h Handler) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
-	if h.Ingest == nil {
-		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "ingest service is not configured"))
-		return
-	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxClaimBytes))
 	if err != nil {
 		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "read claim body", err))
@@ -283,10 +302,95 @@ func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "decode signed claim", err))
 		return
 	}
-	record, accepted, idempotent, err := h.Ingest.Submit(r.Context(), signed)
+	resp, err := h.submitSignedClaim(r.Context(), signed)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	status := http.StatusAccepted
+	if resp.Idempotent {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, resp)
+}
+
+func (h Handler) submitClaimsBatch(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxClaimBatchBytes))
+	if err != nil {
+		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "read claim batch body", err))
+		return
+	}
+	var req submitClaimsBatchRequest
+	if err := cborx.UnmarshalLimit(body, &req, maxClaimBatchBytes); err != nil {
+		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "decode signed claim batch", err))
+		return
+	}
+	if len(req.Claims) == 0 {
+		writeError(w, trusterr.New(trusterr.CodeInvalidArgument, "claims batch must contain at least one claim"))
+		return
+	}
+	if len(req.Claims) > maxClaimBatchItems {
+		writeError(w, trusterr.New(trusterr.CodeInvalidArgument, "claims batch exceeds 1000 claims"))
+		return
+	}
+
+	resp := submitClaimsBatchResponse{Results: make([]submitClaimsBatchItemResponse, len(req.Claims))}
+	workers := len(req.Claims)
+	if workers > maxClaimBatchWorkers {
+		workers = maxClaimBatchWorkers
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				item := submitClaimsBatchItemResponse{Index: index}
+				result, err := h.submitSignedClaim(r.Context(), req.Claims[index])
+				if err != nil {
+					item.Error = errorPayload(err)
+				} else {
+					item.Result = &result
+				}
+				resp.Results[index] = item
+			}
+		}()
+	}
+	for index := range req.Claims {
+		select {
+		case jobs <- index:
+		case <-r.Context().Done():
+			close(jobs)
+			wg.Wait()
+			writeError(w, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "request context canceled", r.Context().Err()))
+			return
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, item := range resp.Results {
+		if item.Error != nil {
+			resp.Failed++
+			continue
+		}
+		resp.Submitted++
+	}
+	status := http.StatusAccepted
+	if resp.Failed > 0 {
+		status = http.StatusMultiStatus
+	}
+	writeJSON(w, status, resp)
+}
+
+func (h Handler) submitSignedClaim(ctx context.Context, signed model.SignedClaim) (submitClaimResponse, error) {
+	if h.Ingest == nil {
+		return submitClaimResponse{}, trusterr.New(trusterr.CodeFailedPrecondition, "ingest service is not configured")
+	}
+	record, accepted, idempotent, err := h.Ingest.Submit(ctx, signed)
+	if err != nil {
+		return submitClaimResponse{}, err
 	}
 	// Idempotent replays must not re-enqueue into the batch pipeline, both to
 	// avoid duplicate leaves inside a single batch and to keep the L3 proof
@@ -294,17 +398,13 @@ func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
 	batchEnqueued := false
 	batchErr := ""
 	if h.Batch != nil && !idempotent {
-		if err := h.Batch.Enqueue(context.WithoutCancel(r.Context()), signed, record, accepted); err != nil {
+		if err := h.Batch.Enqueue(context.WithoutCancel(ctx), signed, record, accepted); err != nil {
 			batchErr = err.Error()
 		} else {
 			batchEnqueued = true
 		}
 	}
-	status := http.StatusAccepted
-	if idempotent {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, submitClaimResponse{
+	return submitClaimResponse{
 		RecordID:        record.RecordID,
 		Status:          accepted.Status,
 		ProofLevel:      prooflevel.L2.String(),
@@ -313,7 +413,7 @@ func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
 		BatchError:      batchErr,
 		ServerRecord:    record,
 		AcceptedReceipt: accepted,
-	})
+	}, nil
 }
 
 func (h Handler) getProof(w http.ResponseWriter, r *http.Request) {
@@ -1276,7 +1376,12 @@ func parseTreeSize(raw string) (uint64, error) {
 func writeError(w http.ResponseWriter, err error) {
 	code := trusterr.CodeOf(err)
 	status := httpStatus(code)
-	writeJSON(w, status, errorResponse{Code: code, Message: err.Error()})
+	writeJSON(w, status, *errorPayload(err))
+}
+
+func errorPayload(err error) *errorResponse {
+	code := trusterr.CodeOf(err)
+	return &errorResponse{Code: code, Message: err.Error()}
 }
 
 func httpStatus(code trusterr.Code) int {

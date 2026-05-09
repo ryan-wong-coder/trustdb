@@ -3,7 +3,9 @@ package sdk
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
@@ -115,17 +117,119 @@ func (t *grpcTransport) SubmitSignedClaim(ctx context.Context, signed SignedClai
 	if err := t.invoke(ctx, grpcapi.FullMethodSubmitClaim, &grpcapi.SubmitClaimRequest{SignedClaim: signed}, &out); err != nil {
 		return SubmitResult{}, err
 	}
-	return SubmitResult{
-		RecordID:        out.RecordID,
-		Status:          out.Status,
-		ProofLevel:      out.ProofLevel,
-		Idempotent:      out.Idempotent,
-		BatchEnqueued:   out.BatchEnqueued,
-		BatchError:      out.BatchError,
-		ServerRecord:    out.ServerRecord,
-		AcceptedReceipt: out.AcceptedReceipt,
-		SignedClaim:     signed,
-	}, nil
+	return submitResultFromGRPC(out, signed), nil
+}
+
+func (t *grpcTransport) SubmitSignedClaims(ctx context.Context, signed []SignedClaim) ([]signedClaimBatchItemResult, error) {
+	in := make(chan signedClaimStreamItem)
+	out, err := t.SubmitSignedClaimStream(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	sendCtx := ctx
+	if sendCtx == nil {
+		sendCtx = context.Background()
+	}
+	go func() {
+		defer close(in)
+		for index, claim := range signed {
+			select {
+			case in <- signedClaimStreamItem{Index: index, SignedClaim: claim}:
+			case <-sendCtx.Done():
+				return
+			}
+		}
+	}()
+	results := make([]signedClaimBatchItemResult, len(signed))
+	seen := 0
+	for item := range out {
+		if item.Index < 0 {
+			return nil, item.Err
+		}
+		if item.Index >= len(signed) {
+			return nil, &Error{Op: "grpc submit claim stream", URL: t.target, Message: "server returned out-of-range result index"}
+		}
+		results[item.Index] = signedClaimBatchItemResult{Index: item.Index, Result: item.Result, Err: item.Err}
+		seen++
+	}
+	if seen != len(signed) {
+		return nil, &Error{Op: "grpc submit claim stream", URL: t.target, Message: "server returned incomplete batch results"}
+	}
+	return results, nil
+}
+
+func (t *grpcTransport) SubmitSignedClaimStream(ctx context.Context, in <-chan signedClaimStreamItem) (<-chan signedClaimStreamItemResult, error) {
+	if t.conn == nil {
+		return nil, &Error{Op: "grpc submit claim stream", URL: t.target, Message: "grpc connection is nil"}
+	}
+	if in == nil {
+		return nil, errors.New("sdk: signed claim stream is nil")
+	}
+	callCtx, cancel := context.WithCancel(context.Background())
+	if ctx != nil {
+		callCtx, cancel = context.WithCancel(ctx)
+	}
+	stream, err := t.conn.NewStream(callCtx, &grpc.StreamDesc{
+		StreamName:    "SubmitClaimStream",
+		ServerStreams: true,
+		ClientStreams: true,
+	}, grpcapi.FullMethodSubmitClaimStream, grpc.ForceCodec(grpcapi.Codec()))
+	if err != nil {
+		cancel()
+		return nil, grpcError(grpcapi.FullMethodSubmitClaimStream, t.target, err)
+	}
+	out := make(chan signedClaimStreamItemResult, defaultHTTPConcurrency)
+	var sent sync.Map
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer stream.CloseSend()
+		for item := range in {
+			req := grpcapi.SubmitClaimStreamRequest{Index: item.Index, SignedClaim: item.SignedClaim}
+			sent.Store(item.Index, item.SignedClaim)
+			if err := stream.SendMsg(&req); err != nil {
+				out <- signedClaimStreamItemResult{Index: item.Index, Err: grpcError(grpcapi.FullMethodSubmitClaimStream, t.target, err)}
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			var resp grpcapi.SubmitClaimStreamResponse
+			if err := stream.RecvMsg(&resp); err != nil {
+				if err != io.EOF {
+					out <- signedClaimStreamItemResult{Index: -1, Err: grpcError(grpcapi.FullMethodSubmitClaimStream, t.target, err)}
+				}
+				return
+			}
+			item := signedClaimStreamItemResult{Index: resp.Index}
+			if resp.Error != nil {
+				item.Err = &Error{
+					Op:      "grpc submit claim stream item",
+					URL:     t.target,
+					Code:    resp.Error.Code,
+					Message: resp.Error.Message,
+				}
+			} else if resp.Result == nil {
+				item.Err = &Error{Op: "grpc submit claim stream item", URL: t.target, Message: "server returned neither result nor error"}
+			} else {
+				var signed SignedClaim
+				if cached, ok := sent.LoadAndDelete(resp.Index); ok {
+					signed, _ = cached.(SignedClaim)
+				}
+				item.Result = submitResultFromGRPC(*resp.Result, signed)
+			}
+			out <- item
+		}
+	}()
+	go func() {
+		wg.Wait()
+		cancel()
+		close(out)
+	}()
+	return out, nil
 }
 
 func (t *grpcTransport) GetRecord(ctx context.Context, recordID string) (RecordIndex, error) {
@@ -137,6 +241,20 @@ func (t *grpcTransport) GetRecord(ctx context.Context, recordID string) (RecordI
 		return RecordIndex{}, &Error{Op: "grpc get record", URL: t.target, Message: "server returned empty record index"}
 	}
 	return out.Record, nil
+}
+
+func submitResultFromGRPC(out grpcapi.SubmitClaimResponse, signed SignedClaim) SubmitResult {
+	return SubmitResult{
+		RecordID:        out.RecordID,
+		Status:          out.Status,
+		ProofLevel:      out.ProofLevel,
+		Idempotent:      out.Idempotent,
+		BatchEnqueued:   out.BatchEnqueued,
+		BatchError:      out.BatchError,
+		ServerRecord:    out.ServerRecord,
+		AcceptedReceipt: out.AcceptedReceipt,
+		SignedClaim:     signed,
+	}
 }
 
 func (t *grpcTransport) ListRecords(ctx context.Context, opts ListRecordsOptions) (RecordPage, error) {

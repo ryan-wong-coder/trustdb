@@ -62,17 +62,43 @@ func (t *httpTransport) SubmitSignedClaim(ctx context.Context, signed SignedClai
 	if err := t.doJSON(ctx, http.MethodPost, "/v1/claims", nil, bytes.NewReader(body), "application/cbor", &env); err != nil {
 		return SubmitResult{}, err
 	}
-	return SubmitResult{
-		RecordID:        env.RecordID,
-		Status:          env.Status,
-		ProofLevel:      env.ProofLevel,
-		Idempotent:      env.Idempotent,
-		BatchEnqueued:   env.BatchEnqueued,
-		BatchError:      env.BatchError,
-		ServerRecord:    env.ServerRecord,
-		AcceptedReceipt: env.AcceptedReceipt,
-		SignedClaim:     signed,
-	}, nil
+	return submitResultFromEnvelope(env, signed), nil
+}
+
+func (t *httpTransport) SubmitSignedClaims(ctx context.Context, signed []SignedClaim) ([]signedClaimBatchItemResult, error) {
+	body, err := cborx.Marshal(submitClaimsBatchRequestEnvelope{Claims: signed})
+	if err != nil {
+		return nil, err
+	}
+	var env submitClaimsBatchEnvelope
+	if err := t.doJSON(ctx, http.MethodPost, "/v1/claims/batch", nil, bytes.NewReader(body), "application/cbor", &env); err != nil {
+		return nil, err
+	}
+	if len(env.Results) != len(signed) {
+		return nil, &Error{Op: "submit claim batch", URL: t.baseURL, Message: fmt.Sprintf("server returned %d results for %d claims", len(env.Results), len(signed))}
+	}
+	results := make([]signedClaimBatchItemResult, len(env.Results))
+	for _, item := range env.Results {
+		if item.Index < 0 || item.Index >= len(signed) {
+			return nil, &Error{Op: "submit claim batch", URL: t.baseURL, Message: fmt.Sprintf("server returned out-of-range result index %d", item.Index)}
+		}
+		results[item.Index] = signedClaimBatchItemResult{Index: item.Index}
+		if item.Error != nil {
+			results[item.Index].Err = &Error{
+				Op:      "submit claim batch item",
+				URL:     t.baseURL,
+				Code:    item.Error.Code,
+				Message: item.Error.Message,
+			}
+			continue
+		}
+		if item.Result == nil {
+			results[item.Index].Err = &Error{Op: "submit claim batch item", URL: t.baseURL, Message: "server returned neither result nor error"}
+			continue
+		}
+		results[item.Index].Result = submitResultFromEnvelope(*item.Result, signed[item.Index])
+	}
+	return results, nil
 }
 
 func (t *httpTransport) GetRecord(ctx context.Context, recordID string) (RecordIndex, error) {
@@ -331,6 +357,41 @@ type submitClaimEnvelope struct {
 	BatchError      string          `json:"batch_error,omitempty"`
 	ServerRecord    ServerRecord    `json:"server_record"`
 	AcceptedReceipt AcceptedReceipt `json:"accepted_receipt"`
+}
+
+func submitResultFromEnvelope(env submitClaimEnvelope, signed SignedClaim) SubmitResult {
+	return SubmitResult{
+		RecordID:        env.RecordID,
+		Status:          env.Status,
+		ProofLevel:      env.ProofLevel,
+		Idempotent:      env.Idempotent,
+		BatchEnqueued:   env.BatchEnqueued,
+		BatchError:      env.BatchError,
+		ServerRecord:    env.ServerRecord,
+		AcceptedReceipt: env.AcceptedReceipt,
+		SignedClaim:     signed,
+	}
+}
+
+type submitClaimsBatchRequestEnvelope struct {
+	Claims []SignedClaim `cbor:"claims" json:"claims"`
+}
+
+type submitClaimsBatchEnvelope struct {
+	Results   []submitClaimsBatchItemEnvelope `json:"results"`
+	Submitted int                             `json:"submitted"`
+	Failed    int                             `json:"failed"`
+}
+
+type submitClaimsBatchItemEnvelope struct {
+	Index  int                       `json:"index"`
+	Result *submitClaimEnvelope      `json:"result,omitempty"`
+	Error  *submitClaimErrorEnvelope `json:"error,omitempty"`
+}
+
+type submitClaimErrorEnvelope struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type proofEnvelope struct {

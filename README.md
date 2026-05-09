@@ -89,6 +89,7 @@ Implemented HTTP endpoints include:
 | ------------------------------------------ | --------------------------------------------- |
 | `GET /healthz`                             | Health check.                                 |
 | `POST /v1/claims`                          | Submit a signed claim.                        |
+| `POST /v1/claims/batch`                    | Submit a CBOR batch of signed claims.         |
 | `GET /v1/records`                          | Paginated record list and search.             |
 | `GET /v1/records/{record_id}`              | Read record index details.                    |
 | `GET /v1/proofs/{record_id}`               | Fetch L3 proof bundle.                        |
@@ -106,7 +107,7 @@ Implemented HTTP endpoints include:
 
 The server can also expose a gRPC listener with `--grpc-listen` or `server.grpc_listen`. The first implementation keeps TrustDB's existing deterministic CBOR model as the gRPC payload codec, so SDK callers can use HTTP or gRPC without changing proof object semantics.
 
-The gRPC service covers the same core SDK paths currently used by the desktop client: health, submit claim, record list/detail, proof bundle, roots/latest root, STH, global proof, anchor state, and metrics. It also registers the standard `grpc.health.v1.Health` service for infrastructure probes.
+The gRPC service covers the same core SDK paths currently used by the desktop client: health, submit claim, bidirectional claim streaming, record list/detail, proof bundle, roots/latest root, STH, global proof, anchor state, and metrics. It also registers the standard `grpc.health.v1.Health` service for infrastructure probes.
 
 ## CLI Quick Guide
 
@@ -259,7 +260,8 @@ import "github.com/ryan-wong-coder/trustdb/sdk"
 Current SDK capabilities:
 
 - build and sign file claims with Ed25519;
-- submit signed claims to `POST /v1/claims`;
+- build and submit structured log claims from single records, bounded batches, or backpressure-aware streams;
+- submit signed claims to `POST /v1/claims`, native HTTP batches to `POST /v1/claims/batch`, or gRPC bidirectional streams;
 - query records, proof bundles, STHs, GlobalLogProof, and STH anchor state;
 - use either the default HTTP transport or the gRPC transport via `sdk.NewGRPCClient`;
 - use client-side multi-endpoint failover or round-robin via `sdk.NewLoadBalancedClient`;

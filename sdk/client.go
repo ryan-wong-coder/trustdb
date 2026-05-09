@@ -36,6 +36,31 @@ type Transport interface {
 	MetricsRaw(context.Context) (string, error)
 }
 
+type signedClaimBatchTransport interface {
+	SubmitSignedClaims(context.Context, []SignedClaim) ([]signedClaimBatchItemResult, error)
+}
+
+type signedClaimStreamTransport interface {
+	SubmitSignedClaimStream(context.Context, <-chan signedClaimStreamItem) (<-chan signedClaimStreamItemResult, error)
+}
+
+type signedClaimBatchItemResult struct {
+	Index  int
+	Result SubmitResult
+	Err    error
+}
+
+type signedClaimStreamItem struct {
+	Index       int
+	SignedClaim SignedClaim
+}
+
+type signedClaimStreamItemResult struct {
+	Index  int
+	Result SubmitResult
+	Err    error
+}
+
 type Client struct {
 	transport Transport
 }
