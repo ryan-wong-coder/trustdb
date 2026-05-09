@@ -46,3 +46,26 @@ func ExampleBuildSignedFileClaim() {
 	fmt.Println(signed.SchemaVersion)
 	// Output: trustdb.signed-claim.v1
 }
+
+func ExampleBuildSignedJSONLogClaim() {
+	_, privateKey, _ := ed25519.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{1}, 64)))
+	signed, err := sdk.BuildSignedJSONLogClaim(map[string]any{
+		"level": "info",
+		"msg":   "payment accepted",
+	}, sdk.Identity{
+		TenantID:   "tenant",
+		ClientID:   "client",
+		KeyID:      "client-key",
+		PrivateKey: privateKey,
+	}, sdk.LogClaimOptions{
+		IdempotencyKey: "demo-log-idempotency-key",
+		Nonce:          bytes.Repeat([]byte{3}, 16),
+		Source:         "billing-api",
+		TraceID:        "trace-123",
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(signed.Claim.Metadata.EventType)
+	// Output: log.record
+}

@@ -48,6 +48,52 @@ func TestSubmitClaim(t *testing.T) {
 	}
 }
 
+func TestSubmitClaimsBatch(t *testing.T) {
+	t.Parallel()
+
+	p := processorFunc(func(ctx context.Context, signed model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error) {
+		idem := signed.Claim.IdempotencyKey
+		if idem == "bad" {
+			return model.ServerRecord{}, model.AcceptedReceipt{}, false, trusterr.New(trusterr.CodeInvalidArgument, "bad claim")
+		}
+		recordID := "tr1" + idem
+		return model.ServerRecord{RecordID: recordID}, model.AcceptedReceipt{RecordID: recordID, Status: "accepted"}, idem == "replay", nil
+	})
+	svc := ingest.New(p, ingest.Options{QueueSize: 8, Workers: 2}, nil)
+	defer svc.Shutdown(context.Background())
+	handler := New(svc, nil, &fakeBatchService{})
+	body, err := cborx.Marshal(submitClaimsBatchRequest{Claims: []model.SignedClaim{
+		{SchemaVersion: model.SchemaSignedClaim, Claim: model.ClientClaim{IdempotencyKey: "one"}},
+		{SchemaVersion: model.SchemaSignedClaim, Claim: model.ClientClaim{IdempotencyKey: "bad"}},
+		{SchemaVersion: model.SchemaSignedClaim, Claim: model.ClientClaim{IdempotencyKey: "replay"}},
+	}})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/claims/batch", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got submitClaimsBatchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not json: %v", err)
+	}
+	if got.Submitted != 2 || got.Failed != 1 || len(got.Results) != 3 {
+		t.Fatalf("response = %+v", got)
+	}
+	if got.Results[0].Result == nil || got.Results[0].Result.RecordID != "tr1one" {
+		t.Fatalf("result[0] = %+v", got.Results[0])
+	}
+	if got.Results[1].Error == nil || got.Results[1].Error.Code != trusterr.CodeInvalidArgument {
+		t.Fatalf("result[1] = %+v", got.Results[1])
+	}
+	if got.Results[2].Result == nil || !got.Results[2].Result.Idempotent || got.Results[2].Result.BatchEnqueued {
+		t.Fatalf("result[2] = %+v", got.Results[2])
+	}
+}
+
 func TestSubmitClaimEnqueuesBatch(t *testing.T) {
 	t.Parallel()
 

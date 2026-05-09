@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
+	"github.com/ryan-wong-coder/trustdb/internal/ingest"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -82,6 +84,53 @@ func TestGRPCTransportMapsNotFound(t *testing.T) {
 	}
 }
 
+func TestGRPCTransportSubmitLogStream(t *testing.T) {
+	t.Parallel()
+
+	_, priv, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
+	processor := grpcProcessorFunc(func(ctx context.Context, signed model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error) {
+		logID := signed.Claim.Metadata.Custom["log_id"]
+		recordID := "tr1" + logID
+		return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, RecordID: recordID}, model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, RecordID: recordID, Status: "accepted"}, false, nil
+	})
+	ingestSvc := ingest.New(processor, ingest.Options{QueueSize: 8, Workers: 2}, nil)
+	defer ingestSvc.Shutdown(context.Background())
+	client := newBufconnClient(t, grpcapi.NewServer(ingestSvc, grpcTestBatch{}, nil, nil, nil))
+
+	entries := make(chan LogEntry)
+	out, err := client.SubmitLogStream(context.Background(), entries, Identity{
+		TenantID:   "tenant-1",
+		ClientID:   "client-1",
+		KeyID:      "client-key-1",
+		PrivateKey: priv,
+	}, LogStreamOptions{QueueSize: 2})
+	if err != nil {
+		t.Fatalf("SubmitLogStream: %v", err)
+	}
+	go func() {
+		defer close(entries)
+		entries <- LogEntry{Body: []byte(`{"n":1}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "one"}}}
+		entries <- LogEntry{Body: []byte(`{"n":2}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "two"}}}
+	}()
+
+	got := map[string]bool{}
+	for item := range out {
+		if item.Err != nil {
+			t.Fatalf("stream item error: %v", item.Err)
+		}
+		got[item.Result.RecordID] = true
+		if item.Result.SignedClaim.Claim.Metadata.Custom["log_id"] == "" {
+			t.Fatalf("signed claim was not attached to result: %+v", item.Result)
+		}
+	}
+	if !got["tr1one"] || !got["tr1two"] || len(got) != 2 {
+		t.Fatalf("records = %v", got)
+	}
+}
+
 func newBufconnClient(t *testing.T, srv grpcapi.TrustDBServiceServer) *Client {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
@@ -119,6 +168,12 @@ func newBufconnClient(t *testing.T, srv grpcapi.TrustDBServiceServer) *Client {
 }
 
 type grpcTestBatch struct{}
+
+type grpcProcessorFunc func(context.Context, model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error)
+
+func (f grpcProcessorFunc) Submit(ctx context.Context, signed model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error) {
+	return f(ctx, signed)
+}
 
 func (grpcTestBatch) Enqueue(context.Context, model.SignedClaim, model.ServerRecord, model.AcceptedReceipt) error {
 	return nil

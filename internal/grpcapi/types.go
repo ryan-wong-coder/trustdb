@@ -7,21 +7,22 @@ const MaxMessageBytes = 16 << 20
 const ServiceName = "trustdb.v1.TrustDB"
 
 const (
-	FullMethodHealth           = "/" + ServiceName + "/Health"
-	FullMethodSubmitClaim      = "/" + ServiceName + "/SubmitClaim"
-	FullMethodGetRecord        = "/" + ServiceName + "/GetRecord"
-	FullMethodListRecords      = "/" + ServiceName + "/ListRecords"
-	FullMethodGetProofBundle   = "/" + ServiceName + "/GetProofBundle"
-	FullMethodListRoots        = "/" + ServiceName + "/ListRoots"
-	FullMethodLatestRoot       = "/" + ServiceName + "/LatestRoot"
-	FullMethodListSTHs         = "/" + ServiceName + "/ListSTHs"
-	FullMethodLatestSTH        = "/" + ServiceName + "/LatestSTH"
-	FullMethodGetSTH           = "/" + ServiceName + "/GetSTH"
-	FullMethodListGlobalLeaves = "/" + ServiceName + "/ListGlobalLeaves"
-	FullMethodGetGlobalProof   = "/" + ServiceName + "/GetGlobalProof"
-	FullMethodListAnchors      = "/" + ServiceName + "/ListAnchors"
-	FullMethodGetAnchor        = "/" + ServiceName + "/GetAnchor"
-	FullMethodMetrics          = "/" + ServiceName + "/Metrics"
+	FullMethodHealth            = "/" + ServiceName + "/Health"
+	FullMethodSubmitClaim       = "/" + ServiceName + "/SubmitClaim"
+	FullMethodSubmitClaimStream = "/" + ServiceName + "/SubmitClaimStream"
+	FullMethodGetRecord         = "/" + ServiceName + "/GetRecord"
+	FullMethodListRecords       = "/" + ServiceName + "/ListRecords"
+	FullMethodGetProofBundle    = "/" + ServiceName + "/GetProofBundle"
+	FullMethodListRoots         = "/" + ServiceName + "/ListRoots"
+	FullMethodLatestRoot        = "/" + ServiceName + "/LatestRoot"
+	FullMethodListSTHs          = "/" + ServiceName + "/ListSTHs"
+	FullMethodLatestSTH         = "/" + ServiceName + "/LatestSTH"
+	FullMethodGetSTH            = "/" + ServiceName + "/GetSTH"
+	FullMethodListGlobalLeaves  = "/" + ServiceName + "/ListGlobalLeaves"
+	FullMethodGetGlobalProof    = "/" + ServiceName + "/GetGlobalProof"
+	FullMethodListAnchors       = "/" + ServiceName + "/ListAnchors"
+	FullMethodGetAnchor         = "/" + ServiceName + "/GetAnchor"
+	FullMethodMetrics           = "/" + ServiceName + "/Metrics"
 )
 
 type HealthRequest struct{}
@@ -43,6 +44,22 @@ type SubmitClaimResponse struct {
 	BatchError      string                `cbor:"batch_error,omitempty" json:"batch_error,omitempty"`
 	ServerRecord    model.ServerRecord    `cbor:"server_record" json:"server_record"`
 	AcceptedReceipt model.AcceptedReceipt `cbor:"accepted_receipt" json:"accepted_receipt"`
+}
+
+type SubmitClaimStreamRequest struct {
+	Index       int               `cbor:"index" json:"index"`
+	SignedClaim model.SignedClaim `cbor:"signed_claim" json:"signed_claim"`
+}
+
+type SubmitClaimStreamResponse struct {
+	Index  int                  `cbor:"index" json:"index"`
+	Result *SubmitClaimResponse `cbor:"result,omitempty" json:"result,omitempty"`
+	Error  *ErrorResponse       `cbor:"error,omitempty" json:"error,omitempty"`
+}
+
+type ErrorResponse struct {
+	Code    string `cbor:"code" json:"code"`
+	Message string `cbor:"message" json:"message"`
 }
 
 type GetRecordRequest struct {

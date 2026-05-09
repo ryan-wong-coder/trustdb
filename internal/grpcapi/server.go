@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
 	"github.com/ryan-wong-coder/trustdb/internal/ingest"
@@ -20,6 +22,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+const submitClaimStreamWorkers = 64
 
 type Server struct {
 	Ingest         *ingest.Service
@@ -63,17 +67,90 @@ func (s *Server) Health(context.Context, *HealthRequest) (*HealthResponse, error
 }
 
 func (s *Server) SubmitClaim(ctx context.Context, req *SubmitClaimRequest) (*SubmitClaimResponse, error) {
-	if s.Ingest == nil {
-		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "ingest service is not configured"))
-	}
-	record, accepted, idempotent, err := s.Ingest.Submit(ctx, req.SignedClaim)
+	resp, err := s.submitSignedClaim(ctx, req.SignedClaim)
 	if err != nil {
 		return nil, toStatusError(err)
+	}
+	return resp, nil
+}
+
+func (s *Server) SubmitClaimStream(stream TrustDBService_SubmitClaimStreamServer) error {
+	if s.Ingest == nil {
+		return toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "ingest service is not configured"))
+	}
+	ctx := stream.Context()
+	jobs := make(chan *SubmitClaimStreamRequest, submitClaimStreamWorkers)
+	errCh := make(chan error, 1)
+	var sendMu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(submitClaimStreamWorkers)
+	for worker := 0; worker < submitClaimStreamWorkers; worker++ {
+		go func() {
+			defer wg.Done()
+			for req := range jobs {
+				resp := &SubmitClaimStreamResponse{Index: req.Index}
+				result, err := s.submitSignedClaim(ctx, req.SignedClaim)
+				if err != nil {
+					resp.Error = grpcErrorPayload(err)
+				} else {
+					resp.Result = result
+				}
+				sendMu.Lock()
+				err = stream.Send(resp)
+				sendMu.Unlock()
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			close(jobs)
+			wg.Wait()
+			select {
+			case err := <-errCh:
+				return err
+			default:
+				return nil
+			}
+		}
+		if err != nil {
+			close(jobs)
+			wg.Wait()
+			return err
+		}
+		select {
+		case err := <-errCh:
+			close(jobs)
+			wg.Wait()
+			return err
+		case jobs <- req:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return toStatusError(trusterr.Wrap(trusterr.CodeDeadlineExceeded, "request context canceled", ctx.Err()))
+		}
+	}
+}
+
+func (s *Server) submitSignedClaim(ctx context.Context, signed model.SignedClaim) (*SubmitClaimResponse, error) {
+	if s.Ingest == nil {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "ingest service is not configured")
+	}
+	record, accepted, idempotent, err := s.Ingest.Submit(ctx, signed)
+	if err != nil {
+		return nil, err
 	}
 	batchEnqueued := false
 	batchErr := ""
 	if s.Batch != nil && !idempotent {
-		if err := s.Batch.Enqueue(context.WithoutCancel(ctx), req.SignedClaim, record, accepted); err != nil {
+		if err := s.Batch.Enqueue(context.WithoutCancel(ctx), signed, record, accepted); err != nil {
 			batchErr = err.Error()
 		} else {
 			batchEnqueued = true
@@ -560,6 +637,10 @@ func toStatusError(err error) error {
 		return nil
 	}
 	return status.Error(grpcCode(trusterr.CodeOf(err)), err.Error())
+}
+
+func grpcErrorPayload(err error) *ErrorResponse {
+	return &ErrorResponse{Code: string(trusterr.CodeOf(err)), Message: err.Error()}
 }
 
 func grpcCode(code trusterr.Code) codes.Code {

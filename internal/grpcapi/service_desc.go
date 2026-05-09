@@ -9,6 +9,7 @@ import (
 type TrustDBServiceServer interface {
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	SubmitClaim(context.Context, *SubmitClaimRequest) (*SubmitClaimResponse, error)
+	SubmitClaimStream(TrustDBService_SubmitClaimStreamServer) error
 	GetRecord(context.Context, *GetRecordRequest) (*GetRecordResponse, error)
 	ListRecords(context.Context, *ListRecordsRequest) (*ListRecordsResponse, error)
 	GetProofBundle(context.Context, *GetProofBundleRequest) (*GetProofBundleResponse, error)
@@ -48,8 +49,37 @@ var TrustDBService_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "GetAnchor", Handler: _TrustDB_GetAnchor_Handler},
 		{MethodName: "Metrics", Handler: _TrustDB_Metrics_Handler},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "SubmitClaimStream",
+			Handler:       _TrustDB_SubmitClaimStream_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "trustdb/v1/cbor",
+}
+
+type TrustDBService_SubmitClaimStreamServer interface {
+	Send(*SubmitClaimStreamResponse) error
+	Recv() (*SubmitClaimStreamRequest, error)
+	grpc.ServerStream
+}
+
+type trustDBServiceSubmitClaimStreamServer struct {
+	grpc.ServerStream
+}
+
+func (x *trustDBServiceSubmitClaimStreamServer) Send(m *SubmitClaimStreamResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *trustDBServiceSubmitClaimStreamServer) Recv() (*SubmitClaimStreamRequest, error) {
+	m := new(SubmitClaimStreamRequest)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func unaryHandler[Req any](
@@ -84,6 +114,10 @@ func _TrustDB_SubmitClaim_Handler(srv any, ctx context.Context, dec func(any) er
 	return unaryHandler[SubmitClaimRequest](srv, ctx, dec, interceptor, "SubmitClaim", func(s TrustDBServiceServer, ctx context.Context, req *SubmitClaimRequest) (any, error) {
 		return s.SubmitClaim(ctx, req)
 	})
+}
+
+func _TrustDB_SubmitClaimStream_Handler(srv any, stream grpc.ServerStream) error {
+	return srv.(TrustDBServiceServer).SubmitClaimStream(&trustDBServiceSubmitClaimStreamServer{ServerStream: stream})
 }
 
 func _TrustDB_GetRecord_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
