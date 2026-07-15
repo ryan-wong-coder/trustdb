@@ -123,6 +123,61 @@ func TestReadFileRejectsOversizedSingleProof(t *testing.T) {
 	}
 }
 
+func TestWriteFileRoundTripUsesPrivateMode(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "proof.sproof")
+	proof := vectorProof()
+	if err := WriteFile(path, proof); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	got, err := ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	equal, err := EqualEncoded(got, proof)
+	if err != nil {
+		t.Fatalf("EqualEncoded() error = %v", err)
+	}
+	if !equal {
+		t.Fatalf("decoded proof = %+v, want vector proof", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestWriteFileCleansTemporaryFileOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "existing-dir")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	if err := WriteFile(target, vectorProof()); err == nil {
+		t.Fatal("WriteFile() error = nil, want failure when target is a directory")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat(target) error = %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("target was replaced; mode=%s", info.Mode())
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".existing-dir.*.tmp"))
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary files left behind: %v", matches)
+	}
+}
+
 func vectorProof() model.SingleProof {
 	return model.SingleProof{
 		SchemaVersion:   model.SchemaSingleProof,
