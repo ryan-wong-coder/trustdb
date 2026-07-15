@@ -219,6 +219,43 @@ func TestWriteRestoreCheckpointRejectsDirectoryTarget(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsInvalidResumeCheckpoint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	backupPath := filepath.Join(t.TempDir(), "trustdb.tdbackup")
+	if _, err := Create(ctx, src, backupPath, Options{Compression: "none"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	checkpointPath := filepath.Join(t.TempDir(), "restore.checkpoint.json")
+	if err := os.WriteFile(checkpointPath, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("WriteFile(checkpoint) error = %v", err)
+	}
+
+	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	_, err := RestoreWithOptions(ctx, dst, backupPath, RestoreOptions{
+		Resume:         true,
+		CheckpointPath: checkpointPath,
+	})
+	if err == nil {
+		t.Fatalf("RestoreWithOptions() error = nil, want invalid checkpoint error")
+	}
+}
+
+func TestReadRestoreCheckpointRejectsOversizedFile(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "restore.checkpoint.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), int(maxRestoreCheckpointBytes)+1), 0o600); err != nil {
+		t.Fatalf("WriteFile(checkpoint) error = %v", err)
+	}
+
+	if _, err := readRestoreCheckpoint(path); err == nil {
+		t.Fatalf("readRestoreCheckpoint() error = nil, want oversized checkpoint error")
+	}
+}
+
 func TestCreateDoesNotReplaceTargetOnFailure(t *testing.T) {
 	t.Parallel()
 
