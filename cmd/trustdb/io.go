@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,10 +84,7 @@ func writeCBORFile(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureDir(filepath.Dir(path)); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return writeFileAtomic(path, data, 0o600)
 }
 
 func writeJSONFile(path string, v any) error {
@@ -95,10 +93,7 @@ func writeJSONFile(path string, v any) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := ensureDir(filepath.Dir(path)); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return writeFileAtomic(path, data, 0o600)
 }
 
 func resolveExportFormat(format, outPath string) (string, error) {
@@ -144,7 +139,57 @@ func writeExportObject(rt *runtimeConfig, outPath, format string, v any) (string
 }
 
 func writeKey(path string, key []byte) error {
-	return os.WriteFile(path, []byte(base64.RawURLEncoding.EncodeToString(key)), 0o600)
+	return writeFileAtomic(path, []byte(base64.RawURLEncoding.EncodeToString(key)), 0o600)
+}
+
+func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := ensureDir(dir); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	closed := false
+	cleanup := true
+	defer func() {
+		if !closed {
+			_ = tmp.Close()
+		}
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		closed = true
+		return err
+	}
+	closed = true
+	if err := renameReplace(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func renameReplace(src, dst string) error {
+	if err := os.Rename(src, dst); err != nil {
+		if os.IsExist(err) {
+			if removeErr := os.Remove(dst); removeErr == nil {
+				return os.Rename(src, dst)
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 func readPublicKey(path string) (ed25519.PublicKey, error) {

@@ -35,7 +35,7 @@ func newConfigInitCommand(rt *runtimeConfig) *cobra.Command {
 					return trusterr.New(trusterr.CodeAlreadyExists, fmt.Sprintf("config file already exists: %s", outPath))
 				}
 			}
-			if err := os.WriteFile(outPath, []byte(trustconfig.DefaultYAML), 0o600); err != nil {
+			if err := writeFileAtomic(outPath, []byte(trustconfig.DefaultYAML), 0o600); err != nil {
 				return err
 			}
 			return rt.writeJSON(map[string]string{"config": outPath})
