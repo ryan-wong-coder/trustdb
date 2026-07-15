@@ -100,7 +100,7 @@ func newClaimFileCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := os.WriteFile(outPath, data, 0o600); err != nil {
+			if err := writeFileAtomic(outPath, data, 0o600); err != nil {
 				return err
 			}
 			verified, err := claim.Verify(signed, priv.Public().(ed25519.PublicKey))

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -73,7 +72,7 @@ func newCommitCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := os.WriteFile(outPath, data, 0o600); err != nil {
+			if err := writeFileAtomic(outPath, data, 0o600); err != nil {
 				return err
 			}
 			rt.logger.Info().
@@ -157,7 +156,7 @@ func newCommitBatchCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(outDir, 0o755); err != nil {
+			if err := ensureDir(outDir); err != nil {
 				return err
 			}
 			outputs := make([]map[string]string, len(bundles))
@@ -167,7 +166,7 @@ func newCommitBatchCommand(rt *runtimeConfig) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := os.WriteFile(outPath, data, 0o600); err != nil {
+				if err := writeFileAtomic(outPath, data, 0o600); err != nil {
 					return err
 				}
 				outputs[i] = map[string]string{
