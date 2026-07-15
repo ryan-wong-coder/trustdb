@@ -127,6 +127,48 @@ func TestLoadBalancedClientFailsOver(t *testing.T) {
 	}
 }
 
+func TestLoadBalancedClientNilContextDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/claims" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
+			RecordID:   "tr1record",
+			Status:     "accepted",
+			ProofLevel: ProofLevelL2,
+			ServerRecord: ServerRecord{
+				SchemaVersion: model.SchemaServerRecord,
+				RecordID:      "tr1record",
+			},
+			AcceptedReceipt: AcceptedReceipt{
+				SchemaVersion: model.SchemaAcceptedReceipt,
+				RecordID:      "tr1record",
+				Status:        "accepted",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewLoadBalancedClient([]string{server.URL}, LoadBalanceOptions{Mode: LoadBalanceFailover})
+	if err != nil {
+		t.Fatalf("NewLoadBalancedClient: %v", err)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("SubmitSignedClaim(nil) panicked: %v", recovered)
+		}
+	}()
+	result, err := client.SubmitSignedClaim(nil, SignedClaim{SchemaVersion: model.SchemaSignedClaim})
+	if err != nil {
+		t.Fatalf("SubmitSignedClaim: %v", err)
+	}
+	if result.RecordID != "tr1record" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestClientListRecordsEncodesQuery(t *testing.T) {
 	t.Parallel()
 

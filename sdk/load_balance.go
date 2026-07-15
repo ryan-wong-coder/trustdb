@@ -87,6 +87,9 @@ func (t *loadBalancedTransport) order() []Transport {
 func tryEndpoints[T any](ctx context.Context, t *loadBalancedTransport, op string, fn func(context.Context, Transport) (T, error)) (T, error) {
 	var zero T
 	var errs error
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for _, transport := range t.order() {
 		if err := ctx.Err(); err != nil {
 			return zero, err
