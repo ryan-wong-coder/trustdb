@@ -72,6 +72,23 @@ func TestNewOtsSinkFromParams_RejectsBadTimeout(t *testing.T) {
 	}
 }
 
+func TestServeDurationFlagBounds(t *testing.T) {
+	t.Parallel()
+
+	if got, err := parseNonNegativeDurationFlag("read-header-timeout", "0s"); err != nil || got != 0 {
+		t.Fatalf("parse zero non-negative duration = %v err=%v, want 0 nil", got, err)
+	}
+	if _, err := parseNonNegativeDurationFlag("idle-timeout", "-1s"); err == nil || !strings.Contains(err.Error(), "--idle-timeout") {
+		t.Fatalf("negative idle-timeout error = %v, want flag error", err)
+	}
+	if got, err := parsePositiveDurationFlag("batch-max-delay", "5ms"); err != nil || got != 5*time.Millisecond {
+		t.Fatalf("parse positive duration = %v err=%v, want 5ms nil", got, err)
+	}
+	if _, err := parsePositiveDurationFlag("batch-max-delay", "0s"); err == nil || !strings.Contains(err.Error(), "--batch-max-delay") {
+		t.Fatalf("zero batch-max-delay error = %v, want flag error", err)
+	}
+}
+
 // TestNewOtsSinkFromParams_PropagatesOptions verifies non-default
 // options flow into the sink, keeping the flag-to-sink plumbing
 // honest if OtsSinkOptions is extended later.

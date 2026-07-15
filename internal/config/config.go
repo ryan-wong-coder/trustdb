@@ -47,7 +47,9 @@ server:
   queue_size: 1024
   workers: 4
   read_timeout: "10s"
+  read_header_timeout: "5s"
   write_timeout: "10s"
+  idle_timeout: "120s"
   shutdown_timeout: "10s"
 
 registry:
@@ -156,15 +158,17 @@ type Identity struct {
 }
 
 type Server struct {
-	Listen          string `mapstructure:"listen" json:"listen"`
-	GRPCListen      string `mapstructure:"grpc_listen" json:"grpc_listen"`
-	ID              string `mapstructure:"id" json:"id"`
-	KeyID           string `mapstructure:"key_id" json:"key_id"`
-	QueueSize       int    `mapstructure:"queue_size" json:"queue_size"`
-	Workers         int    `mapstructure:"workers" json:"workers"`
-	ReadTimeout     string `mapstructure:"read_timeout" json:"read_timeout"`
-	WriteTimeout    string `mapstructure:"write_timeout" json:"write_timeout"`
-	ShutdownTimeout string `mapstructure:"shutdown_timeout" json:"shutdown_timeout"`
+	Listen            string `mapstructure:"listen" json:"listen"`
+	GRPCListen        string `mapstructure:"grpc_listen" json:"grpc_listen"`
+	ID                string `mapstructure:"id" json:"id"`
+	KeyID             string `mapstructure:"key_id" json:"key_id"`
+	QueueSize         int    `mapstructure:"queue_size" json:"queue_size"`
+	Workers           int    `mapstructure:"workers" json:"workers"`
+	ReadTimeout       string `mapstructure:"read_timeout" json:"read_timeout"`
+	ReadHeaderTimeout string `mapstructure:"read_header_timeout" json:"read_header_timeout"`
+	WriteTimeout      string `mapstructure:"write_timeout" json:"write_timeout"`
+	IdleTimeout       string `mapstructure:"idle_timeout" json:"idle_timeout"`
+	ShutdownTimeout   string `mapstructure:"shutdown_timeout" json:"shutdown_timeout"`
 }
 
 type Registry struct {
@@ -250,14 +254,16 @@ func Default() Config {
 			Tenant: "default",
 		},
 		Server: Server{
-			Listen:          "127.0.0.1:8080",
-			ID:              "local-server",
-			KeyID:           "server-key",
-			QueueSize:       1024,
-			Workers:         4,
-			ReadTimeout:     "10s",
-			WriteTimeout:    "10s",
-			ShutdownTimeout: "10s",
+			Listen:            "127.0.0.1:8080",
+			ID:                "local-server",
+			KeyID:             "server-key",
+			QueueSize:         1024,
+			Workers:           4,
+			ReadTimeout:       "10s",
+			ReadHeaderTimeout: "5s",
+			WriteTimeout:      "10s",
+			IdleTimeout:       "120s",
+			ShutdownTimeout:   "10s",
 		},
 		Registry: Registry{
 			KeyID: "registry-key",
@@ -363,14 +369,19 @@ func (c Config) Validate() error {
 	if c.Server.Workers <= 0 {
 		return fmt.Errorf("server.workers must be greater than 0")
 	}
-	if _, err := time.ParseDuration(c.Server.ReadTimeout); err != nil {
-		return fmt.Errorf("server.read_timeout must be a valid duration: %w", err)
-	}
-	if _, err := time.ParseDuration(c.Server.WriteTimeout); err != nil {
-		return fmt.Errorf("server.write_timeout must be a valid duration: %w", err)
-	}
-	if _, err := time.ParseDuration(c.Server.ShutdownTimeout); err != nil {
-		return fmt.Errorf("server.shutdown_timeout must be a valid duration: %w", err)
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "server.read_timeout", value: c.Server.ReadTimeout},
+		{name: "server.read_header_timeout", value: c.Server.ReadHeaderTimeout},
+		{name: "server.write_timeout", value: c.Server.WriteTimeout},
+		{name: "server.idle_timeout", value: c.Server.IdleTimeout},
+		{name: "server.shutdown_timeout", value: c.Server.ShutdownTimeout},
+	} {
+		if err := validateNonNegativeDuration(tc.name, tc.value); err != nil {
+			return err
+		}
 	}
 	if c.Registry.KeyID == "" {
 		return fmt.Errorf("registry.key_id is required")
@@ -381,8 +392,8 @@ func (c Config) Validate() error {
 	if c.Batch.MaxRecords <= 0 {
 		return fmt.Errorf("batch.max_records must be greater than 0")
 	}
-	if _, err := time.ParseDuration(c.Batch.MaxDelay); err != nil {
-		return fmt.Errorf("batch.max_delay must be a valid duration: %w", err)
+	if err := validatePositiveDuration("batch.max_delay", c.Batch.MaxDelay); err != nil {
+		return err
 	}
 	switch strings.ToLower(c.Batch.ProofMode) {
 	case "", "inline", "async", "on_demand":
@@ -394,8 +405,8 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("anchor.scope must be global")
 	}
-	if _, err := time.ParseDuration(c.Anchor.MaxDelay); err != nil {
-		return fmt.Errorf("anchor.max_delay must be a valid duration: %w", err)
+	if err := validatePositiveDuration("anchor.max_delay", c.Anchor.MaxDelay); err != nil {
+		return err
 	}
 	if c.History.TileSize == 0 {
 		return fmt.Errorf("history.tile_size must be greater than 0")
@@ -483,8 +494,8 @@ func validateAdmin(a Admin) error {
 		return fmt.Errorf("admin.web_dir must contain index.html: %w", err)
 	}
 	if a.SessionTTL != "" {
-		if _, err := time.ParseDuration(a.SessionTTL); err != nil {
-			return fmt.Errorf("admin.session_ttl must be a valid duration: %w", err)
+		if err := validatePositiveDuration("admin.session_ttl", a.SessionTTL); err != nil {
+			return err
 		}
 	}
 	bp := strings.TrimSpace(a.BasePath)
@@ -493,6 +504,28 @@ func validateAdmin(a Admin) error {
 	}
 	if !strings.HasPrefix(bp, "/") {
 		return fmt.Errorf("admin.base_path must start with /")
+	}
+	return nil
+}
+
+func validateNonNegativeDuration(name, value string) error {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid duration: %w", name, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("%s must be greater than or equal to 0", name)
+	}
+	return nil
+}
+
+func validatePositiveDuration(name, value string) error {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid duration: %w", name, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("%s must be greater than 0", name)
 	}
 	return nil
 }

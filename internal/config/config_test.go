@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -38,6 +40,18 @@ func TestDefaultYAMLIsStructured(t *testing.T) {
 	}
 	if Default().Proofstore.TiKVNamespace != "default" {
 		t.Fatalf("default proofstore.tikv_namespace = %q, want default", Default().Proofstore.TiKVNamespace)
+	}
+	if !strings.Contains(DefaultYAML, `read_header_timeout: "5s"`) {
+		t.Fatal("default yaml missing server.read_header_timeout")
+	}
+	if !strings.Contains(DefaultYAML, `idle_timeout: "120s"`) {
+		t.Fatal("default yaml missing server.idle_timeout")
+	}
+	if Default().Server.ReadHeaderTimeout != "5s" {
+		t.Fatalf("default server.read_header_timeout = %q, want 5s", Default().Server.ReadHeaderTimeout)
+	}
+	if Default().Server.IdleTimeout != "120s" {
+		t.Fatalf("default server.idle_timeout = %q, want 120s", Default().Server.IdleTimeout)
 	}
 }
 
@@ -114,6 +128,99 @@ func TestValidateRejectsInvalidBatchConfig(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate accepted invalid batch proof mode")
 	}
+}
+
+func TestValidateRejectsInvalidDurationBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{
+			name: "negative read timeout",
+			mutate: func(c *Config) {
+				c.Server.ReadTimeout = "-1s"
+			},
+			want: "server.read_timeout",
+		},
+		{
+			name: "negative read header timeout",
+			mutate: func(c *Config) {
+				c.Server.ReadHeaderTimeout = "-1s"
+			},
+			want: "server.read_header_timeout",
+		},
+		{
+			name: "negative idle timeout",
+			mutate: func(c *Config) {
+				c.Server.IdleTimeout = "-1s"
+			},
+			want: "server.idle_timeout",
+		},
+		{
+			name: "zero batch max delay",
+			mutate: func(c *Config) {
+				c.Batch.MaxDelay = "0s"
+			},
+			want: "batch.max_delay",
+		},
+		{
+			name: "zero anchor max delay",
+			mutate: func(c *Config) {
+				c.Anchor.MaxDelay = "0s"
+			},
+			want: "anchor.max_delay",
+		},
+		{
+			name: "zero admin session ttl",
+			mutate: func(c *Config) {
+				webDir := testAdminWebDir(t)
+				c.Admin = Admin{
+					Enabled:       true,
+					BasePath:      "/admin",
+					Username:      "op",
+					PasswordHash:  "$2a$10$xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+					SessionSecret: strings.Repeat("s", 32),
+					WebDir:        webDir,
+					SessionTTL:    "0s",
+				}
+			},
+			want: "admin.session_ttl",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateAllowsZeroServerTimeouts(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Server.ReadTimeout = "0s"
+	cfg.Server.ReadHeaderTimeout = "0s"
+	cfg.Server.WriteTimeout = "0s"
+	cfg.Server.IdleTimeout = "0s"
+	cfg.Server.ShutdownTimeout = "0s"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected zero server network timeouts: %v", err)
+	}
+}
+
+func testAdminWebDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<!doctype html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestValidateRejectsInvalidProofstoreConfig(t *testing.T) {

@@ -62,6 +62,8 @@ func TestConfigEnvOverride(t *testing.T) {
 	t.Setenv("TRUSTDB_TIKV_PD_ENDPOINTS", "10.0.0.1:2379,10.0.0.2:2379")
 	t.Setenv("TRUSTDB_TIKV_KEYSPACE", "trustdb-test")
 	t.Setenv("TRUSTDB_TIKV_NAMESPACE", "tenant-a/log-a")
+	t.Setenv("TRUSTDB_SERVER_READ_HEADER_TIMEOUT", "3s")
+	t.Setenv("TRUSTDB_SERVER_IDLE_TIMEOUT", "45s")
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -97,6 +99,16 @@ func TestConfigEnvOverride(t *testing.T) {
 	}
 	if globalLog["log_id"] != "node-log-a" {
 		t.Fatalf("global_log.log_id = %v", globalLog["log_id"])
+	}
+	server, ok := cfg["server"].(map[string]any)
+	if !ok {
+		t.Fatalf("server is not an object: %#v", cfg["server"])
+	}
+	if server["read_header_timeout"] != "3s" {
+		t.Fatalf("server.read_header_timeout = %v", server["read_header_timeout"])
+	}
+	if server["idle_timeout"] != "45s" {
+		t.Fatalf("server.idle_timeout = %v", server["idle_timeout"])
 	}
 	proofstore, ok := cfg["proofstore"].(map[string]any)
 	if !ok {
@@ -153,7 +165,7 @@ func TestServeAcceptsProofstoreIndexStorageTokensFlag(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("--proofstore-index-storage-tokens")) {
 		t.Fatalf("serve help missing proofstore token flag: %s", out.String())
 	}
-	for _, flag := range [][]byte{[]byte("--batch-proof-mode"), []byte("--proofstore-record-index-mode"), []byte("--proofstore-artifact-sync-mode"), []byte("--proofstore-tikv-pd-endpoints"), []byte("--proofstore-tikv-keyspace"), []byte("--proofstore-tikv-namespace")} {
+	for _, flag := range [][]byte{[]byte("--batch-proof-mode"), []byte("--read-header-timeout"), []byte("--idle-timeout"), []byte("--proofstore-record-index-mode"), []byte("--proofstore-artifact-sync-mode"), []byte("--proofstore-tikv-pd-endpoints"), []byte("--proofstore-tikv-keyspace"), []byte("--proofstore-tikv-namespace")} {
 		if !bytes.Contains(out.Bytes(), flag) {
 			t.Fatalf("serve help missing %s: %s", flag, out.String())
 		}

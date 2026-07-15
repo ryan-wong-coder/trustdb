@@ -39,7 +39,9 @@ server:
   queue_size: 1024
   workers: 4
   read_timeout: "10s"
+  read_header_timeout: "5s"
   write_timeout: "10s"
+  idle_timeout: "120s"
   shutdown_timeout: "10s"
 
 registry:
