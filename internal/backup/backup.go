@@ -30,6 +30,7 @@ const SchemaManifest = "trustdb.backup.v2"
 const SchemaRestoreCheckpoint = "trustdb.backup-restore-checkpoint.v1"
 const scanPageSize = 1024
 const maxRestoreEntryBytes int64 = 128 << 20
+const maxRestoreCheckpointBytes int64 = 1 << 20
 
 const (
 	paxBackupID = "trustdb.backup_id"
@@ -392,10 +393,17 @@ func RestoreWithOptions(ctx context.Context, store proofstore.Store, path string
 	}
 	report := Manifest{SchemaVersion: SchemaManifest}
 	checkpointPath := opts.CheckpointPath
+	var restoreCP RestoreCheckpoint
 	if opts.Resume && checkpointPath == "" {
 		checkpointPath = path + ".restore-checkpoint.json"
 	}
-	restoreCP, _ := readRestoreCheckpoint(checkpointPath)
+	if opts.Resume {
+		var err error
+		restoreCP, err = readRestoreCheckpoint(checkpointPath)
+		if err != nil {
+			return Manifest{}, trusterr.Wrap(trusterr.CodeDataLoss, "read restore checkpoint", err)
+		}
+	}
 	err := readArchiveStream(path, func(entry archiveEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -816,12 +824,20 @@ func readRestoreCheckpoint(path string) (RestoreCheckpoint, error) {
 	if path == "" {
 		return RestoreCheckpoint{}, nil
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return RestoreCheckpoint{}, nil
 		}
 		return RestoreCheckpoint{}, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxRestoreCheckpointBytes+1))
+	if err != nil {
+		return RestoreCheckpoint{}, err
+	}
+	if int64(len(data)) > maxRestoreCheckpointBytes {
+		return RestoreCheckpoint{}, fmt.Errorf("backup restore checkpoint too large: %d bytes", len(data))
 	}
 	var cp RestoreCheckpoint
 	if err := json.Unmarshal(data, &cp); err != nil {
