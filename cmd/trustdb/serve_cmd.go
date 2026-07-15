@@ -39,7 +39,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	var walMaxSegmentBytes int64
 	var walKeepSegments int
 	var walFsyncMode string
-	var readTimeoutText, writeTimeoutText, shutdownTimeoutText, batchMaxDelayText string
+	var readTimeoutText, readHeaderTimeoutText, writeTimeoutText, idleTimeoutText, shutdownTimeoutText, batchMaxDelayText string
 	var walGroupCommitIntervalText string
 	var metastoreKind, metastorePath string
 	var proofstoreTiKVPDText, proofstoreTiKVKeyspace, proofstoreTiKVNamespace string
@@ -141,7 +141,9 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				batchMaxRecords = rt.cfg.Batch.MaxRecords
 			}
 			readTimeoutText = stringOrLiteral(cmd, "read-timeout", readTimeoutText, rt.cfg.Server.ReadTimeout)
+			readHeaderTimeoutText = stringOrLiteral(cmd, "read-header-timeout", readHeaderTimeoutText, rt.cfg.Server.ReadHeaderTimeout)
 			writeTimeoutText = stringOrLiteral(cmd, "write-timeout", writeTimeoutText, rt.cfg.Server.WriteTimeout)
+			idleTimeoutText = stringOrLiteral(cmd, "idle-timeout", idleTimeoutText, rt.cfg.Server.IdleTimeout)
 			shutdownTimeoutText = stringOrLiteral(cmd, "shutdown-timeout", shutdownTimeoutText, rt.cfg.Server.ShutdownTimeout)
 			batchMaxDelayText = stringOrLiteral(cmd, "batch-max-delay", batchMaxDelayText, rt.cfg.Batch.MaxDelay)
 			batchProofMode = stringOrLiteral(cmd, "batch-proof-mode", batchProofMode, rt.cfg.Batch.ProofMode)
@@ -151,21 +153,29 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if clientPubPath == "" && registryPath == "" {
 				return usageError("serve requires either client-public-key or key-registry")
 			}
-			readTimeout, err := time.ParseDuration(readTimeoutText)
+			readTimeout, err := parseNonNegativeDurationFlag("read-timeout", readTimeoutText)
 			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse read-timeout", err)
+				return err
 			}
-			writeTimeout, err := time.ParseDuration(writeTimeoutText)
+			readHeaderTimeout, err := parseNonNegativeDurationFlag("read-header-timeout", readHeaderTimeoutText)
 			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse write-timeout", err)
+				return err
 			}
-			shutdownTimeout, err := time.ParseDuration(shutdownTimeoutText)
+			writeTimeout, err := parseNonNegativeDurationFlag("write-timeout", writeTimeoutText)
 			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse shutdown-timeout", err)
+				return err
 			}
-			batchMaxDelay, err := time.ParseDuration(batchMaxDelayText)
+			idleTimeout, err := parseNonNegativeDurationFlag("idle-timeout", idleTimeoutText)
 			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInvalidArgument, "parse batch-max-delay", err)
+				return err
+			}
+			shutdownTimeout, err := parseNonNegativeDurationFlag("shutdown-timeout", shutdownTimeoutText)
+			if err != nil {
+				return err
+			}
+			batchMaxDelay, err := parsePositiveDurationFlag("batch-max-delay", batchMaxDelayText)
+			if err != nil {
+				return err
 			}
 			serverPriv, err := readPrivateKey(serverKeyPath)
 			if err != nil {
@@ -471,10 +481,12 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				handler = adminweb.Mount(bp, publicHandler, ah)
 			}
 			server := &http.Server{
-				Addr:         listen,
-				Handler:      handler,
-				ReadTimeout:  readTimeout,
-				WriteTimeout: writeTimeout,
+				Addr:              listen,
+				Handler:           handler,
+				ReadTimeout:       readTimeout,
+				ReadHeaderTimeout: readHeaderTimeout,
+				WriteTimeout:      writeTimeout,
+				IdleTimeout:       idleTimeout,
 			}
 			errCh := make(chan error, 2)
 			var grpcServer *grpc.Server
@@ -549,7 +561,9 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().IntVar(&batchQueueSize, "batch-queue-size", 0, "bounded batch queue size")
 	cmd.Flags().IntVar(&batchMaxRecords, "batch-max-records", 0, "records per batch before commit")
 	cmd.Flags().StringVar(&readTimeoutText, "read-timeout", "", "http read timeout")
+	cmd.Flags().StringVar(&readHeaderTimeoutText, "read-header-timeout", "", "http request header read timeout")
 	cmd.Flags().StringVar(&writeTimeoutText, "write-timeout", "", "http write timeout")
+	cmd.Flags().StringVar(&idleTimeoutText, "idle-timeout", "", "http keep-alive idle timeout")
 	cmd.Flags().StringVar(&shutdownTimeoutText, "shutdown-timeout", "", "graceful shutdown timeout")
 	cmd.Flags().StringVar(&batchMaxDelayText, "batch-max-delay", "", "maximum delay before committing a partial batch")
 	cmd.Flags().StringVar(&batchProofMode, "batch-proof-mode", "", "proof materialization mode: inline (default), async, or on_demand")
@@ -588,6 +602,28 @@ func shutdownGRPCServer(ctx context.Context, server *grpc.Server) {
 	case <-ctx.Done():
 		server.Stop()
 	}
+}
+
+func parseNonNegativeDurationFlag(name, text string) (time.Duration, error) {
+	d, err := time.ParseDuration(text)
+	if err != nil {
+		return 0, trusterr.Wrap(trusterr.CodeInvalidArgument, "parse "+name, err)
+	}
+	if d < 0 {
+		return 0, trusterr.New(trusterr.CodeInvalidArgument, "--"+name+" must be >= 0")
+	}
+	return d, nil
+}
+
+func parsePositiveDurationFlag(name, text string) (time.Duration, error) {
+	d, err := time.ParseDuration(text)
+	if err != nil {
+		return 0, trusterr.Wrap(trusterr.CodeInvalidArgument, "parse "+name, err)
+	}
+	if d <= 0 {
+		return 0, trusterr.New(trusterr.CodeInvalidArgument, "--"+name+" must be > 0")
+	}
+	return d, nil
 }
 
 // otsSinkParams carries the OpenTimestamps-specific options through
