@@ -387,7 +387,7 @@ func (c *Client) SubmitLogStream(ctx context.Context, entries <-chan LogEntry, i
 				item := LogSubmitItemResult{Index: job.index, Result: submitted, Err: err}
 				select {
 				case out <- item:
-				case <-ctx.Done():
+				case <-workCtx.Done():
 					return
 				}
 				if err != nil && opts.StopOnError {

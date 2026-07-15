@@ -296,6 +296,59 @@ func TestClientSubmitLogStream(t *testing.T) {
 	}
 }
 
+func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	_, priv, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var signed SignedClaim
+		if err := cborx.DecodeReaderLimit(r.Body, &signed, 1<<20); err != nil {
+			t.Fatalf("DecodeReaderLimit: %v", err)
+		}
+		logID := signed.Claim.Metadata.Custom["log_id"]
+		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
+			RecordID:   "tr1" + logID,
+			Status:     "accepted",
+			ProofLevel: ProofLevelL2,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, WithHTTPClient(NewHTTPClientForConcurrency(1)))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	entries := make(chan LogEntry, 1)
+	out, err := client.SubmitLogStream(nil, entries, Identity{
+		TenantID:   "tenant-1",
+		ClientID:   "client-1",
+		KeyID:      "client-key-1",
+		PrivateKey: priv,
+	}, LogStreamOptions{Concurrency: 1, QueueSize: 1})
+	if err != nil {
+		t.Fatalf("SubmitLogStream: %v", err)
+	}
+	entries <- LogEntry{Body: []byte(`{"n":1}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "nilctx"}}}
+	close(entries)
+
+	var got []LogSubmitItemResult
+	for item := range out {
+		got = append(got, item)
+	}
+	if len(got) != 1 {
+		t.Fatalf("stream results = %+v", got)
+	}
+	if got[0].Err != nil {
+		t.Fatalf("stream item error: %v", got[0].Err)
+	}
+	if got[0].Result.RecordID != "tr1nilctx" {
+		t.Fatalf("stream result = %+v", got[0].Result)
+	}
+}
+
 func TestSubmitLogBatchRejectsSharedDefaults(t *testing.T) {
 	t.Parallel()
 
