@@ -133,6 +133,20 @@ func TestConfigEnvOverride(t *testing.T) {
 	}
 }
 
+func TestConfigStringIncludesAnchorSinkAndPath(t *testing.T) {
+	t.Parallel()
+
+	cfg := trustconfig.Default()
+	cfg.Anchor.Sink = "ots"
+	cfg.Anchor.Path = "/tmp/anchors.jsonl"
+	if got := configString(cfg, "anchor.sink"); got != "ots" {
+		t.Fatalf("configString(anchor.sink) = %q, want ots", got)
+	}
+	if got := configString(cfg, "anchor.path"); got != "/tmp/anchors.jsonl" {
+		t.Fatalf("configString(anchor.path) = %q", got)
+	}
+}
+
 func TestConfigRecordIndexModeEnvTakesPriorityOverLegacyAlias(t *testing.T) {
 	t.Setenv("TRUSTDB_PROOFSTORE_INDEX_STORAGE_TOKENS", "false")
 	t.Setenv("TRUSTDB_PROOFSTORE_RECORD_INDEX_MODE", "time_only")
@@ -657,7 +671,19 @@ func TestShippedProfileConfigsLoad(t *testing.T) {
 	t.Parallel()
 
 	repoConfigs := filepath.Join("..", "..", "configs")
-	for _, name := range []string{"development.yaml", "production.yaml", "benchmark.yaml"} {
+	for _, name := range []string{
+		"development.yaml",
+		"production.yaml",
+		"benchmark.yaml",
+		"benchmark-extreme.yaml",
+		"benchmark-burst.yaml",
+		"benchmark-l3-throughput.yaml",
+		"benchmark-proof-ready.yaml",
+		"benchmark-balanced.yaml",
+		"benchmark-production-safe.yaml",
+		"benchmark-production-guaranteed.yaml",
+		"benchmark-large-payload.yaml",
+	} {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -673,6 +699,9 @@ func TestShippedProfileConfigsLoad(t *testing.T) {
 			cfg := trustconfig.FromViper(v)
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate: %v", err)
+			}
+			if strings.Contains(name, "production-") && cfg.Anchor.Sink != "ots" {
+				t.Fatalf("anchor.sink = %q, want ots", cfg.Anchor.Sink)
 			}
 		})
 	}

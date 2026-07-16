@@ -23,10 +23,13 @@ const (
 // only writes GlobalLogOutboxItem; this worker performs the slower append and
 // optional STH anchor enqueue path outside the batch goroutine.
 type OutboxConfig struct {
-	Store   proofstore.Store
-	Global  *Service
-	OnSTH   func(context.Context, model.SignedTreeHead)
-	Metrics *observability.Metrics
+	Store          proofstore.Store
+	Global         *Service
+	OnSTH          func(context.Context, model.SignedTreeHead)
+	OnSTHs         func(context.Context, []model.SignedTreeHead)
+	OnAnchorsReady func()
+	AnchorOutbox   bool
+	Metrics        *observability.Metrics
 
 	Logger         zerolog.Logger
 	PollInterval   time.Duration
@@ -169,23 +172,55 @@ func (w *OutboxWorker) processBatch(ctx context.Context, items []model.GlobalLog
 		}
 		return
 	}
-	if marker, ok := w.cfg.Store.(proofstore.GlobalLogPublishedBatchMarker); ok {
-		if err := marker.MarkGlobalLogPublishedBatch(ctx, batchIDs, sths); err != nil {
-			w.cfg.Logger.Error().Err(err).Int("count", len(items)).Msg("global log outbox: mark batch published failed")
-			return
-		}
-	} else {
-		for i := range items {
-			if err := w.cfg.Store.MarkGlobalLogPublished(ctx, items[i].BatchID, sths[i]); err != nil {
-				w.cfg.Logger.Error().Err(err).Str("batch_id", items[i].BatchID).Msg("global log outbox: mark published failed")
+	anchorsEnqueued := false
+	if w.cfg.AnchorOutbox {
+		if marker, ok := w.cfg.Store.(proofstore.GlobalLogPublishedBatchWithAnchorsMarker); ok {
+			anchors := make([]model.STHAnchorOutboxItem, len(sths))
+			for i := range sths {
+				anchors[i] = model.STHAnchorOutboxItem{
+					SchemaVersion: model.SchemaSTHAnchorOutbox,
+					TreeSize:      sths[i].TreeSize,
+					Status:        model.AnchorStatePending,
+					STH:           sths[i],
+				}
+			}
+			if err := marker.MarkGlobalLogPublishedBatchWithAnchors(ctx, batchIDs, sths, anchors); err != nil {
+				w.cfg.Logger.Error().Err(err).Int("count", len(items)).Msg("global log outbox: mark batch published with anchors failed")
 				return
+			}
+			anchorsEnqueued = true
+		}
+	}
+	if !anchorsEnqueued {
+		if marker, ok := w.cfg.Store.(proofstore.GlobalLogPublishedBatchMarker); ok {
+			if err := marker.MarkGlobalLogPublishedBatch(ctx, batchIDs, sths); err != nil {
+				w.cfg.Logger.Error().Err(err).Int("count", len(items)).Msg("global log outbox: mark batch published failed")
+				return
+			}
+		} else {
+			for i := range items {
+				if err := w.cfg.Store.MarkGlobalLogPublished(ctx, items[i].BatchID, sths[i]); err != nil {
+					w.cfg.Logger.Error().Err(err).Str("batch_id", items[i].BatchID).Msg("global log outbox: mark published failed")
+					return
+				}
 			}
 		}
 	}
-	for i := range items {
-		if w.cfg.OnSTH != nil {
+	if w.cfg.Metrics != nil {
+		w.cfg.Metrics.GlobalLogPublished.Add(float64(len(items)))
+	}
+	if anchorsEnqueued {
+		if w.cfg.OnAnchorsReady != nil {
+			w.cfg.OnAnchorsReady()
+		}
+	} else if w.cfg.OnSTHs != nil {
+		w.cfg.OnSTHs(ctx, sths)
+	} else if w.cfg.OnSTH != nil {
+		for i := range items {
 			w.cfg.OnSTH(ctx, sths[i])
 		}
+	}
+	for i := range items {
 		w.cfg.Logger.Debug().Str("batch_id", items[i].BatchID).Uint64("tree_size", sths[i].TreeSize).Msg("global log outbox: appended")
 	}
 }

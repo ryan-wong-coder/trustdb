@@ -15,9 +15,9 @@
 - global log 支持一次顺序规划并批量提交最多 128 个 leaves/nodes/STHs。
 - anchor 与 OTS upgrader 使用默认 4-worker 的有界并发。
 
-## 本地验证结果
+## 验证结果
 
-测试环境为 Apple M1，结果用于判断相对热点，不与双机 32 vCPU 报告做绝对值比较。
+初始实现使用 Apple M1 做相对热点验证；最终结果已在两台 32 vCPU OpenCloudOS 服务器上通过内网重新测试。
 
 | Benchmark | 优化前 | 优化后 |
 | --- | ---: | ---: |
@@ -26,7 +26,9 @@
 | materialized time-only / 1024 | 约 33-36 ms、12.9 MB | 约 26-29 ms、4.7 MB |
 | batch tree / 8192 | 约 24,575 objects | 40 tiles |
 
-新物化路径的 CPU profile 已不再以 storage token 生成/删除为主，剩余主要成本来自 Pebble WAL/SST 写入与 compaction。完整的 100k 双机 Matrix 仍需在原 32 vCPU 环境使用三套独立 benchmark profile 复测。
+32 vCPU 服务端的 `CommitBatchIndexesSynthetic1024` 为约 1.35 ms、792.5 KB；8192 records 树固定为 40 tiles。最终 100k/300k 双机矩阵覆盖 extreme、burst、持续高写、proof-ready、balanced、production-safe、production-guaranteed、large-payload 和真实 OTS。持续高写 HTTP 300k 达到 55,125 Submit/s、14,797 L3/s；gRPC 100k 达到 60,528 Submit/s、20,127 L3/s。完整数据见 [2026-07-16 全链路性能报告](trustdb-performance-report-2026-07-16.zh-CN.md)。
+
+Linux `perf` 显示剩余 CPU 主要由 Ed25519 签名/验签、Snappy 和内存复制占用；proofstore 侧的主要压力为 Pebble WAL/SST 写入与 compaction。继续优化时应优先降低编码复制和分盘，而不是继续扩大常驻队列。
 
 ## 兼容性
 

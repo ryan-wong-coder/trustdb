@@ -2,6 +2,7 @@ package observability
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	pdb "github.com/cockroachdb/pebble"
@@ -254,12 +255,12 @@ func (c *pebbleCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.ingestionsTotal, prometheus.CounterValue, float64(metrics.Ingest.Count))
 	ch <- prometheus.MustNewConstMetric(c.memtableSizeBytes, prometheus.GaugeValue, float64(metrics.MemTable.Size))
 	ch <- prometheus.MustNewConstMetric(c.memtableCount, prometheus.GaugeValue, float64(metrics.MemTable.Count))
-	ch <- prometheus.MustNewConstMetric(c.memtableZombieSizeBytes, prometheus.GaugeValue, float64(metrics.MemTable.ZombieSize))
+	ch <- prometheus.MustNewConstMetric(c.memtableZombieSizeBytes, prometheus.GaugeValue, pebbleUintGauge(metrics.MemTable.ZombieSize))
 	ch <- prometheus.MustNewConstMetric(c.readAmplification, prometheus.GaugeValue, float64(metrics.ReadAmp()))
 	ch <- prometheus.MustNewConstMetric(c.diskSpaceUsageBytes, prometheus.GaugeValue, float64(metrics.DiskSpaceUsage()))
 	ch <- prometheus.MustNewConstMetric(c.snapshotsOpen, prometheus.GaugeValue, float64(metrics.Snapshots.Count))
 	ch <- prometheus.MustNewConstMetric(c.tableObsoleteSizeBytes, prometheus.GaugeValue, float64(metrics.Table.ObsoleteSize))
-	ch <- prometheus.MustNewConstMetric(c.tableZombieSizeBytes, prometheus.GaugeValue, float64(metrics.Table.ZombieSize))
+	ch <- prometheus.MustNewConstMetric(c.tableZombieSizeBytes, prometheus.GaugeValue, pebbleUintGauge(metrics.Table.ZombieSize))
 	ch <- prometheus.MustNewConstMetric(c.backingTableSizeBytes, prometheus.GaugeValue, float64(metrics.Table.BackingTableSize))
 	ch <- prometheus.MustNewConstMetric(c.backingTables, prometheus.GaugeValue, float64(metrics.Table.BackingTableCount))
 	ch <- prometheus.MustNewConstMetric(c.walLiveFiles, prometheus.GaugeValue, float64(metrics.WAL.Files))
@@ -277,6 +278,16 @@ func (c *pebbleCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.levelFiles, prometheus.GaugeValue, float64(lm.NumFiles), label)
 		ch <- prometheus.MustNewConstMetric(c.levelScore, prometheus.GaugeValue, lm.Score, label)
 	}
+}
+
+func pebbleUintGauge(value uint64) float64 {
+	// Pebble computes a few live gauges from concurrently changing unsigned
+	// counters. A transient subtraction underflow must not become a 16 EiB
+	// Prometheus sample.
+	if value > math.MaxInt64 {
+		return 0
+	}
+	return float64(value)
 }
 
 func durationSeconds(d time.Duration) float64 {

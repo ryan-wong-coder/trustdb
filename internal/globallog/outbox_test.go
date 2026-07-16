@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
 )
@@ -112,4 +115,85 @@ func TestOutboxWorkerPublishesAndCallsSTHHook(t *testing.T) {
 	if _, ok, err := store.GetGlobalLeafByBatchID(ctx, root.BatchID); err != nil || !ok {
 		t.Fatalf("GetGlobalLeafByBatchID ok=%v err=%v", ok, err)
 	}
+}
+
+func TestOutboxWorkerAtomicAnchorPathTriggersExistingOutbox(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := &anchorBatchStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	root := model.BatchRoot{
+		SchemaVersion: model.SchemaBatchRoot,
+		BatchID:       "batch-anchor-atomic",
+		BatchRoot:     bytes.Repeat([]byte{0x51}, 32),
+		TreeSize:      1,
+		ClosedAtUnixN: 1,
+	}
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox,
+		BatchID:       root.BatchID,
+		BatchRoot:     root,
+		Status:        model.AnchorStatePending,
+	}); err != nil {
+		t.Fatalf("EnqueueGlobalLog: %v", err)
+	}
+	_, priv, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
+	svc, err := New(Options{
+		Store:      store,
+		LogID:      "outbox-anchor-test",
+		KeyID:      "outbox-anchor-key",
+		PrivateKey: priv,
+		Clock:      func() time.Time { return time.Unix(300, 0).UTC() },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	metrics := observability.NewMetrics()
+	anchorsReady := 0
+	legacyHookCalls := 0
+	worker := NewOutboxWorker(OutboxConfig{
+		Store:        store,
+		Global:       svc,
+		AnchorOutbox: true,
+		Metrics:      metrics,
+		OnAnchorsReady: func() {
+			anchorsReady++
+		},
+		OnSTHs: func(context.Context, []model.SignedTreeHead) {
+			legacyHookCalls++
+		},
+	})
+	worker.tick(ctx)
+
+	if anchorsReady != 1 {
+		t.Fatalf("OnAnchorsReady calls = %d, want 1", anchorsReady)
+	}
+	if legacyHookCalls != 0 {
+		t.Fatalf("OnSTHs calls = %d, want 0", legacyHookCalls)
+	}
+	if got := testutil.ToFloat64(metrics.GlobalLogPublished); got != 1 {
+		t.Fatalf("published roots metric = %v, want 1", got)
+	}
+	anchorItem, ok, err := store.GetSTHAnchorOutboxItem(ctx, 1)
+	if err != nil || !ok || anchorItem.Status != model.AnchorStatePending {
+		t.Fatalf("anchor item ok=%v err=%v item=%+v", ok, err, anchorItem)
+	}
+}
+
+type anchorBatchStore struct {
+	proofstore.LocalStore
+}
+
+func (s *anchorBatchStore) MarkGlobalLogPublishedBatchWithAnchors(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, anchors []model.STHAnchorOutboxItem) error {
+	for i := range batchIDs {
+		if err := s.MarkGlobalLogPublished(ctx, batchIDs[i], sths[i]); err != nil {
+			return err
+		}
+		if err := s.EnqueueSTHAnchor(ctx, anchors[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

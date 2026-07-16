@@ -1,0 +1,54 @@
+# Absolute L2 accepted-receipt throughput. Proofs are materialized on demand.
+# Unsafe across host power loss and unsuitable for compliance claims.
+run_profile: benchmark
+
+paths:
+  data_dir: ".trustdb-bench-extreme"
+  wal: ".trustdb-bench-extreme/wal"
+  object_dir: ".trustdb-bench-extreme/objects"
+  proof_dir: ".trustdb-bench-extreme/proofs"
+
+metastore: "pebble"
+metastore_path: ".trustdb-bench-extreme/pebble"
+
+server:
+  queue_size: 131072
+  workers: 32
+  read_timeout: "30s"
+  read_header_timeout: "5s"
+  write_timeout: "120s"
+  idle_timeout: "120s"
+  shutdown_timeout: "30s"
+
+proofstore:
+  record_index_mode: "time_only"
+  artifact_sync_mode: "batch"
+
+wal:
+  fsync_mode: "batch"
+  group_commit_interval: "100ms"
+
+batch:
+  queue_size: 1048576
+  max_records: 32768
+  max_delay: "1s"
+  proof_mode: "on_demand"
+  materializer_workers: 2
+  materializer_queue_size: 4
+  materializer_poll_interval: "250ms"
+  proof_workers: 0
+
+global_log:
+  enabled: false
+
+anchor:
+  scope: "global"
+  max_delay: "5m"
+  poll_interval: "250ms"
+  workers: 4
+  sink: "off"
+
+log:
+  level: "warn"
+  format: "json"
+  output: "stderr"

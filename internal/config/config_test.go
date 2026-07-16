@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func TestDefaultConfigIsValid(t *testing.T) {
@@ -47,11 +49,23 @@ func TestDefaultYAMLIsStructured(t *testing.T) {
 	if !strings.Contains(DefaultYAML, `idle_timeout: "120s"`) {
 		t.Fatal("default yaml missing server.idle_timeout")
 	}
+	if !strings.Contains(DefaultYAML, `poll_interval: "2s"`) {
+		t.Fatal("default yaml missing anchor.poll_interval")
+	}
 	if Default().Server.ReadHeaderTimeout != "5s" {
 		t.Fatalf("default server.read_header_timeout = %q, want 5s", Default().Server.ReadHeaderTimeout)
 	}
 	if Default().Server.IdleTimeout != "120s" {
 		t.Fatalf("default server.idle_timeout = %q, want 120s", Default().Server.IdleTimeout)
+	}
+}
+
+func TestFromViperDefaultsMissingAnchorPollInterval(t *testing.T) {
+	t.Parallel()
+
+	cfg := FromViper(viper.New())
+	if cfg.Anchor.PollInterval != "2s" {
+		t.Fatalf("anchor.poll_interval = %q, want 2s", cfg.Anchor.PollInterval)
 	}
 }
 
@@ -170,6 +184,13 @@ func TestValidateRejectsInvalidDurationBounds(t *testing.T) {
 				c.Anchor.MaxDelay = "0s"
 			},
 			want: "anchor.max_delay",
+		},
+		{
+			name: "zero anchor poll interval",
+			mutate: func(c *Config) {
+				c.Anchor.PollInterval = "0s"
+			},
+			want: "anchor.poll_interval",
 		},
 		{
 			name: "zero admin session ttl",

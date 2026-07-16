@@ -1,18 +1,19 @@
-# Large-claim profile for 16 KiB and 64 KiB benchmark matrices.
+# Maximizes short-lived accepted-receipt throughput and burst absorption.
+# This profile is intentionally unsafe across host power loss.
 run_profile: benchmark
 
 paths:
-  data_dir: ".trustdb-bench-large"
-  wal: ".trustdb-bench-large/wal"
-  object_dir: ".trustdb-bench-large/objects"
-  proof_dir: ".trustdb-bench-large/proofs"
+  data_dir: ".trustdb-bench-burst"
+  wal: ".trustdb-bench-burst/wal"
+  object_dir: ".trustdb-bench-burst/objects"
+  proof_dir: ".trustdb-bench-burst/proofs"
 
 metastore: "pebble"
-metastore_path: ".trustdb-bench-large/pebble"
+metastore_path: ".trustdb-bench-burst/pebble"
 
 server:
   queue_size: 65536
-  workers: 16
+  workers: 32
   read_timeout: "30s"
   read_header_timeout: "5s"
   write_timeout: "120s"
@@ -25,14 +26,15 @@ proofstore:
 
 wal:
   fsync_mode: "batch"
+  group_commit_interval: "50ms"
 
 batch:
-  queue_size: 65536
-  max_records: 4096
-  max_delay: "200ms"
+  queue_size: 524288
+  max_records: 16384
+  max_delay: "500ms"
   proof_mode: "async"
-  materializer_workers: 4
-  materializer_queue_size: 8
+  materializer_workers: 2
+  materializer_queue_size: 4
   materializer_poll_interval: "250ms"
   proof_workers: 0
 

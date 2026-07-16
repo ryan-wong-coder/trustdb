@@ -27,6 +27,7 @@ type Metrics struct {
 	BatchTreeTiles        prometheus.Histogram
 	GlobalLogBatchSize    prometheus.Histogram
 	GlobalLogBatchLatency prometheus.Histogram
+	GlobalLogPublished    prometheus.Counter
 	AnchorPending         prometheus.Gauge
 	AnchorInFlight        prometheus.Gauge
 	AnchorLatency         prometheus.Histogram
@@ -176,6 +177,10 @@ func NewMetrics() *Metrics {
 			Help:    "Latency of one global-log outbox batch.",
 			Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
 		}),
+		GlobalLogPublished: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "trustdb_global_log_published_roots_total",
+			Help: "Total batch roots whose L4 indexes and global-log outbox state are fully published.",
+		}),
 		AnchorPending: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "trustdb_anchor_pending_total",
 			Help: "Current pending anchor outbox entries.",
@@ -256,6 +261,7 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 		m.BatchTreeTiles,
 		m.GlobalLogBatchSize,
 		m.GlobalLogBatchLatency,
+		m.GlobalLogPublished,
 		m.AnchorPending,
 		m.AnchorInFlight,
 		m.AnchorLatency,

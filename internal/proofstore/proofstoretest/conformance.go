@@ -43,6 +43,7 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("ConcurrentPutBundle", func(t *testing.T) { testConcurrentPutBundle(t, newStore) })
 	t.Run("GlobalLogRoundTrip", func(t *testing.T) { testGlobalLogRoundTrip(t, newStore) })
 	t.Run("GlobalLogAppendCommitRoundTrip", func(t *testing.T) { testGlobalLogAppendCommitRoundTrip(t, newStore) })
+	t.Run("GlobalLogPublishedBatchWithAnchorsOptional", func(t *testing.T) { testGlobalLogPublishedBatchWithAnchorsOptional(t, newStore) })
 	t.Run("GlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite", func(t *testing.T) {
 		testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t, newStore)
 	})
@@ -51,6 +52,7 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("GlobalLogTileRoundTrip", func(t *testing.T) { testGlobalLogTileRoundTrip(t, newStore) })
 	t.Run("GlobalLogTileListAfterPaginates", func(t *testing.T) { testGlobalLogTileListAfterPaginates(t, newStore) })
 	t.Run("STHAnchorEnqueueIsIdempotent", func(t *testing.T) { testSTHAnchorEnqueueIsIdempotent(t, newStore) })
+	t.Run("STHAnchorBatchEnqueueOptional", func(t *testing.T) { testSTHAnchorBatchEnqueueOptional(t, newStore) })
 	t.Run("SignedTreeHeadListPagePaginates", func(t *testing.T) { testSignedTreeHeadListPagePaginates(t, newStore) })
 	t.Run("STHAnchorListPagePaginates", func(t *testing.T) { testSTHAnchorListPagePaginates(t, newStore) })
 	t.Run("STHAnchorListAfterPaginates", func(t *testing.T) { testSTHAnchorListAfterPaginates(t, newStore) })
@@ -779,6 +781,57 @@ func testGlobalLogAppendCommitRoundTrip(t *testing.T, newStore Factory) {
 	}
 }
 
+func testGlobalLogPublishedBatchWithAnchorsOptional(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	marker, ok := store.(proofstore.GlobalLogPublishedBatchWithAnchorsMarker)
+	if !ok {
+		t.Skip("store does not implement GlobalLogPublishedBatchWithAnchorsMarker")
+	}
+	ctx := context.Background()
+	batchIDs := []string{"anchor-batch-1", "anchor-batch-2"}
+	sths := []model.SignedTreeHead{
+		{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{1}},
+		{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 2, RootHash: []byte{2}},
+	}
+	anchors := make([]model.STHAnchorOutboxItem, len(sths))
+	for i := range batchIDs {
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+			SchemaVersion: model.SchemaGlobalLogOutbox,
+			BatchID:       batchIDs[i],
+			BatchRoot: model.BatchRoot{
+				SchemaVersion: model.SchemaBatchRoot,
+				BatchID:       batchIDs[i],
+				BatchRoot:     []byte{byte(i + 1)},
+				TreeSize:      1,
+			},
+			Status: model.AnchorStatePending,
+		}); err != nil {
+			t.Fatalf("EnqueueGlobalLog %s: %v", batchIDs[i], err)
+		}
+		anchors[i] = model.STHAnchorOutboxItem{
+			SchemaVersion: model.SchemaSTHAnchorOutbox,
+			TreeSize:      sths[i].TreeSize,
+			Status:        model.AnchorStatePending,
+			STH:           sths[i],
+		}
+	}
+	if err := marker.MarkGlobalLogPublishedBatchWithAnchors(ctx, batchIDs, sths, anchors); err != nil {
+		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchors: %v", err)
+	}
+	for i := range batchIDs {
+		globalItem, ok, err := store.GetGlobalLogOutboxItem(ctx, batchIDs[i])
+		if err != nil || !ok || globalItem.Status != model.AnchorStatePublished {
+			t.Fatalf("global item %s ok=%v err=%v item=%+v", batchIDs[i], ok, err, globalItem)
+		}
+		anchorItem, ok, err := store.GetSTHAnchorOutboxItem(ctx, sths[i].TreeSize)
+		if err != nil || !ok || anchorItem.Status != model.AnchorStatePending {
+			t.Fatalf("anchor item %d ok=%v err=%v item=%+v", sths[i].TreeSize, ok, err, anchorItem)
+		}
+	}
+}
+
 func testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t *testing.T, newStore Factory) {
 	t.Parallel()
 	store, cleanup := newStore(t)
@@ -1085,6 +1138,34 @@ func testSTHAnchorEnqueueIsIdempotent(t *testing.T, newStore Factory) {
 	}
 	if got := trusterr.CodeOf(err); got != trusterr.CodeAlreadyExists {
 		t.Fatalf("CodeOf(err) = %s, want %s", got, trusterr.CodeAlreadyExists)
+	}
+}
+
+func testSTHAnchorBatchEnqueueOptional(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	batcher, ok := store.(proofstore.STHAnchorBatchEnqueuer)
+	if !ok {
+		t.Skip("store does not implement STHAnchorBatchEnqueuer")
+	}
+	ctx := context.Background()
+	items := []model.STHAnchorOutboxItem{
+		sthAnchorItem(21, "file", 100),
+		sthAnchorItem(22, "file", 101),
+	}
+	if err := batcher.EnqueueSTHAnchors(ctx, items); err != nil {
+		t.Fatalf("EnqueueSTHAnchors: %v", err)
+	}
+	if err := batcher.EnqueueSTHAnchors(ctx, items); err != nil {
+		t.Fatalf("EnqueueSTHAnchors idempotent retry: %v", err)
+	}
+	got, err := store.ListPendingSTHAnchors(ctx, 1000, 10)
+	if err != nil {
+		t.Fatalf("ListPendingSTHAnchors: %v", err)
+	}
+	if len(got) != 2 || got[0].TreeSize != 21 || got[1].TreeSize != 22 {
+		t.Fatalf("pending anchors = %+v", got)
 	}
 }
 

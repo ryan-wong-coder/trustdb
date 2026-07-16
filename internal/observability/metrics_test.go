@@ -17,6 +17,7 @@ func TestMetricsRegisterAndExpose(t *testing.T) {
 	metrics.IngestRequests.WithLabelValues("accepted").Inc()
 	metrics.IngestRejected.WithLabelValues("RESOURCE_EXHAUSTED").Add(2)
 	metrics.QueueDepth.WithLabelValues("ingest").Set(7)
+	metrics.GlobalLogPublished.Add(3)
 
 	expected := `
 # HELP trustdb_ingest_rejected_total Total rejected ingest requests by reason.
@@ -28,6 +29,9 @@ trustdb_ingest_requests_total{result="accepted"} 1
 # HELP trustdb_queue_depth Current queue depth by queue name.
 # TYPE trustdb_queue_depth gauge
 trustdb_queue_depth{queue="ingest"} 7
+# HELP trustdb_global_log_published_roots_total Total batch roots whose L4 indexes and global-log outbox state are fully published.
+# TYPE trustdb_global_log_published_roots_total counter
+trustdb_global_log_published_roots_total 3
 `
 	if err := testutil.GatherAndCompare(
 		reg,
@@ -35,6 +39,7 @@ trustdb_queue_depth{queue="ingest"} 7
 		"trustdb_ingest_requests_total",
 		"trustdb_ingest_rejected_total",
 		"trustdb_queue_depth",
+		"trustdb_global_log_published_roots_total",
 	); err != nil {
 		t.Fatalf("GatherAndCompare() error = %v", err)
 	}
@@ -282,6 +287,17 @@ func TestRegisterPebbleMetricsSkipsNonPebbleStore(t *testing.T) {
 	}
 	if enabled {
 		t.Fatalf("RegisterPebbleMetrics() enabled = true, want false")
+	}
+}
+
+func TestPebbleUintGaugeClampsCounterUnderflow(t *testing.T) {
+	t.Parallel()
+
+	if got := pebbleUintGauge(^uint64(0) - 4095); got != 0 {
+		t.Fatalf("pebbleUintGauge(underflow) = %v, want 0", got)
+	}
+	if got := pebbleUintGauge(4096); got != 4096 {
+		t.Fatalf("pebbleUintGauge(4096) = %v, want 4096", got)
 	}
 }
 

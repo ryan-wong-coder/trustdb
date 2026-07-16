@@ -1,14 +1,14 @@
-# Production-semantics performance profile: durable WAL, full indexes, L4/L5.
+# Conservative durability floor: every accepted receipt follows a WAL fsync.
 run_profile: benchmark
 
 paths:
-  data_dir: ".trustdb-bench-safe"
-  wal: ".trustdb-bench-safe/wal"
-  object_dir: ".trustdb-bench-safe/objects"
-  proof_dir: ".trustdb-bench-safe/proofs"
+  data_dir: ".trustdb-bench-guaranteed"
+  wal: ".trustdb-bench-guaranteed/wal"
+  object_dir: ".trustdb-bench-guaranteed/objects"
+  proof_dir: ".trustdb-bench-guaranteed/proofs"
 
 metastore: "pebble"
-metastore_path: ".trustdb-bench-safe/pebble"
+metastore_path: ".trustdb-bench-guaranteed/pebble"
 
 server:
   queue_size: 8192
@@ -24,13 +24,13 @@ proofstore:
   artifact_sync_mode: "chunk"
 
 wal:
-  fsync_mode: "group"
+  fsync_mode: "strict"
   group_commit_interval: "10ms"
 
 batch:
   queue_size: 65536
-  max_records: 8192
-  max_delay: "200ms"
+  max_records: 4096
+  max_delay: "100ms"
   proof_mode: "async"
   materializer_workers: 2
   materializer_queue_size: 4
@@ -39,7 +39,7 @@ batch:
 
 global_log:
   enabled: true
-  log_id: "trustdb-bench-safe"
+  log_id: "trustdb-bench-guaranteed"
 
 anchor:
   scope: "global"

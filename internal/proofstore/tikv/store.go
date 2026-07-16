@@ -2933,11 +2933,22 @@ func (s *Store) MarkGlobalLogPublished(ctx context.Context, batchID string, sth 
 }
 
 func (s *Store) MarkGlobalLogPublishedBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead) error {
+	return s.markGlobalLogPublishedBatch(ctx, batchIDs, sths, nil)
+}
+
+func (s *Store) MarkGlobalLogPublishedBatchWithAnchors(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, anchors []model.STHAnchorOutboxItem) error {
+	return s.markGlobalLogPublishedBatch(ctx, batchIDs, sths, anchors)
+}
+
+func (s *Store) markGlobalLogPublishedBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, anchors []model.STHAnchorOutboxItem) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore mark global log batch published canceled", err)
 	}
 	if len(batchIDs) == 0 || len(batchIDs) != len(sths) {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log published batch inputs are inconsistent")
+	}
+	if len(anchors) != 0 && len(anchors) != len(sths) {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log anchor batch inputs are inconsistent")
 	}
 	type update struct {
 		old  model.GlobalLogOutboxItem
@@ -2945,6 +2956,11 @@ func (s *Store) MarkGlobalLogPublishedBatch(ctx context.Context, batchIDs []stri
 		data []byte
 	}
 	updates := make([]update, len(batchIDs))
+	type anchorUpdate struct {
+		item model.STHAnchorOutboxItem
+		data []byte
+	}
+	anchorUpdates := make([]anchorUpdate, len(anchors))
 	now := time.Now().UTC().UnixNano()
 	for i := range batchIDs {
 		item, ok, err := s.GetGlobalLogOutboxItem(ctx, batchIDs[i])
@@ -2967,6 +2983,26 @@ func (s *Store) MarkGlobalLogPublishedBatch(ctx context.Context, batchIDs []stri
 		}
 		updates[i] = update{old: item, next: next, data: data}
 	}
+	for i := range anchors {
+		item := anchors[i]
+		if item.TreeSize == 0 || item.TreeSize != sths[i].TreeSize {
+			return trusterr.New(trusterr.CodeInvalidArgument, "sth anchor tree_size is inconsistent")
+		}
+		if item.SchemaVersion == "" {
+			item.SchemaVersion = model.SchemaSTHAnchorOutbox
+		}
+		if item.Status == "" {
+			item.Status = model.AnchorStatePending
+		}
+		if item.EnqueuedAtUnixN == 0 {
+			item.EnqueuedAtUnixN = now
+		}
+		data, err := cborx.Marshal(item)
+		if err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "encode sth anchor outbox item", err)
+		}
+		anchorUpdates[i] = anchorUpdate{item: item, data: data}
+	}
 	for i := range batchIDs {
 		if err := s.promoteBatchRecords(ctx, batchIDs[i], "L4"); err != nil {
 			return err
@@ -2983,6 +3019,14 @@ func (s *Store) MarkGlobalLogPublishedBatch(ctx context.Context, batchIDs []stri
 		}
 		if err := batch.Set(globalStatusKey(updates[i].next.Status, globalStatusSortUnixN(updates[i].next), updates[i].next.BatchID), updates[i].data, nil); err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log status index", err)
+		}
+	}
+	for i := range anchorUpdates {
+		if err := batch.Set(anchorOutboxKey(anchorUpdates[i].item.TreeSize), anchorUpdates[i].data, nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor outbox item", err)
+		}
+		if err := batch.Set(anchorStatusKey(anchorUpdates[i].item.Status, anchorStatusSortUnixN(anchorUpdates[i].item), anchorUpdates[i].item.TreeSize), anchorUpdates[i].data, nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor status index", err)
 		}
 	}
 	if err := batch.Commit(syncWrite); err != nil {
@@ -3045,6 +3089,62 @@ func (s *Store) EnqueueSTHAnchor(ctx context.Context, item model.STHAnchorOutbox
 	}
 	if err := batch.Commit(syncWrite); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "commit sth anchor outbox item", err)
+	}
+	return nil
+}
+
+func (s *Store) EnqueueSTHAnchors(ctx context.Context, items []model.STHAnchorOutboxItem) error {
+	if err := ctx.Err(); err != nil {
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore enqueue sth anchor batch canceled", err)
+	}
+	type encodedItem struct {
+		item model.STHAnchorOutboxItem
+		data []byte
+	}
+	encoded := make([]encodedItem, 0, len(items))
+	now := time.Now().UTC().UnixNano()
+	for i := range items {
+		item := items[i]
+		if item.TreeSize == 0 {
+			return trusterr.New(trusterr.CodeInvalidArgument, "sth anchor tree_size is required")
+		}
+		if item.SchemaVersion == "" {
+			item.SchemaVersion = model.SchemaSTHAnchorOutbox
+		}
+		if item.Status == "" {
+			item.Status = model.AnchorStatePending
+		}
+		if item.EnqueuedAtUnixN == 0 {
+			item.EnqueuedAtUnixN = now
+		}
+		key := anchorOutboxKey(item.TreeSize)
+		if _, closer, err := s.db.Get(key); err == nil {
+			closer.Close()
+			continue
+		} else if !isNotFound(err) {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "check sth anchor outbox item", err)
+		}
+		data, err := cborx.Marshal(item)
+		if err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "encode sth anchor outbox item", err)
+		}
+		encoded = append(encoded, encodedItem{item: item, data: data})
+	}
+	if len(encoded) == 0 {
+		return nil
+	}
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	for i := range encoded {
+		if err := batch.Set(anchorOutboxKey(encoded[i].item.TreeSize), encoded[i].data, nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor outbox item", err)
+		}
+		if err := batch.Set(anchorStatusKey(encoded[i].item.Status, anchorStatusSortUnixN(encoded[i].item), encoded[i].item.TreeSize), encoded[i].data, nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor status index", err)
+		}
+	}
+	if err := batch.Commit(syncWrite); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "commit sth anchor outbox batch", err)
 	}
 	return nil
 }

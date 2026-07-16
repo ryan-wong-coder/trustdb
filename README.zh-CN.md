@@ -162,6 +162,14 @@ go run ./cmd/trustdb backup verify --file .trustdb-dev/trustdb.tdbackup
 | --- | --- |
 | `configs/development.yaml` | 本地开发和演示；file proofstore、`noop` anchor。 |
 | `configs/production.yaml` | 单节点生产基线；Pebble proofstore、directory WAL、group fsync、global log、OTS anchor。 |
+| `configs/benchmark-extreme.yaml` | 极限 L2 accepted receipt 吞吐；on-demand proof，不适合生产。 |
+| `configs/benchmark-burst.yaml` | 瞬时流量吸收；大批次和大队列，后台完成 L3。 |
+| `configs/benchmark-l3-throughput.yaml` | 持续高写的 L2/L3 平衡。 |
+| `configs/benchmark-proof-ready.yaml` | 优先降低 L3 backlog。 |
+| `configs/benchmark-balanced.yaml` | group fsync、低索引写放大和 L4 的综合档位。 |
+| `configs/benchmark-production-safe.yaml` | full index、group fsync、L4/L5 的生产安全基线。 |
+| `configs/benchmark-production-guaranteed.yaml` | strict fsync、full index、L4/L5 的生产保证基线。 |
+| `configs/benchmark-large-payload.yaml` | 16 KiB 和 64 KiB payload 压测。 |
 | `configs/benchmark.yaml` | 吞吐压测配置；不代表生产审计语义。 |
 
 `run_profile` 语义和启动提示见 [configs/README.md](configs/README.md)。
@@ -179,7 +187,9 @@ go run ./cmd/trustdb backup verify --file .trustdb-dev/trustdb.tdbackup
 - [CONTRIBUTING.md](CONTRIBUTING.md)：Issue、PR、Commit、验证和 Review 标准。
 - [formats/SPROOF_V1.md](formats/SPROOF_V1.md)：稳定 `.sproof` v1 交换格式。
 - [formats/DISTRIBUTED_ARCHITECTURE.md](formats/DISTRIBUTED_ARCHITECTURE.md)：分布式/存算分离说明。
-- [docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md](docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md)：性能报告。
+- [docs/performance/trustdb-performance-report-2026-07-16.zh-CN.md](docs/performance/trustdb-performance-report-2026-07-16.zh-CN.md)：最新全链路双机性能报告。
+- [docs/performance/trustdb-performance-optimization-2026-07.zh-CN.md](docs/performance/trustdb-performance-optimization-2026-07.zh-CN.md)：性能优化实现说明。
+- [docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md](docs/performance/trustdb-performance-report-2026-04-30.zh-CN.md)：旧版性能优先基线。
 
 ## 开发检查
 

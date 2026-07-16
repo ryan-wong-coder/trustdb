@@ -143,3 +143,11 @@ type PreparedManifestLister interface {
 type GlobalLogPublishedBatchMarker interface {
 	MarkGlobalLogPublishedBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead) error
 }
+
+type GlobalLogPublishedBatchWithAnchorsMarker interface {
+	MarkGlobalLogPublishedBatchWithAnchors(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, anchors []model.STHAnchorOutboxItem) error
+}
+
+type STHAnchorBatchEnqueuer interface {
+	EnqueueSTHAnchors(ctx context.Context, items []model.STHAnchorOutboxItem) error
+}

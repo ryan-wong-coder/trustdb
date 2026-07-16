@@ -77,12 +77,20 @@ func TestOpenRejectsLegacySchema(t *testing.T) {
 }
 
 func BenchmarkMaterializedArtifactsTimeOnly1024(b *testing.B) {
+	benchmarkMaterializedArtifactsTimeOnly(b, 1024)
+}
+
+func BenchmarkMaterializedArtifactsTimeOnly8192(b *testing.B) {
+	benchmarkMaterializedArtifactsTimeOnly(b, 8192)
+}
+
+func benchmarkMaterializedArtifactsTimeOnly(b *testing.B, count int) {
 	store, err := OpenWithOptions(b.TempDir(), Options{RecordIndexMode: RecordIndexModeTimeOnly, ArtifactSyncMode: ArtifactSyncModeBatch})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer store.Close()
-	bundles := syntheticProofBundles(1024)
+	bundles := syntheticProofBundles(count)
 	indexes := make([]model.RecordIndex, len(bundles))
 	for i := range bundles {
 		indexes[i] = model.RecordIndexFromBundle(bundles[i])

@@ -139,6 +139,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("global_log.log_id", defaults.GlobalLog.LogID)
 	v.SetDefault("anchor.scope", defaults.Anchor.Scope)
 	v.SetDefault("anchor.max_delay", defaults.Anchor.MaxDelay)
+	v.SetDefault("anchor.poll_interval", defaults.Anchor.PollInterval)
 	v.SetDefault("anchor.workers", defaults.Anchor.Workers)
 	v.SetDefault("history.tile_size", defaults.History.TileSize)
 	v.SetDefault("history.hot_window_leaves", defaults.History.HotWindowLeaves)
@@ -226,6 +227,7 @@ func setDefaults(v *viper.Viper) {
 	bindEnv(v, "global_log.log_id", "TRUSTDB_GLOBAL_LOG_LOG_ID", "TRUSTDB_GLOBAL_LOG_ID")
 	bindEnv(v, "anchor.scope", "TRUSTDB_ANCHOR_SCOPE")
 	bindEnv(v, "anchor.max_delay", "TRUSTDB_ANCHOR_MAX_DELAY")
+	bindEnv(v, "anchor.poll_interval", "TRUSTDB_ANCHOR_POLL_INTERVAL")
 	bindEnv(v, "anchor.workers", "TRUSTDB_ANCHOR_WORKERS")
 	bindEnv(v, "history.tile_size", "TRUSTDB_HISTORY_TILE_SIZE")
 	bindEnv(v, "history.hot_window_leaves", "TRUSTDB_HISTORY_HOT_WINDOW_LEAVES")
@@ -475,6 +477,12 @@ func configString(cfg trustconfig.Config, key string) string {
 		return cfg.Anchor.Scope
 	case "anchor.max_delay":
 		return cfg.Anchor.MaxDelay
+	case "anchor.poll_interval":
+		return cfg.Anchor.PollInterval
+	case "anchor.sink":
+		return cfg.Anchor.Sink
+	case "anchor.path":
+		return cfg.Anchor.Path
 	case "batch.proof_mode":
 		return cfg.Batch.ProofMode
 	case "proofstore.artifact_sync_mode":
