@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -144,12 +145,12 @@ type recordEvent struct {
 // store serialises config and record mutations through a mutex. Config
 // remains a tiny JSON file; records use a Pebble-backed local index.
 type store struct {
-	mu            sync.Mutex
-	path          string
-	recordsPath   string
-	recordsDBPath string
-	data          configFile
-	records       *localRecordDB
+	mu          sync.Mutex
+	root        *os.Root
+	configName  string
+	recordsName string
+	data        configFile
+	records     *localRecordDB
 }
 
 func defaultSettings() Settings {
@@ -163,20 +164,35 @@ func defaultSettings() Settings {
 }
 
 func newStore(path string) (*store, error) {
-	recordsDBPath := path + ".records.pebble"
-	records, err := openLocalRecordDB(recordsDBPath)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
+	root, err := os.OpenRoot(filepath.Dir(abs))
+	if err != nil {
+		return nil, err
+	}
+	configName, err := cleanRootRelativePath(filepath.Base(abs))
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	recordsDBPath := filepath.Join(root.Name(), configName+".records.pebble")
+	records, err := openLocalRecordDB(recordsDBPath)
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
 	s := &store{
-		path:          path,
-		recordsPath:   path + ".records.jsonl",
-		recordsDBPath: recordsDBPath,
-		data:          configFile{Settings: defaultSettings()},
-		records:       records,
+		root:        root,
+		configName:  configName,
+		recordsName: configName + ".records.jsonl",
+		data:        configFile{Settings: defaultSettings()},
+		records:     records,
 	}
 	if err := s.load(); err != nil {
 		_ = records.close()
+		_ = root.Close()
 		return nil, err
 	}
 	return s, nil
@@ -186,7 +202,7 @@ func (s *store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	loaded := configFile{Settings: defaultSettings()}
-	raw, err := os.ReadFile(s.path)
+	raw, err := s.root.ReadFile(s.configName)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -227,11 +243,11 @@ func (s *store) quarantineCorruptLocked(raw []byte) {
 	if len(raw) == 0 {
 		return
 	}
-	backup := fmt.Sprintf("%s.bad-%s", s.path, time.Now().UTC().Format("20060102T150405.000000000Z"))
-	if err := os.Rename(s.path, backup); err == nil {
+	backup := fmt.Sprintf("%s.bad-%s", s.configName, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := s.root.Rename(s.configName, backup); err == nil {
 		return
 	}
-	_ = os.WriteFile(backup, raw, 0o600)
+	_ = s.root.WriteFile(backup, raw, 0o600)
 }
 
 func (s *store) persistLocked() error {
@@ -241,13 +257,13 @@ func (s *store) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(s.path, raw, 0o600)
+	return writeFileAtomicRoot(s.root, s.configName, raw, 0o600)
 }
 
 func (s *store) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.records.close()
+	return errors.Join(s.records.close(), s.root.Close())
 }
 
 func (s *store) snapshot() configFile {
@@ -385,7 +401,7 @@ func (s *store) migrateLegacyRecordsLocked(configRecords []LocalRecord) error {
 }
 
 func (s *store) loadLegacyRecordLogLocked(records map[string]LocalRecord) error {
-	f, err := os.Open(s.recordsPath)
+	f, err := s.root.Open(s.recordsName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil

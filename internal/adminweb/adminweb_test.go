@@ -355,3 +355,32 @@ func TestSPAFileServerRejectsSiblingPrefixTraversal(t *testing.T) {
 		t.Fatalf("served file outside web root: %q", rec.Body.String())
 	}
 }
+
+func TestSPAFileServerRejectsSymlinkOutsideRoot(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	root := filepath.Join(parent, "web")
+	outside := filepath.Join(parent, "outside-secret.txt")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<!doctype html><title>admin</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("outside-secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "leak.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/leak.txt", nil)
+	rec := httptest.NewRecorder()
+	spaFileServer(root).ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body=%q, want 404", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "outside-secret") {
+		t.Fatalf("served symlink target outside web root: %q", rec.Body.String())
+	}
+}

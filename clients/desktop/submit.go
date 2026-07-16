@@ -252,7 +252,7 @@ func (a *App) ExportProofBundle(recordID, outPath string) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(outPath, raw, 0o644)
+	return a.writeAuthorizedFile(outPath, raw, 0o644)
 }
 
 // ExportGlobalProof writes the batch->STH inclusion proof needed for L4/L5
@@ -278,7 +278,7 @@ func (a *App) ExportGlobalProof(recordID, outPath string) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(outPath, raw, 0o644)
+	return a.writeAuthorizedFile(outPath, raw, 0o644)
 }
 
 // ExportSingleProof writes the recommended .sproof artefact: one CBOR file
@@ -296,7 +296,7 @@ func (a *App) ExportSingleProof(recordID, outPath string) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(outPath, raw, 0o644)
+	return a.writeAuthorizedFile(outPath, raw, 0o644)
 }
 
 func (a *App) buildSingleProof(recordID string) (model.SingleProof, error) {
@@ -417,7 +417,7 @@ func (a *App) ExportAnchorResult(recordID, outPath string) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(outPath, raw, 0o644)
+	return a.writeAuthorizedFile(outPath, raw, 0o644)
 }
 
 // GetProofBundle exposes the latest server-side bundle to the UI

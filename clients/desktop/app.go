@@ -27,14 +27,19 @@ import (
 // method here becomes a TypeScript-callable RPC. We collect them on
 // one struct so state (store, ctx) is shared without globals.
 type App struct {
-	ctx      context.Context
-	storeMu  sync.Mutex
-	store    *store
-	hashJobs *hashJobManager
+	ctx        context.Context
+	storeMu    sync.Mutex
+	store      *store
+	hashJobs   *hashJobManager
+	savePathMu sync.Mutex
+	savePaths  map[string]string
 }
 
 func NewApp() *App {
-	return &App{hashJobs: newHashJobManager()}
+	return &App{
+		hashJobs:  newHashJobManager(),
+		savePaths: make(map[string]string),
+	}
 }
 
 // Version returns a short string the UI puts in the footer so users
@@ -69,12 +74,54 @@ func (a *App) shutdown(ctx context.Context) {
 	a.store = nil
 }
 
-func (a *App) configDir() (string, error) {
+func (a *App) prepareConfigDir() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "TrustDB-Desktop"), nil
+	root, err := openUserConfigRoot(base)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	const appDir = "TrustDB-Desktop"
+	if err := root.MkdirAll(appDir, 0o755); err != nil {
+		return "", err
+	}
+	appRoot, err := root.OpenRoot(appDir)
+	if err != nil {
+		return "", err
+	}
+	defer appRoot.Close()
+	return appRoot.Name(), nil
+}
+
+func openUserConfigRoot(base string) (*os.Root, error) {
+	root, err := os.OpenRoot(base)
+	if err == nil || !os.IsNotExist(err) {
+		return root, err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	homeRoot, err := os.OpenRoot(home)
+	if err != nil {
+		return nil, err
+	}
+	defer homeRoot.Close()
+	rel, err := filepath.Rel(home, base)
+	if err != nil {
+		return nil, err
+	}
+	rel, err = cleanRootRelativePath(rel)
+	if err != nil {
+		return nil, fmt.Errorf("user config directory is outside the user home: %w", err)
+	}
+	if err := homeRoot.MkdirAll(rel, 0o755); err != nil {
+		return nil, err
+	}
+	return homeRoot.OpenRoot(rel)
 }
 
 func (a *App) ensureStore() error {
@@ -83,12 +130,9 @@ func (a *App) ensureStore() error {
 	if a.store != nil {
 		return nil
 	}
-	dir, err := a.configDir()
+	dir, err := a.prepareConfigDir()
 	if err != nil {
 		return fmt.Errorf("resolve config dir: %w", err)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
 	}
 	s, err := newStore(filepath.Join(dir, "config.json"))
 	if err != nil {
@@ -474,10 +518,14 @@ func (a *App) ChooseSavePath(title, defaultFile string) (string, error) {
 	if a.ctx == nil {
 		return "", errors.New("runtime not ready")
 	}
-	return wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
+	selected, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
 		Title:           title,
 		DefaultFilename: defaultFile,
 	})
+	if err != nil || strings.TrimSpace(selected) == "" {
+		return selected, err
+	}
+	return a.rememberSavePath(selected)
 }
 
 func (a *App) ChooseOpenPath(title string) (string, error) {

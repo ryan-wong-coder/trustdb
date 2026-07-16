@@ -27,6 +27,20 @@ func TestStoreLoadMissingConfigUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestOpenUserConfigRootCreatesMissingDirectoryUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	base := filepath.Join(home, ".config", "trustdb-test")
+	root, err := openUserConfigRoot(base)
+	if err != nil {
+		t.Fatalf("openUserConfigRoot() error = %v", err)
+	}
+	defer root.Close()
+	if root.Name() != base {
+		t.Fatalf("root.Name() = %q, want %q", root.Name(), base)
+	}
+}
+
 func TestWriteFileAtomicIgnoresStaleFixedTempPath(t *testing.T) {
 	t.Parallel()
 
@@ -89,6 +103,50 @@ func TestWriteFileAtomicRejectsDirectoryTarget(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomicRejectsSymlinkOutsideParent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.tdproof")
+	if err := os.WriteFile(outside, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "proof.tdproof")
+	if err := os.Symlink(outside, target); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := writeFileAtomic(target, []byte("replaced"), 0o644); err == nil {
+		t.Fatal("writeFileAtomic() error = nil, want symlink escape error")
+	}
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("outside file = %q, want original", got)
+	}
+}
+
+func TestWriteAuthorizedFileRequiresNativeSelection(t *testing.T) {
+	t.Parallel()
+
+	app := NewApp()
+	path := filepath.Join(t.TempDir(), "proof.tdproof")
+	if err := app.writeAuthorizedFile(path, []byte("proof"), 0o644); err == nil {
+		t.Fatal("writeAuthorizedFile() accepted an unselected path")
+	}
+	authorized, err := app.rememberSavePath(path)
+	if err != nil {
+		t.Fatalf("rememberSavePath() error = %v", err)
+	}
+	if err := app.writeAuthorizedFile(authorized, []byte("proof"), 0o644); err != nil {
+		t.Fatalf("writeAuthorizedFile() error = %v", err)
+	}
+	if err := app.writeAuthorizedFile(authorized, []byte("again"), 0o644); err == nil {
+		t.Fatal("writeAuthorizedFile() reused a consumed path authorization")
+	}
+}
+
 func TestStorePersistIgnoresStaleFixedTempPath(t *testing.T) {
 	t.Parallel()
 
@@ -121,6 +179,25 @@ func TestStorePersistIgnoresStaleFixedTempPath(t *testing.T) {
 	}
 	if !staleInfo.IsDir() {
 		t.Fatalf("stale fixed temp path was modified; isDir=false")
+	}
+}
+
+func TestStoreRejectsConfigSymlinkOutsideRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(outside, []byte(`{"settings":{"server_url":"http://outside.invalid"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.Symlink(outside, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	store, err := newStore(path)
+	if err == nil {
+		_ = store.close()
+		t.Fatal("newStore() followed a config symlink outside its root")
 	}
 }
 
