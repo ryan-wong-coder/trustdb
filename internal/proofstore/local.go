@@ -113,27 +113,43 @@ func (s LocalStore) ListRecordIndexes(ctx context.Context, opts model.RecordList
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list record indexes canceled", err)
 	}
 	limit := normaliseRecordLimit(opts.Limit)
-	dir := s.recordByTimeDir()
+	dir := filepath.Join("records", "by-time")
 	switch {
 	case len(opts.ContentHash) > 0:
-		dir = s.recordByContentDir(opts.ContentHash)
+		dir = filepath.Join("records", "by-content", hex.EncodeToString(opts.ContentHash))
 	case model.RecordStorageQueryToken(opts.Query) != "":
-		dir = s.recordByStorageTokenDir(model.RecordStorageQueryToken(opts.Query))
+		dir = filepath.Join("records", "by-storage-token", recordTokenPart(model.RecordStorageQueryToken(opts.Query)))
 	case opts.BatchID != "":
-		dir = s.recordByBatchDir(opts.BatchID)
+		dir = filepath.Join("records", "by-batch", safeFileName(opts.BatchID))
 	case opts.ProofLevel != "":
-		dir = s.recordByProofLevelDir(opts.ProofLevel)
+		dir = filepath.Join("records", "by-proof-level", safeFileName(opts.ProofLevel))
 	case opts.TenantID != "":
-		dir = s.recordByTenantDir(opts.TenantID)
+		dir = filepath.Join("records", "by-tenant", safeFileName(opts.TenantID))
 	case opts.ClientID != "":
-		dir = s.recordByClientDir(opts.ClientID)
+		dir = filepath.Join("records", "by-client", safeFileName(opts.ClientID))
 	}
-	entries, err := os.ReadDir(dir)
+	root, err := os.OpenRoot(s.root())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open proofstore root", err)
+	}
+	defer root.Close()
+	dirFile, err := root.Open(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read record index directory", err)
+	}
+	entries, err := dirFile.ReadDir(-1)
+	closeErr := dirFile.Close()
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read record index directory", err)
+	}
+	if closeErr != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "close record index directory", closeErr)
 	}
 	indexes := make([]model.RecordIndex, 0, len(entries))
 	for _, entry := range entries {
@@ -143,7 +159,7 @@ func (s LocalStore) ListRecordIndexes(ctx context.Context, opts model.RecordList
 		if err := ctx.Err(); err != nil {
 			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list record indexes canceled", err)
 		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		data, err := root.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "read record index", err)
 		}

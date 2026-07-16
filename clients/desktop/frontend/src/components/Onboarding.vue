@@ -129,9 +129,10 @@ const registerCmd = computed(() => {
 })
 
 function shellQuote(s: string): string {
-  // Keep things readable for the 99% case but still correct for the
-  // occasional user who types a space into their tenant name.
-  return /^[A-Za-z0-9._/\-]+$/.test(s) ? s : `"${s.replace(/"/g, '\\"')}"`
+  // POSIX single quotes make backslashes, substitutions, and newlines
+  // literal. Embedded single quotes are represented by ending the quote,
+  // emitting one quoted single quote, and starting it again.
+  return /^[A-Za-z0-9._/\-]+$/.test(s) ? s : `'${s.replaceAll("'", `'"'"'`)}'`
 }
 
 async function copyCmd() {

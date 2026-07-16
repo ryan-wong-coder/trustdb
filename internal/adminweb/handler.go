@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -409,34 +410,58 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
-	if clean == "." {
-		clean = ""
-	}
-	full := filepath.Join(h.root, filepath.FromSlash(clean))
-	if !pathWithinRoot(h.root, full) {
+	name, ok := spaRelativePath(r.URL.Path)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	if st, err := os.Stat(full); err == nil && !st.IsDir() {
-		http.ServeFile(w, r, full)
+	root, err := os.OpenRoot(h.root)
+	if err != nil {
+		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
+	defer root.Close()
+	if name != "" {
+		served, exists := serveRootFile(w, r, root, name)
+		if served {
+			return
+		}
+		if exists {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	if served, _ := serveRootFile(w, r, root, "index.html"); served {
+		return
+	}
+	http.NotFound(w, r)
 }
 
-func pathWithinRoot(root, path string) bool {
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return false
+func spaRelativePath(urlPath string) (string, bool) {
+	if strings.Contains(urlPath, `\`) {
+		return "", false
 	}
-	pathAbs, err := filepath.Abs(path)
-	if err != nil {
-		return false
+	clean := path.Clean(strings.TrimPrefix(urlPath, "/"))
+	if clean == "." {
+		return "", true
 	}
-	rel, err := filepath.Rel(rootAbs, pathAbs)
-	if err != nil {
-		return false
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+	return filepath.FromSlash(clean), true
+}
+
+func serveRootFile(w http.ResponseWriter, r *http.Request, root *os.Root, name string) (served, exists bool) {
+	f, err := root.Open(name)
+	if err != nil {
+		_, statErr := root.Lstat(name)
+		return false, statErr == nil
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.IsDir() {
+		return false, true
+	}
+	http.ServeContent(w, r, filepath.Base(name), st.ModTime(), f)
+	return true, true
 }

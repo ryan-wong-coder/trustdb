@@ -113,6 +113,37 @@ func TestLocalStoreBundleReadsLegacyEscapedPath(t *testing.T) {
 	}
 }
 
+func TestLocalStoreListRecordIndexesRejectsSymlinkOutsideRoot(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	outside := t.TempDir()
+	idx := model.RecordIndex{
+		SchemaVersion:   model.SchemaRecordIndex,
+		RecordID:        "outside-record",
+		TenantID:        "tenant-a",
+		ReceivedAtUnixN: 1,
+	}
+	if err := writeCBORAtomic(filepath.Join(outside, "outside.tdrecord"), idx); err != nil {
+		t.Fatalf("write outside record: %v", err)
+	}
+	linkDir := filepath.Join(store.Root, "records", "by-tenant", "tenant-a")
+	if err := os.MkdirAll(filepath.Dir(linkDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, linkDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	indexes, err := store.ListRecordIndexes(context.Background(), model.RecordListOptions{TenantID: "tenant-a"})
+	if err == nil {
+		t.Fatalf("ListRecordIndexes() indexes=%+v error=nil, want symlink escape error", indexes)
+	}
+	if len(indexes) != 0 {
+		t.Fatalf("ListRecordIndexes() returned outside indexes: %+v", indexes)
+	}
+}
+
 func TestSafeFileNameAvoidsLegacyCollisions(t *testing.T) {
 	t.Parallel()
 
