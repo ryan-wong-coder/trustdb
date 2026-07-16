@@ -162,8 +162,13 @@ Configuration examples live in [configs](configs):
 | --- | --- |
 | `configs/development.yaml` | Local development and demos. Uses file proofstore and `noop` anchoring. |
 | `configs/production.yaml` | Single-node production baseline with Pebble proofstore, directory WAL, group fsync, global log, and OTS anchoring. |
+| `configs/benchmark-extreme.yaml` | Maximum L2 accepted-receipt throughput with on-demand proofs; not for production. |
+| `configs/benchmark-burst.yaml` | Short burst absorption with large batches and queues. |
 | `configs/benchmark-l3-throughput.yaml` | High-write asynchronous L3 throughput and drain tests. |
+| `configs/benchmark-proof-ready.yaml` | Prioritizes L3 materialization and lower proof backlog. |
+| `configs/benchmark-balanced.yaml` | Group fsync, reduced index amplification, and L4 proofs. |
 | `configs/benchmark-production-safe.yaml` | Durable L4/L5 end-to-end performance tests. |
+| `configs/benchmark-production-guaranteed.yaml` | Strict fsync, full indexes, and L4/L5 performance floor. |
 | `configs/benchmark-large-payload.yaml` | 16 KiB and 64 KiB payload pressure tests. |
 | `configs/benchmark.yaml` | Benchmark profile with throughput-oriented settings. Not a production audit profile. |
 
@@ -182,7 +187,9 @@ The desktop client (`clients/desktop`) is a Wails + Vue application for local id
 - [CONTRIBUTING.md](CONTRIBUTING.md): issue, PR, commit, validation, and review standards.
 - [formats/SPROOF_V1.md](formats/SPROOF_V1.md): stable `.sproof` v1 exchange format.
 - [formats/DISTRIBUTED_ARCHITECTURE.md](formats/DISTRIBUTED_ARCHITECTURE.md): distributed/storage-compute separation notes.
-- [docs/performance/trustdb-performance-report-2026-04-30.en.md](docs/performance/trustdb-performance-report-2026-04-30.en.md): performance report.
+- [docs/performance/trustdb-performance-report-2026-07-16.zh-CN.md](docs/performance/trustdb-performance-report-2026-07-16.zh-CN.md): latest comprehensive dual-host performance report (Chinese).
+- [docs/performance/trustdb-performance-optimization-2026-07.zh-CN.md](docs/performance/trustdb-performance-optimization-2026-07.zh-CN.md): performance implementation notes (Chinese).
+- [docs/performance/trustdb-performance-report-2026-04-30.en.md](docs/performance/trustdb-performance-report-2026-04-30.en.md): previous performance-first baseline.
 
 ## Development Checks
 

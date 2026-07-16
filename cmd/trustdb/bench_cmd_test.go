@@ -402,6 +402,22 @@ func TestBenchNonce(t *testing.T) {
 	}
 }
 
+func TestBenchMetricWantedIncludesPipelineMetrics(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"trustdb_materializer_in_flight",
+		"trustdb_materialized_records_total",
+		"trustdb_batch_tree_tiles_count",
+		"trustdb_global_log_batch_latency_seconds_sum",
+		"trustdb_anchor_in_flight",
+	} {
+		if !benchMetricWanted(name) {
+			t.Fatalf("benchMetricWanted(%q) = false", name)
+		}
+	}
+}
+
 func TestBenchClientUsesSuppliedPrivateKey(t *testing.T) {
 	t.Parallel()
 

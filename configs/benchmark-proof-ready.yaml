@@ -1,18 +1,18 @@
-# Large-claim profile for 16 KiB and 64 KiB benchmark matrices.
+# Prioritizes complete L3 proof availability over peak accepted-receipt TPS.
 run_profile: benchmark
 
 paths:
-  data_dir: ".trustdb-bench-large"
-  wal: ".trustdb-bench-large/wal"
-  object_dir: ".trustdb-bench-large/objects"
-  proof_dir: ".trustdb-bench-large/proofs"
+  data_dir: ".trustdb-bench-proof-ready"
+  wal: ".trustdb-bench-proof-ready/wal"
+  object_dir: ".trustdb-bench-proof-ready/objects"
+  proof_dir: ".trustdb-bench-proof-ready/proofs"
 
 metastore: "pebble"
-metastore_path: ".trustdb-bench-large/pebble"
+metastore_path: ".trustdb-bench-proof-ready/pebble"
 
 server:
-  queue_size: 65536
-  workers: 16
+  queue_size: 32768
+  workers: 8
   read_timeout: "30s"
   read_header_timeout: "5s"
   write_timeout: "120s"
@@ -25,14 +25,15 @@ proofstore:
 
 wal:
   fsync_mode: "batch"
+  group_commit_interval: "50ms"
 
 batch:
-  queue_size: 65536
-  max_records: 4096
+  queue_size: 131072
+  max_records: 8192
   max_delay: "200ms"
   proof_mode: "async"
-  materializer_workers: 4
-  materializer_queue_size: 8
+  materializer_workers: 8
+  materializer_queue_size: 16
   materializer_poll_interval: "250ms"
   proof_workers: 0
 

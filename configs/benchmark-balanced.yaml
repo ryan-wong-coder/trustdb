@@ -1,0 +1,54 @@
+# Balances durable accepted receipts, reduced index amplification, and L4 proofs.
+run_profile: benchmark
+
+paths:
+  data_dir: ".trustdb-bench-balanced"
+  wal: ".trustdb-bench-balanced/wal"
+  object_dir: ".trustdb-bench-balanced/objects"
+  proof_dir: ".trustdb-bench-balanced/proofs"
+
+metastore: "pebble"
+metastore_path: ".trustdb-bench-balanced/pebble"
+
+server:
+  queue_size: 32768
+  workers: 8
+  read_timeout: "30s"
+  read_header_timeout: "5s"
+  write_timeout: "120s"
+  idle_timeout: "120s"
+  shutdown_timeout: "30s"
+
+proofstore:
+  record_index_mode: "no_storage_tokens"
+  artifact_sync_mode: "batch"
+
+wal:
+  fsync_mode: "group"
+  group_commit_interval: "10ms"
+
+batch:
+  queue_size: 131072
+  max_records: 8192
+  max_delay: "200ms"
+  proof_mode: "async"
+  materializer_workers: 3
+  materializer_queue_size: 6
+  materializer_poll_interval: "250ms"
+  proof_workers: 0
+
+global_log:
+  enabled: true
+  log_id: "trustdb-bench-balanced"
+
+anchor:
+  scope: "global"
+  max_delay: "5m"
+  poll_interval: "250ms"
+  workers: 4
+  sink: "off"
+
+log:
+  level: "warn"
+  format: "json"
+  output: "stderr"

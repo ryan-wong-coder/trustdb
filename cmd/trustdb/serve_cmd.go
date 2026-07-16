@@ -46,7 +46,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	var proofstoreTiKVPDText, proofstoreTiKVKeyspace, proofstoreTiKVNamespace string
 	var batchProofMode, proofstoreArtifactSyncMode, proofstoreRecordIndexMode string
 	var proofstoreIndexStorageTokens bool
-	var anchorSinkKind, anchorPath string
+	var anchorSinkKind, anchorPath, anchorPollIntervalText string
 	var anchorWorkers int
 	var anchorOtsCalendars []string
 	var anchorOtsMinAccepted int
@@ -105,6 +105,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			} else {
 				anchorWorkers = rt.cfg.Anchor.Workers
 			}
+			anchorPollIntervalText = stringOrLiteral(cmd, "anchor-poll-interval", anchorPollIntervalText, rt.cfg.Anchor.PollInterval)
 			// OTS upgrader: default enabled (true) so flipping
 			// --anchor-sink=ots gives operators automatic
 			// pending→attested progression without a second flag.
@@ -207,6 +208,10 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				return err
 			}
 			batchMaterializerPollInterval, err := parsePositiveDurationFlag("batch-materializer-poll-interval", batchMaterializerPollText)
+			if err != nil {
+				return err
+			}
+			anchorPollInterval, err := parsePositiveDurationFlag("anchor-poll-interval", anchorPollIntervalText)
 			if err != nil {
 				return err
 			}
@@ -424,7 +429,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if !globalLogEnabled {
 				anchorSinkKind = "off"
 			}
-			anchorSvc, anchorAPI, anchorShutdown, err := buildAnchorService(rt, proofStore, metrics, anchorSinkKind, anchorPath, proofDir, anchorWorkers, otsSinkParams{
+			anchorSvc, anchorAPI, anchorShutdown, err := buildAnchorService(rt, proofStore, metrics, anchorSinkKind, anchorPath, proofDir, anchorWorkers, anchorPollInterval, otsSinkParams{
 				Calendars:   anchorOtsCalendars,
 				MinAccepted: anchorOtsMinAccepted,
 				TimeoutText: anchorOtsTimeoutText,
@@ -447,12 +452,18 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 					return trusterr.Wrap(trusterr.CodeInternal, "build global log service", err)
 				}
 				globalOutbox = globallog.NewOutboxWorker(globallog.OutboxConfig{
-					Store:   proofStore,
-					Global:  globalSvc,
-					Metrics: metrics,
-					OnSTH: func(ctx context.Context, sth model.SignedTreeHead) {
+					Store:        proofStore,
+					Global:       globalSvc,
+					Metrics:      metrics,
+					AnchorOutbox: anchorSvc != nil,
+					OnAnchorsReady: func() {
 						if anchorSvc != nil {
-							enqueueSTHAnchor(ctx, rt, proofStore, anchorSvc, sth)
+							anchorSvc.Trigger()
+						}
+					},
+					OnSTHs: func(ctx context.Context, sths []model.SignedTreeHead) {
+						if anchorSvc != nil {
+							enqueueSTHAnchors(ctx, rt, proofStore, anchorSvc, sths)
 						}
 					},
 					Logger: rt.logger,
@@ -640,6 +651,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().StringVar(&anchorSinkKind, "anchor-sink", "", "external anchor sink: off (default; no L5 proofs), file, noop, or ots (OpenTimestamps)")
 	cmd.Flags().StringVar(&anchorPath, "anchor-path", "", "file anchor sink output path (JSONL). Defaults to <proof-dir>/anchors.jsonl when --anchor-sink=file and this flag is empty")
 	cmd.Flags().IntVar(&anchorWorkers, "anchor-workers", 0, "bounded concurrent anchor publish worker count")
+	cmd.Flags().StringVar(&anchorPollIntervalText, "anchor-poll-interval", "", "interval for recovering durable pending anchor jobs")
 	cmd.Flags().StringSliceVar(&anchorOtsCalendars, "anchor-ots-calendars", nil, "comma-separated OpenTimestamps calendar URLs. When empty a built-in public pool is used (only honored when --anchor-sink=ots)")
 	cmd.Flags().IntVar(&anchorOtsMinAccepted, "anchor-ots-min-accepted", 0, "minimum number of OTS calendars that must accept a submission for success (0 = require majority)")
 	cmd.Flags().StringVar(&anchorOtsTimeoutText, "anchor-ots-timeout", "", "per-calendar request timeout for the OpenTimestamps sink (default 20s)")
@@ -701,7 +713,7 @@ type otsSinkParams struct {
 // shutdown closure is always non-nil so `defer anchorShutdown()` is
 // safe even when anchoring is off. Legal sink kinds: "" / "off" (L5
 // disabled), "file", "noop".
-func buildAnchorService(rt *runtimeConfig, store proofstore.Store, metrics *observability.Metrics, sinkKind, anchorPath, proofDir string, workers int, ots otsSinkParams) (*anchor.Service, httpapi.AnchorService, func(), error) {
+func buildAnchorService(rt *runtimeConfig, store proofstore.Store, metrics *observability.Metrics, sinkKind, anchorPath, proofDir string, workers int, pollInterval time.Duration, ots otsSinkParams) (*anchor.Service, httpapi.AnchorService, func(), error) {
 	kind := strings.ToLower(strings.TrimSpace(sinkKind))
 	switch kind {
 	case "", "off", "disabled", "none":
@@ -740,11 +752,12 @@ func buildAnchorService(rt *runtimeConfig, store proofstore.Store, metrics *obse
 		return nil, nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown anchor sink: "+sinkKind)
 	}
 	svc, err := anchor.NewService(anchor.Config{
-		Sink:    sink,
-		Store:   store,
-		Metrics: metrics,
-		Logger:  rt.logger,
-		Workers: workers,
+		Sink:         sink,
+		Store:        store,
+		Metrics:      metrics,
+		Logger:       rt.logger,
+		Workers:      workers,
+		PollInterval: pollInterval,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -897,6 +910,32 @@ func enqueueSTHAnchor(ctx context.Context, rt *runtimeConfig, store proofstore.S
 		return
 	}
 	svc.Trigger()
+}
+
+func enqueueSTHAnchors(ctx context.Context, rt *runtimeConfig, store proofstore.Store, svc *anchor.Service, sths []model.SignedTreeHead) {
+	if len(sths) == 0 {
+		return
+	}
+	items := make([]model.STHAnchorOutboxItem, len(sths))
+	for i := range sths {
+		items[i] = model.STHAnchorOutboxItem{
+			SchemaVersion: model.SchemaSTHAnchorOutbox,
+			TreeSize:      sths[i].TreeSize,
+			Status:        model.AnchorStatePending,
+			STH:           sths[i],
+		}
+	}
+	if batcher, ok := store.(proofstore.STHAnchorBatchEnqueuer); ok {
+		if err := batcher.EnqueueSTHAnchors(ctx, items); err != nil {
+			rt.logger.Warn().Err(err).Int("count", len(items)).Msg("sth anchor batch enqueue failed")
+			return
+		}
+		svc.Trigger()
+		return
+	}
+	for i := range sths {
+		enqueueSTHAnchor(ctx, rt, store, svc, sths[i])
+	}
 }
 
 func backfillGlobalLogOutbox(ctx context.Context, store proofstore.Store) (int, error) {

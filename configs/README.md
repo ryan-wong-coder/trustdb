@@ -2,14 +2,21 @@
 
 Shipped YAML files are **starting points** only: adjust paths, keys, `server.listen`, anchor calendars, and TiKV endpoints for your environment.
 
+`anchor.poll_interval` controls the durable anchor outbox recovery scan. Triggered work normally starts immediately; the poll remains the crash/race recovery path. Benchmark profiles use `250ms`, while the default remains `2s` to limit idle store reads.
+
 | File | `run_profile` | Purpose |
 | --- | --- | --- |
 | `development.yaml` | `development` | Local demos: file proofstore, `noop` anchor, debug-friendly logging. |
 | `production.yaml` | `single_node_production` | Single-node baseline: Pebble (or TiKV) proofstore, OTS anchor, JSON logs. |
 | `benchmark.yaml` | `benchmark` | Throughput experiments: Pebble, `wal.fsync_mode: batch`, async batch proofs, `noop` anchor. |
-| `benchmark-l3-throughput.yaml` | `benchmark` | Reproduces the high-write L2/L3 profile from the April performance report. |
-| `benchmark-production-safe.yaml` | `benchmark` | Group-fsync, full-index, L4 and OTS L5 performance validation. |
-| `benchmark-large-payload.yaml` | `benchmark` | Dedicated 16 KiB/64 KiB claim and artifact pressure tests. |
+| `benchmark-extreme.yaml` | `benchmark` | Absolute L2 ceiling with on-demand proofs and intentionally unsafe durability. |
+| `benchmark-burst.yaml` | `benchmark` | Maximum short-lived L2 burst absorption; 32 ingest workers, large queue, L4/L5 disabled. |
+| `benchmark-l3-throughput.yaml` | `benchmark` | Sustained high-write L2/L3 balance; 16 ingest workers and four materializers. |
+| `benchmark-proof-ready.yaml` | `benchmark` | Gives more CPU and queue slots to L3 materialization at the expense of peak Submit TPS. |
+| `benchmark-balanced.yaml` | `benchmark` | Group-fsync WAL, reduced secondary indexes, batched artifacts, and L4 enabled. |
+| `benchmark-production-safe.yaml` | `benchmark` | Full indexes, chunk-sync artifacts, group-fsync WAL, L4 and OTS-ready L5. |
+| `benchmark-production-guaranteed.yaml` | `benchmark` | Strict per-record WAL fsync plus full indexes, chunk-sync artifacts, L4 and OTS. |
+| `benchmark-large-payload.yaml` | `benchmark` | Dedicated 16 KiB and 64 KiB payload profile. |
 
 `benchmark*.yaml` files use separate data directories. Do not point them at an
 existing proofstore: the Pebble proofstore now requires storage schema v2 and

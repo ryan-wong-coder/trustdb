@@ -72,6 +72,7 @@ global_log:
 anchor:
   scope: "global"
   max_delay: "5m"
+  poll_interval: "2s"
   workers: 4
 
 history:
@@ -197,9 +198,12 @@ type GlobalLog struct {
 }
 
 type Anchor struct {
-	Scope    string `mapstructure:"scope" json:"scope"`
-	MaxDelay string `mapstructure:"max_delay" json:"max_delay"`
-	Workers  int    `mapstructure:"workers" json:"workers"`
+	Scope        string `mapstructure:"scope" json:"scope"`
+	MaxDelay     string `mapstructure:"max_delay" json:"max_delay"`
+	PollInterval string `mapstructure:"poll_interval" json:"poll_interval"`
+	Workers      int    `mapstructure:"workers" json:"workers"`
+	Sink         string `mapstructure:"sink" json:"sink"`
+	Path         string `mapstructure:"path" json:"path"`
 }
 
 type History struct {
@@ -293,9 +297,12 @@ func Default() Config {
 			LogID:   "trustdb-global-log",
 		},
 		Anchor: Anchor{
-			Scope:    "global",
-			MaxDelay: "5m",
-			Workers:  4,
+			Scope:        "global",
+			MaxDelay:     "5m",
+			PollInterval: "2s",
+			Workers:      4,
+			Sink:         "",
+			Path:         "",
 		},
 		History: History{
 			TileSize:        256,
@@ -433,6 +440,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("anchor.scope must be global")
 	}
 	if err := validatePositiveDuration("anchor.max_delay", c.Anchor.MaxDelay); err != nil {
+		return err
+	}
+	if err := validatePositiveDuration("anchor.poll_interval", c.Anchor.PollInterval); err != nil {
 		return err
 	}
 	if c.Anchor.Workers <= 0 {

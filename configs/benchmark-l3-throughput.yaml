@@ -10,6 +10,15 @@ paths:
 metastore: "pebble"
 metastore_path: ".trustdb-bench-l3/pebble"
 
+server:
+  queue_size: 65536
+  workers: 16
+  read_timeout: "30s"
+  read_header_timeout: "5s"
+  write_timeout: "120s"
+  idle_timeout: "120s"
+  shutdown_timeout: "30s"
+
 proofstore:
   record_index_mode: "time_only"
   artifact_sync_mode: "batch"
@@ -19,12 +28,12 @@ wal:
   group_commit_interval: "50ms"
 
 batch:
-  queue_size: 1048576
+  queue_size: 262144
   max_records: 8192
-  max_delay: "50ms"
+  max_delay: "200ms"
   proof_mode: "async"
-  materializer_workers: 2
-  materializer_queue_size: 4
+  materializer_workers: 4
+  materializer_queue_size: 8
   materializer_poll_interval: "250ms"
   proof_workers: 0
 
@@ -34,6 +43,7 @@ global_log:
 anchor:
   scope: "global"
   max_delay: "5m"
+  poll_interval: "250ms"
   workers: 4
   sink: "off"
 

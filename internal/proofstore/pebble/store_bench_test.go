@@ -32,8 +32,16 @@ func BenchmarkPebbleArtifactSyncModeBatch1024(b *testing.B) {
 	benchmarkPebblePutBatchArtifacts(b, 1024, Options{RecordIndexMode: RecordIndexModeFull, ArtifactSyncMode: ArtifactSyncModeBatch})
 }
 
+func BenchmarkPebbleArtifactSyncModeBatch8192(b *testing.B) {
+	benchmarkPebblePutBatchArtifacts(b, 8192, Options{RecordIndexMode: RecordIndexModeFull, ArtifactSyncMode: ArtifactSyncModeBatch})
+}
+
 func BenchmarkRecordIndexModeTimeOnly1024(b *testing.B) {
 	benchmarkPebblePutBatchArtifacts(b, 1024, Options{RecordIndexMode: RecordIndexModeTimeOnly})
+}
+
+func BenchmarkRecordIndexModeTimeOnly8192(b *testing.B) {
+	benchmarkPebblePutBatchArtifacts(b, 8192, Options{RecordIndexMode: RecordIndexModeTimeOnly})
 }
 
 func benchmarkPebblePutBatchArtifacts(b *testing.B, n int, opts Options) {
