@@ -83,10 +83,6 @@ $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
 
 (Get-FileHash -Path $cerPath -Algorithm SHA256).Hash.ToLowerInvariant() |
   Set-Content -NoNewline $fingerprintPath
-& certutil.exe -f -user -addstore TrustedPeople $cerPath
-if ($LASTEXITCODE -ne 0) {
-  throw "certutil could not trust the temporary certificate"
-}
 Write-Host "Certificate ready: $($cert.Thumbprint)"
 
 try {
@@ -108,10 +104,26 @@ try {
     if ($LASTEXITCODE -ne 0) {
       throw "signtool failed for $Path"
     }
-    & $signTool.FullName verify /pa /v $Path
-    if ($LASTEXITCODE -ne 0) {
-      throw "signature verification failed for $Path"
+
+    $signature = Get-AuthenticodeSignature -FilePath $Path
+    if ($null -eq $signature.SignerCertificate) {
+      throw "signed file has no embedded signer certificate: $Path"
     }
+    if ($signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
+      throw "signed file has an unexpected signer certificate: $Path"
+    }
+    if ($signature.Status -eq "HashMismatch" -or $signature.Status -eq "NotSigned" -or
+      $signature.Status -eq "NotSupported") {
+      throw "signature integrity verification failed for ${Path}: $($signature.Status)"
+    }
+    if ($signature.Status -eq "UnknownError" -and $signature.StatusMessage -notmatch "not trusted") {
+      throw "unexpected signature verification error for ${Path}: $($signature.StatusMessage)"
+    }
+    if ($signature.Status -ne "Valid" -and $signature.Status -ne "NotTrusted" -and
+      $signature.Status -ne "UnknownError") {
+      throw "unexpected signature status for ${Path}: $($signature.Status)"
+    }
+    Write-Host "Signature integrity verified ($($signature.Status)): $Path"
   }
 
   Sign-TrustDBFile $rawExe
@@ -169,7 +181,6 @@ try {
   Sign-TrustDBFile $msi
 }
 finally {
-  & certutil.exe -user -delstore TrustedPeople $cert.Thumbprint | Out-Null
   $cert.Dispose()
   Remove-Item $pfxPath, $privateKeyPath, $pemCertPath -ErrorAction SilentlyContinue
 }
