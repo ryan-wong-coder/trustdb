@@ -131,6 +131,10 @@ button { font: inherit; }
 .page-hero__lead { max-width: 780px; margin: 54px 0 0; color: #b8c0b6; font-size: clamp(17px, 1.55vw, 23px); line-height: 1.65; letter-spacing: -.02em; }
 .page-hero__meta { margin: 24px 0 0; color: #626b61; font: 10px/1.5 monospace; letter-spacing: .04em; }
 .page-hero__actions { display: flex; gap: 16px; margin-top: 38px; }
+.performance-proofline { width: min(760px, 100%); margin-top: 64px; display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+.performance-proofline > div { min-height: 92px; padding: 21px 22px; display: flex; flex-direction: column; justify-content: space-between; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.performance-proofline strong { font-size: 20px; letter-spacing: -.035em; }
+.performance-proofline span { color: #6f786d; font: 10px/1 monospace; }
 .inline-link { display: inline-flex; align-items: center; gap: 10px; color: var(--acid); font-size: 12px; font-weight: 700; }
 .inline-link svg { width: 14px; height: 14px; transition: transform .25s ease; }
 .inline-link:hover svg { transform: translate(3px, -3px); }
@@ -466,6 +470,8 @@ button { font: inherit; }
   .page-hero h1 small { display: block; margin: 20px 0 0; }
   .page-hero__lead { margin-top: 38px; font-size: 16px; }
   .page-hero__actions { flex-direction: column; max-width: 360px; }
+  .performance-proofline { margin-top: 45px; grid-template-columns: 1fr; }
+  .performance-proofline > div { min-height: 72px; }
   .why-trustdb { padding: 90px 0; }
   .why-trustdb__layout, .ecosystem__heading, .docs-persuasion > .docs-persuasion__layout, .perf-report__heading, .pipeline-report__layout { grid-template-columns: 1fr; gap: 55px; }
   .why-trustdb__copy p:first-child { font-size: 16px; }
