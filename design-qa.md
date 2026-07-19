@@ -16,7 +16,7 @@
 - source visual truth path: `/Users/liuzewen/Documents/trustdb/design/prototypes/generated/trustdb-web-admin-ui-v1.png`
 - implementation screenshot path: `/Users/liuzewen/Documents/trustdb/design/qa/admin-implementation-final.png`
 - viewport: `1536 × 1080`
-- state: dark theme, dashboard route, demo mode, one anomalous batch selected, service online
+- state: dark theme, dashboard route, explicit demo fixture, three pending anchor batches, service online
 - full-view comparison evidence: `/Users/liuzewen/Documents/trustdb/design/qa/admin-comparison-final.png`
 - focused region comparison evidence: `/Users/liuzewen/Documents/trustdb/design/qa/admin-comparison-pipeline-focus.png`
 
@@ -25,11 +25,12 @@
 - source visual truth path: `/Users/liuzewen/Documents/trustdb/design/prototypes/generated/trustdb-official-website-ui-v2.png`
 - implementation screenshot paths:
   - `/Users/liuzewen/Documents/trustdb/design/qa/website-implementation-hero-final.png`
+  - `/Users/liuzewen/Documents/trustdb/design/qa/website-implementation-final.png`
   - `/Users/liuzewen/Documents/trustdb/design/qa/website-implementation-proof-final.png`
   - `/Users/liuzewen/Documents/trustdb/design/qa/website-implementation-journey-final.png`
   - `/Users/liuzewen/Documents/trustdb/design/qa/website-implementation-quick-final.png`
   - `/Users/liuzewen/Documents/trustdb/design/qa/website-implementation-mobile.png`
-- viewport: desktop `1440 × 1000`; mobile `390 × 844`
+- viewport: desktop hero `1536 × 1080`, supporting sections `1440 × 1000`; mobile `390 × 844`
 - state: desktop top, proof, journey and quick-start scroll states; mobile top state
 - full-view comparison evidence: `/Users/liuzewen/Documents/trustdb/design/qa/website-comparison-final.png`
 - focused region comparison evidence: `/Users/liuzewen/Documents/trustdb/design/qa/website-hero-comparison-final.png`
@@ -57,21 +58,21 @@ No actionable P0, P1 or P2 differences remain.
 - Spacing and layout rhythm: desktop sidebar, 290 px inspector, five-level rail, five-row table and health strip align to the reference. Admin 390 px anomaly panel, 618 px overview row and approximately 990 px lower-table split align to the source.
 - Colors and tokens: black/acid-green palette, green completion state, orange anomaly state, muted gray hierarchy and hairline borders are consistent across all three surfaces.
 - Image quality and asset fidelity: website hero, evidence field and terminal background are full-resolution ImageGen assets with slot-correct crops. Icons use Lucide or Phosphor rather than handcrafted SVG substitutes. Dynamic signal lines and particles are deliberately code-rendered because they animate.
-- Copy and content: product-specific Chinese and English copy is coherent; GitHub targets the real repository; demo data uses realistic proof IDs, timestamps and proof stages.
+- Copy and content: product-specific Chinese and English copy is coherent; GitHub targets the real repository; production dashboards use API/store data, while realistic proof fixtures are gated behind explicit `VITE_TRUSTDB_DEMO=1` review mode.
 - Responsiveness: website checked at `390 × 844` with `scrollWidth === 390`; client and admin have explicit intermediate breakpoints that reduce/hide inspectors before content collision; persistent controls stay reachable.
 - Accessibility: semantic links/buttons, labeled navigation, image alt text, focus-visible styling, copy-state label, reduced-motion handling and non-color state text are present.
 
 ## Primary interactions tested
 
 - Desktop client: selected `合同条款.pdf`; right inspector updated to the selected file and L5 completed status. Sidebar `验证证据` route reached `#/verify` and returned to dashboard.
-- Web admin: `记录` navigation reached `/admin/records`; `检查异常` executed and retained the healthy dashboard state.
+- Web admin: `刷新数据` executed, advanced the last-updated time and retained the healthy dashboard state; the data APIs also have unit coverage for full and partial responses.
 - Website: `文档` anchor reached `#quick-start`; terminal copy button changed from `复制命令` to `命令已复制`; GitHub link resolves to `https://github.com/ryan-wong-coder/trustdb`.
 
 ## Console errors checked
 
-- Website: no new runtime or Vite errors after final load and interactions.
+- Website: no new runtime or Vite errors after final load, anchor navigation and copy interaction.
 - Desktop client: browser-only Wails bridge rejection removed by `Promise.allSettled`; demo mode skips first-run onboarding and reports system online; no new runtime errors after final load.
-- Web admin: demo mode bypasses unavailable localhost proxy calls; no new proxy or runtime errors after the final reload and interaction pass.
+- Web admin: explicit demo mode bypasses unavailable localhost proxy calls; no new proxy or runtime errors after the final reload and refresh pass.
 
 ## Comparison history
 
@@ -109,6 +110,12 @@ No actionable P0, P1 or P2 differences remain.
 - `/Users/liuzewen/Documents/trustdb/design/qa/admin-comparison-pipeline-focus.png`
 - `/Users/liuzewen/Documents/trustdb/design/qa/website-comparison-final.png`
 - `/Users/liuzewen/Documents/trustdb/design/qa/website-hero-comparison-final.png`
+
+### Production-data audit
+
+- Desktop demo records are no longer a silent production fallback; device identity, records, service health and metrics come from the existing Wails/store APIs unless explicit review mode is enabled.
+- Admin pipeline, batches, proof distribution and attention states come from metrics and records APIs; partial failures surface honestly instead of fabricating a healthy or failed state.
+- Final `1536 × 1080` browser captures and same-input comparison boards were regenerated after the data wiring pass.
 
 ## Implementation checklist
 
