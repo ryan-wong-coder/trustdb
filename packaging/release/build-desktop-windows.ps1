@@ -46,72 +46,46 @@ Copy-Item $builtExe $rawExe
 
 $passwordText = [Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N")
 $pfxPath = Join-Path $certDir "signing.pfx"
+$privateKeyPath = Join-Path $certDir "signing-key.pem"
+$pemCertPath = Join-Path $certDir "signing-cert.pem"
 $cerPath = Join-Path $outputDir "$package.cer"
 $fingerprintPath = Join-Path $outputDir "$package-certificate.txt"
 
 Write-Host "Creating an isolated self-signed code-signing certificate"
-$rsa = [System.Security.Cryptography.RSA]::Create(3072)
-$generatedCert = $null
-$cert = $null
-try {
-  $subject = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
-    "CN=TrustDB Community Self-Signed $env:VERSION, O=TrustDB Community"
-  )
-  $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-    $subject,
-    $rsa,
-    [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-    [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
-  )
-  $ekuOids = [System.Security.Cryptography.OidCollection]::new()
-  [void]$ekuOids.Add([System.Security.Cryptography.Oid]::new("1.3.6.1.5.5.7.3.3"))
-  $request.CertificateExtensions.Add(
-    [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($ekuOids, $false)
-  )
-  $request.CertificateExtensions.Add(
-    [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
-      [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature,
-      $true
-    )
-  )
-  $request.CertificateExtensions.Add(
-    [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true)
-  )
+$openssl = Get-Command openssl.exe -ErrorAction Stop
+& $openssl.Source req -x509 -newkey rsa:3072 -sha256 -days 397 -nodes `
+  -keyout $privateKeyPath `
+  -out $pemCertPath `
+  -subj "/CN=TrustDB Community Self-Signed $env:VERSION/O=TrustDB Community" `
+  -addext "basicConstraints=critical,CA:FALSE" `
+  -addext "keyUsage=critical,digitalSignature" `
+  -addext "extendedKeyUsage=codeSigning"
+if ($LASTEXITCODE -ne 0) {
+  throw "OpenSSL certificate generation failed"
+}
+& $openssl.Source pkcs12 -export `
+  -out $pfxPath `
+  -inkey $privateKeyPath `
+  -in $pemCertPath `
+  -name "TrustDB Community Self-Signed $env:VERSION" `
+  -passout "pass:$passwordText"
+if ($LASTEXITCODE -ne 0) {
+  throw "OpenSSL PKCS#12 export failed"
+}
+& $openssl.Source x509 -in $pemCertPath -outform DER -out $cerPath
+if ($LASTEXITCODE -ne 0) {
+  throw "OpenSSL DER certificate export failed"
+}
 
-  $generatedCert = $request.CreateSelfSigned((Get-Date).AddMinutes(-5), (Get-Date).AddDays(397))
-  $pfxBytes = $generatedCert.Export(
-    [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
-    $passwordText
-  )
-  $cerBytes = $generatedCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-  [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-  [System.IO.File]::WriteAllBytes($cerPath, $cerBytes)
-  $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-    $pfxBytes,
-    $passwordText,
-    ([System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable -bor
-      [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet)
-  )
-}
-finally {
-  if ($null -ne $generatedCert) {
-    $generatedCert.Dispose()
-  }
-  $rsa.Dispose()
-}
+$cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+  [System.IO.File]::ReadAllBytes($cerPath)
+)
 
 (Get-FileHash -Path $cerPath -Algorithm SHA256).Hash.ToLowerInvariant() |
   Set-Content -NoNewline $fingerprintPath
-$rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-  [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-  [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-)
-$rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-try {
-  $rootStore.Add($cert)
-}
-finally {
-  $rootStore.Close()
+& certutil.exe -user -addstore Root $cerPath
+if ($LASTEXITCODE -ne 0) {
+  throw "certutil could not trust the temporary certificate"
 }
 Write-Host "Certificate ready: $($cert.Thumbprint)"
 
@@ -195,13 +169,7 @@ try {
   Sign-TrustDBFile $msi
 }
 finally {
-  $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-  try {
-    $rootStore.Remove($cert)
-  }
-  finally {
-    $rootStore.Close()
-  }
+  & certutil.exe -user -delstore Root $cert.Thumbprint | Out-Null
   $cert.Dispose()
-  Remove-Item $pfxPath -ErrorAction SilentlyContinue
+  Remove-Item $pfxPath, $privateKeyPath, $pemCertPath -ErrorAction SilentlyContinue
 }
