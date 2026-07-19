@@ -170,7 +170,7 @@ test('requires login and opens the admin dashboard', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'ALL SYSTEMS PROVABLE' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '实时证明流水线' })).toBeVisible()
   await expect(page.getByRole('button', { name: '刷新数据' })).toBeVisible()
-  await expect(page.getByText('batch-1', { exact: true }).first()).toBeVisible()
+  await expect(page.locator('.wa-latest').getByText('batch-1', { exact: true })).toBeVisible()
 })
 
 test('shows metrics and records through authenticated admin APIs', async ({ page }) => {
