@@ -33,7 +33,7 @@ func BuildSignedFileClaim(raw io.Reader, id Identity, opts FileClaimOptions) (Si
 	if producedAt.IsZero() {
 		producedAt = time.Now().UTC()
 	}
-	nonce := append([]byte(nil), opts.Nonce...)
+	nonce := opts.Nonce
 	if len(nonce) == 0 {
 		nonce, err = trustcrypto.NewNonce(16)
 		if err != nil {
@@ -96,7 +96,7 @@ func randomIdempotencyKey() (string, error) {
 }
 
 func copyStringMap(in map[string]string) map[string]string {
-	out := map[string]string{}
+	out := make(map[string]string, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

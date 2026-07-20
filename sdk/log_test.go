@@ -68,6 +68,140 @@ func TestBuildSignedLogClaimDefaultsTraceAndVerifies(t *testing.T) {
 	}
 }
 
+func TestMergedLogClaimOptionsBuildOwnsCallerData(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
+	defaults := LogClaimOptions{
+		EventType:      "payment.audit",
+		Parents:        []string{"tr1default"},
+		CustomMetadata: map[string]string{"service": "billing"},
+	}
+	override := LogClaimOptions{
+		ProducedAt:     time.Unix(20, 0),
+		Nonce:          bytes.Repeat([]byte{0x24}, 16),
+		IdempotencyKey: "idem-log-owned",
+		CustomMetadata: map[string]string{"environment": "production"},
+	}
+	signed, err := BuildSignedLogClaimBytes(
+		[]byte(`{"level":"info"}`),
+		Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey},
+		mergeLogClaimOptions(defaults, override),
+	)
+	if err != nil {
+		t.Fatalf("BuildSignedLogClaimBytes: %v", err)
+	}
+	defaults.Parents[0] = "mutated"
+	defaults.CustomMetadata["service"] = "mutated"
+	override.Nonce[0] = 0xff
+	override.CustomMetadata["environment"] = "mutated"
+
+	if got := signed.Claim.Nonce[0]; got != 0x24 {
+		t.Fatalf("nonce[0] = %#x, want 0x24", got)
+	}
+	if got := signed.Claim.Metadata.Parents[0]; got != "tr1default" {
+		t.Fatalf("parent = %q", got)
+	}
+	if got := signed.Claim.Metadata.Custom["service"]; got != "billing" {
+		t.Fatalf("service = %q", got)
+	}
+	if got := signed.Claim.Metadata.Custom["environment"]; got != "production" {
+		t.Fatalf("environment = %q", got)
+	}
+}
+
+func TestBuildSignedLogClaimDefaultCustomMetadataRemainsNonNil(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
+	signed, err := BuildSignedLogClaimBytes(
+		[]byte(`{"level":"info"}`),
+		Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey},
+		LogClaimOptions{
+			ProducedAt:     time.Unix(20, 0),
+			Nonce:          bytes.Repeat([]byte{0x24}, 16),
+			IdempotencyKey: "idem-log-writable-metadata",
+		},
+	)
+	if err != nil {
+		t.Fatalf("BuildSignedLogClaimBytes: %v", err)
+	}
+	if signed.Claim.Metadata.Custom == nil {
+		t.Fatal("custom metadata map is nil")
+	}
+}
+
+func BenchmarkBuildSignedLogClaimBytesDefault(b *testing.B) {
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		b.Fatal(err)
+	}
+	id := Identity{
+		TenantID:   "tenant-benchmark",
+		ClientID:   "client-benchmark",
+		KeyID:      "key-benchmark",
+		PrivateKey: privateKey,
+	}
+	opts := LogClaimOptions{
+		ProducedAt:     time.Unix(20, 0),
+		Nonce:          bytes.Repeat([]byte{0x24}, 16),
+		IdempotencyKey: "idem-log-benchmark",
+		Source:         "sdk-benchmark",
+	}
+	raw := []byte(`{"level":"info","msg":"paid"}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := BuildSignedLogClaimBytes(raw, id, opts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkBuildMergedSignedLogClaimBytesDefault(b *testing.B) {
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		b.Fatal(err)
+	}
+	id := Identity{
+		TenantID:   "tenant-benchmark",
+		ClientID:   "client-benchmark",
+		KeyID:      "key-benchmark",
+		PrivateKey: privateKey,
+	}
+	defaults := LogClaimOptions{EventType: "payment.audit", Source: "billing-api"}
+	override := LogClaimOptions{
+		ProducedAt:     time.Unix(20, 0),
+		Nonce:          bytes.Repeat([]byte{0x24}, 16),
+		IdempotencyKey: "idem-log-benchmark",
+	}
+	raw := []byte(`{"level":"info","msg":"paid"}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		opts := mergeLogClaimOptions(defaults, override)
+		if _, err := BuildSignedLogClaimBytes(raw, id, opts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMergeLogClaimOptionsDefault(b *testing.B) {
+	defaults := LogClaimOptions{EventType: "payment.audit", Source: "billing-api"}
+	b.ReportAllocs()
+	for b.Loop() {
+		benchmarkLogClaimOptions = mergeLogClaimOptions(defaults, LogClaimOptions{})
+	}
+}
+
+var benchmarkLogClaimOptions LogClaimOptions
+
 func TestNewJSONLogEntry(t *testing.T) {
 	t.Parallel()
 
