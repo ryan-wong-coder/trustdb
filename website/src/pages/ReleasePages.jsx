@@ -51,7 +51,7 @@ export function DownloadsPage() {
       </PageHero>
       <section className="empty-release section-shell">
         <div className="empty-release__mark" data-reveal><DownloadSimple /></div>
-        <div className="empty-release__copy" data-reveal><p>Public beta</p><h2>按系统选择，<br />不用自己编译。</h2><span>GitHub Release 提供全部安装包、服务端与 CLI 归档以及统一校验文件。Docker Hub 同步提供 amd64 与 arm64 镜像。</span></div>
+        <div className="empty-release__copy" data-reveal><p>Public beta</p><h2>按系统选择。</h2><span>GitHub Release 提供全部安装包、服务端与 CLI 归档以及统一校验文件。Docker Hub 同步提供 amd64 与 arm64 镜像。</span></div>
         <a className="empty-release__watch" href={release.pageUrl} target="_blank" rel="noreferrer"><GithubLogo weight="fill" /> 打开 GitHub Release <ArrowRight /></a>
       </section>
       <section className="asset-plan" id="release-assets">
