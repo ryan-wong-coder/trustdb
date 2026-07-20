@@ -1,6 +1,6 @@
 # TrustDB Desktop self-signed builds
 
-TrustDB Desktop `1.0.0-beta` is signed with a release-specific, self-signed code-signing certificate. The certificate and its public fingerprint are included beside each installer so the downloaded binary can be checked independently.
+TrustDB Desktop in this release is signed with a release-specific, self-signed code-signing certificate. The certificate and its public fingerprint are included beside each installer so the downloaded binary can be checked independently.
 
 Self-signing protects against an installer being changed after this release was built, but it does not create trust with Apple or Microsoft. macOS Gatekeeper and Windows SmartScreen may therefore show an unknown-developer warning. Only install an asset downloaded from the project release page after comparing it with `SHA256SUMS`.
 

@@ -18,21 +18,21 @@ github.com/ryan-wong-coder/trustdb
 
 License: AGPL-3.0-only. See [LICENSE](LICENSE).
 
-## v1.0.0-beta
+## v1.0.0-beta.1
 
-The first public beta is distributed through [GitHub Releases](https://github.com/ryan-wong-coder/trustdb/releases/tag/v1.0.0-beta). It includes Server/CLI archives for Linux, macOS, and Windows on both supported architectures; self-signed desktop packages for Apple Silicon, Intel Mac, Windows ARM64, and Windows x86-64; and a single `SHA256SUMS` file.
+The second public beta is distributed through [GitHub Releases](https://github.com/ryan-wong-coder/trustdb/releases/tag/v1.0.0-beta.1). Alongside Server/CLI archives for Linux, macOS, and Windows, four self-signed desktop packages, and a single `SHA256SUMS` file, this release adds Chinese, English, Russian, Japanese, French, and Korean support to the website, desktop client, and Admin Web. The website now also shows a real client rendering in the selected language.
 
 The Go SDK uses the same module tag:
 
 ```bash
-go get github.com/ryan-wong-coder/trustdb@v1.0.0-beta
+go get github.com/ryan-wong-coder/trustdb@v1.0.0-beta.1
 ```
 
 The multi-architecture Docker image is published to Docker Hub without assigning the beta to `latest`:
 
 ```bash
-docker pull wsy19990317/trustdb:1.0.0-beta
-docker run --name trustdb -p 8080:8080 -v trustdb-data:/var/lib/trustdb wsy19990317/trustdb:1.0.0-beta
+docker pull wsy19990317/trustdb:1.0.0-beta.1
+docker run --name trustdb -p 8080:8080 -v trustdb-data:/var/lib/trustdb wsy19990317/trustdb:1.0.0-beta.1
 ```
 
 Desktop packages carry a release-specific self-signed certificate and its public `.cer` file. The certificate lets you inspect the signer used for this release, but does not establish Apple or Microsoft trust, so Gatekeeper or SmartScreen may still show an unknown-developer warning. Verify the downloaded file against `SHA256SUMS` before installing.
@@ -82,9 +82,9 @@ Core paths:
 
 ## Quick Start
 
-Download the prebuilt Server/CLI archive for your operating system from the [v1.0.0-beta release](https://github.com/ryan-wong-coder/trustdb/releases/tag/v1.0.0-beta), extract it, and run the commands below from the extracted directory. No Go toolchain is required. The examples use `./bin/trustdb`; on Windows use `.\bin\trustdb.exe`.
+Download the prebuilt Server/CLI archive for your operating system from the [v1.0.0-beta.1 release](https://github.com/ryan-wong-coder/trustdb/releases/tag/v1.0.0-beta.1), extract it, and run the commands below from the extracted directory. No Go toolchain is required. The examples use `./bin/trustdb`; on Windows use `.\bin\trustdb.exe`.
 
-Use [`SHA256SUMS`](https://github.com/ryan-wong-coder/trustdb/releases/download/v1.0.0-beta/SHA256SUMS) to verify the archive before running it. Source builds are documented separately in the [Build from source guide](https://www.trustdb.ryan-wong.cn/docs/source-build).
+Use [`SHA256SUMS`](https://github.com/ryan-wong-coder/trustdb/releases/download/v1.0.0-beta.1/SHA256SUMS) to verify the archive before running it. Source builds are documented separately in the [Build from source guide](https://www.trustdb.ryan-wong.cn/docs/source-build).
 
 Generate client and server keys:
 
