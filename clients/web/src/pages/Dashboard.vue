@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import gsap from 'gsap'
 import { getBatches, getMetrics, getRecords, type BatchRoot, type Metric, type RecordIndex } from '@/lib/api'
@@ -39,6 +39,7 @@ const batches = ref<BatchRoot[]>([])
 const records = ref<RecordIndex[]>([])
 const demoMode = import.meta.env.VITE_TRUSTDB_DEMO === '1'
 let animationContext: ReturnType<typeof gsap.context> | undefined
+let attentionTween: ReturnType<typeof gsap.to> | undefined
 let timer: number | undefined
 
 const demoPipeline: PipelineNode[] = [
@@ -190,6 +191,19 @@ async function copyRoot() {
   try { await navigator.clipboard.writeText(selectedRoot.value) } catch { /* browser policy may deny clipboard access */ }
 }
 
+async function syncAttentionAnimation() {
+  attentionTween?.revert()
+  attentionTween = undefined
+  await nextTick()
+  const reducedMotion = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const ring = root.value?.querySelector<HTMLElement>('.wa-pipeline-node.anomaly .wa-node-ring')
+  if (!reducedMotion && ring) {
+    attentionTween = gsap.to(ring, { scale: 1.28, autoAlpha: 0, duration: 1.5, repeat: -1, ease: 'power1.out' })
+  }
+}
+
+watch(attention, () => { void syncAttentionAnimation() }, { flush: 'post' })
+
 onMounted(() => {
   void load()
   timer = window.setInterval(load, 15_000)
@@ -205,13 +219,14 @@ onMounted(() => {
       if (track && signal) {
         gsap.to(signal, { x: () => track.clientWidth - signal.clientWidth, duration: 2.8, repeat: -1, repeatRefresh: true, ease: 'none' })
       }
-      gsap.to('.wa-pipeline-node.anomaly .wa-node-ring', { scale: 1.28, autoAlpha: 0, duration: 1.5, repeat: -1, ease: 'power1.out' })
     }
   }, root.value ?? undefined)
+  void syncAttentionAnimation()
 })
 
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
+  attentionTween?.revert()
   animationContext?.revert()
 })
 </script>

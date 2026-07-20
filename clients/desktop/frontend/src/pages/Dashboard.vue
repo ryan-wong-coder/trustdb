@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import gsap from 'gsap'
@@ -11,6 +11,7 @@ import { PenLine, ReceiptText, GitFork, Globe2, Anchor, Check, FileText, Copy, A
 
 const root = ref<HTMLElement | null>(null)
 let animationContext: ReturnType<typeof gsap.context> | undefined
+let currentLevelTween: ReturnType<typeof gsap.to> | undefined
 const records = useRecords()
 const identity = useIdentity()
 const { records: storedRecords } = storeToRefs(records)
@@ -118,6 +119,19 @@ async function loadServer() {
   metrics.value = metricResult.status === 'fulfilled' ? (metricResult.value ?? []) : []
 }
 
+async function syncCurrentLevelAnimation() {
+  currentLevelTween?.revert()
+  currentLevelTween = undefined
+  await nextTick()
+  const reducedMotion = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const ring = root.value?.querySelector<HTMLElement>('.td-proof-node.is-current .td-proof-ring')
+  if (!reducedMotion && ring) {
+    currentLevelTween = gsap.to(ring, { scale: 1.28, autoAlpha: 0, duration: 1.6, repeat: -1, ease: 'power1.out' })
+  }
+}
+
+watch(levelIndex, () => { void syncCurrentLevelAnimation() }, { flush: 'post' })
+
 onMounted(() => {
   animationContext = gsap.context(() => {
     if (document.visibilityState === 'visible') {
@@ -131,14 +145,17 @@ onMounted(() => {
     if (track && signal) {
       gsap.to(signal, { x: () => track.clientWidth - signal.clientWidth, duration: 3.2, repeat: -1, repeatRefresh: true, ease: 'none' })
     }
-    gsap.to('.td-proof-node.is-current .td-proof-ring', { scale: 1.28, autoAlpha: 0, duration: 1.6, repeat: -1, ease: 'power1.out' })
   }, root.value ?? undefined)
+  void syncCurrentLevelAnimation()
   void Promise.allSettled([records.refreshAllPending(), loadServer()]).then(() => {
     if (!selectedRecordID.value && recent.value[0]?.record_id) selectedRecordID.value = recent.value[0].record_id
   })
 })
 
-onUnmounted(() => animationContext?.revert())
+onUnmounted(() => {
+  currentLevelTween?.revert()
+  animationContext?.revert()
+})
 </script>
 
 <template>

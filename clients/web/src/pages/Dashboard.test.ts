@@ -5,6 +5,7 @@ import Dashboard from './Dashboard.vue'
 
 const gsapMock = vi.hoisted(() => {
   const timeline = { from: vi.fn() } as { from: ReturnType<typeof vi.fn> }
+  const tween = { revert: vi.fn() }
   timeline.from.mockReturnValue(timeline)
   return {
     context: vi.fn((callback: () => void) => {
@@ -12,7 +13,8 @@ const gsapMock = vi.hoisted(() => {
       return { revert: vi.fn() }
     }),
     timeline: vi.fn(() => timeline),
-    to: vi.fn(),
+    to: vi.fn(() => tween),
+    tween,
   }
 })
 
@@ -35,6 +37,8 @@ describe('Dashboard page', () => {
     mockedGetMetrics.mockReset()
     mockedGetBatches.mockReset()
     mockedGetRecords.mockReset()
+    gsapMock.to.mockClear()
+    gsapMock.tween.revert.mockClear()
   })
 
   it('renders live metrics, batches, records, and real queue attention', async () => {
@@ -59,6 +63,10 @@ describe('Dashboard page', () => {
     expect(wrapper.text()).toContain('batch-real')
     expect(wrapper.text()).toContain('待锚定队列')
     expect(wrapper.text()).toContain('最近 2 条')
+    expect(gsapMock.to).toHaveBeenCalledWith(
+      expect.objectContaining({ className: 'wa-node-ring' }),
+      expect.objectContaining({ repeat: -1 }),
+    )
     wrapper.unmount()
   })
 
