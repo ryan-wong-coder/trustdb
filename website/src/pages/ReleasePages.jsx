@@ -15,15 +15,15 @@ const milestones = [
 export function ChangelogPage() {
   return (
     <>
-      <PageHero eyebrow="Development log" title={<>每次发布，<br />都说清楚改了什么。</>} lead="这里记录已经完成的重要改进、兼容性变化和发布边界。1.0.0-beta 是首个公开测试版，适合评估、集成和试运行。" meta="开发日志 · 更新于 2026.07.20">
-        <div className="page-hero__actions"><Link className="button button--solid" href="/downloads">下载状态 <ArrowRight /></Link><a className="button button--ghost" href="https://github.com/ryan-wong-coder/trustdb/commits/main" target="_blank" rel="noreferrer">全部提交</a></div>
+      <PageHero eyebrow="Development log" title={<>TrustDB<br />版本记录。</>} lead="按版本记录功能变化、兼容性要求、已知问题和下载信息。" meta="开发日志 · 更新于 2026.07.20">
+        <div className="page-hero__actions"><Link className="button button--solid" href="/downloads">下载 1.0.0-beta <ArrowRight /></Link><a className="button button--ghost" href="https://github.com/ryan-wong-coder/trustdb/commits/main" target="_blank" rel="noreferrer">全部提交</a></div>
       </PageHero>
       <section className="release-state section-shell" data-reveal><WarningCircle /><div><p>Release status</p><h2>1.0.0-beta 已进入公开测试</h2><span>桌面客户端采用自签名证书，系统仍会提示未知开发者；请从 GitHub Release 下载并核对 SHA-256。</span></div><Link href="/downloads">查看全部产物 <ArrowRight /></Link></section>
       <section className="timeline section-shell">
-        <div className="timeline__heading" data-reveal><p>Development milestones</p><h2>最近完成了什么。</h2></div>
+        <div className="timeline__heading" data-reveal><p>Development milestones</p><h2>版本变更</h2></div>
         <div className="timeline__list">{milestones.map(([date, title, description, ref], index) => <article key={`${date}-${title}`} data-reveal><span>{String(index + 1).padStart(2, "0")}</span><time>{date}</time><div><h3>{title}</h3><p>{description}</p></div><b>{ref}</b></article>)}</div>
       </section>
-      <section className="release-policy"><div className="section-shell release-policy__layout"><div data-reveal><p>Release contract</p><h2>每次发版都回答五件事。</h2></div><ol data-reveal><li><span>01</span>这个版本包含什么</li><li><span>02</span>兼容性与迁移要求</li><li><span>03</span>已知问题与安全边界</li><li><span>04</span>各平台下载与 SHA-256</li><li><span>05</span>源码、SBOM 与构建来源</li></ol></div></section>
+      <section className="release-policy"><div className="section-shell release-policy__layout"><div data-reveal><p>Release notes</p><h2>发布说明</h2></div><ol data-reveal><li><span>01</span>这个版本包含什么</li><li><span>02</span>兼容性与迁移要求</li><li><span>03</span>已知问题与安全边界</li><li><span>04</span>各平台下载与 SHA-256</li><li><span>05</span>源码、SBOM 与构建来源</li></ol></div></section>
     </>
   );
 }
