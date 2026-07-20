@@ -4,6 +4,7 @@ import { binaryDownloads, checksumsAsset, desktopDownloads, release } from "../l
 import { Link } from "../router";
 
 const milestones = [
+  ["2026.07.20", "v1.0.0-beta.1", "第二个公开测试版：官网、桌面客户端与 Admin Web 支持六种语言，官网按语言展示真实客户端画面，并补齐页签图标。", "Beta.1"],
   ["2026.07.20", "v1.0.0-beta", "首个公开测试版：跨平台服务器与 CLI、四种桌面客户端、自签名安装包、SHA-256 校验和多架构 Docker 镜像。", "Beta"],
   ["2026.07.19", "UI modernization", "官网、Admin Web 与桌面客户端的视觉系统现代化，补齐多页面信息架构与响应式交互。", "In progress"],
   ["2026.07.18", "Proof level parsing", "修复证明等级解析路径，避免客户端和管理端显示与可验证材料不一致。", "#203"],
@@ -16,9 +17,9 @@ export function ChangelogPage() {
   return (
     <>
       <PageHero eyebrow="Development log" title={<>TrustDB<br />版本记录。</>} lead="按版本记录功能变化、兼容性要求、已知问题和下载信息。" meta="开发日志 · 更新于 2026.07.20">
-        <div className="page-hero__actions"><Link className="button button--solid" href="/downloads">下载 1.0.0-beta <ArrowRight /></Link><a className="button button--ghost" href="https://github.com/ryan-wong-coder/trustdb/commits/main" target="_blank" rel="noreferrer">全部提交</a></div>
+        <div className="page-hero__actions"><Link className="button button--solid" href="/downloads">下载 1.0.0-beta.1 <ArrowRight /></Link><a className="button button--ghost" href="https://github.com/ryan-wong-coder/trustdb/commits/main" target="_blank" rel="noreferrer">全部提交</a></div>
       </PageHero>
-      <section className="release-state section-shell" data-reveal><WarningCircle /><div><p>Release status</p><h2>1.0.0-beta 已进入公开测试</h2><span>桌面客户端采用自签名证书，系统仍会提示未知开发者；请从 GitHub Release 下载并核对 SHA-256。</span></div><Link href="/downloads">查看全部产物 <ArrowRight /></Link></section>
+      <section className="release-state section-shell" data-reveal><WarningCircle /><div><p>Release status</p><h2>1.0.0-beta.1 已进入公开测试</h2><span>桌面客户端采用自签名证书，系统仍会提示未知开发者；请从 GitHub Release 下载并核对 SHA-256。</span></div><Link href="/downloads">查看全部产物 <ArrowRight /></Link></section>
       <section className="timeline section-shell">
         <div className="timeline__heading" data-reveal><p>Development milestones</p><h2>版本变更</h2></div>
         <div className="timeline__list">{milestones.map(([date, title, description, ref], index) => <article key={`${date}-${title}`} data-reveal><span>{String(index + 1).padStart(2, "0")}</span><time>{date}</time><div><h3>{title}</h3><p>{description}</p></div><b>{ref}</b></article>)}</div>
