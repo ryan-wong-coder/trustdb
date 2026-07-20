@@ -202,7 +202,7 @@ async function syncAttentionAnimation() {
   }
 }
 
-watch(attention, () => { void syncAttentionAnimation() }, { flush: 'post' })
+watch(() => attention.value?.stage, () => { void syncAttentionAnimation() }, { flush: 'post' })
 
 onMounted(() => {
   void load()
