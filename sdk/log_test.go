@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -65,6 +66,41 @@ func TestBuildSignedLogClaimDefaultsTraceAndVerifies(t *testing.T) {
 	}
 	if got := signed.Claim.Metadata.Custom["tenant_stream"]; got != "billing" {
 		t.Fatalf("custom tenant_stream = %q", got)
+	}
+}
+
+func TestBuildSignedLogClaimBytesMatchesReaderPath(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
+	raw := []byte(`{"level":"info","msg":"equivalent"}`)
+	id := Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey}
+	opts := LogClaimOptions{
+		ProducedAt:     time.Unix(20, 0),
+		Nonce:          bytes.Repeat([]byte{0x24}, 16),
+		IdempotencyKey: "idem-log-equivalent",
+		Source:         "sdk-test",
+		Parents:        []string{"tr1parent"},
+		CustomMetadata: map[string]string{"environment": "test"},
+	}
+	fromBytes, err := BuildSignedLogClaimBytes(raw, id, opts)
+	if err != nil {
+		t.Fatalf("BuildSignedLogClaimBytes: %v", err)
+	}
+	fromReader, err := BuildSignedLogClaim(bytes.NewReader(raw), id, opts)
+	if err != nil {
+		t.Fatalf("BuildSignedLogClaim: %v", err)
+	}
+	if !reflect.DeepEqual(fromBytes, fromReader) {
+		t.Fatalf("byte and reader claims differ:\nbytes=%+v\nreader=%+v", fromBytes, fromReader)
+	}
+	contentHash := append([]byte(nil), fromBytes.Claim.Content.ContentHash...)
+	raw[0] ^= 0xff
+	if !bytes.Equal(fromBytes.Claim.Content.ContentHash, contentHash) {
+		t.Fatal("signed claim content hash changed after input mutation")
 	}
 }
 
