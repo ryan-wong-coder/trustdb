@@ -292,13 +292,8 @@ func (h Handler) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxClaimBytes))
-	if err != nil {
-		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "read claim body", err))
-		return
-	}
 	var signed model.SignedClaim
-	if err := cborx.UnmarshalLimit(body, &signed, maxClaimBytes); err != nil {
+	if err := decodeCBORRequest(r.Body, r.ContentLength, maxClaimBytes, &signed); err != nil {
 		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "decode signed claim", err))
 		return
 	}
@@ -315,13 +310,8 @@ func (h Handler) submitClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h Handler) submitClaimsBatch(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxClaimBatchBytes))
-	if err != nil {
-		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "read claim batch body", err))
-		return
-	}
 	var req submitClaimsBatchRequest
-	if err := cborx.UnmarshalLimit(body, &req, maxClaimBatchBytes); err != nil {
+	if err := decodeCBORRequest(r.Body, r.ContentLength, maxClaimBatchBytes, &req); err != nil {
 		writeError(w, trusterr.Wrap(trusterr.CodeInvalidArgument, "decode signed claim batch", err))
 		return
 	}
@@ -382,6 +372,41 @@ func (h Handler) submitClaimsBatch(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusMultiStatus
 	}
 	writeJSON(w, status, resp)
+}
+
+func decodeCBORRequest(body io.Reader, contentLength int64, maxBytes int, out any) error {
+	raw, err := readBoundedRequestBody(body, contentLength, maxBytes)
+	if err != nil {
+		return err
+	}
+	return cborx.UnmarshalLimit(raw, out, maxBytes)
+}
+
+func readBoundedRequestBody(body io.Reader, contentLength int64, maxBytes int) ([]byte, error) {
+	if contentLength > int64(maxBytes) {
+		return nil, &http.MaxBytesError{Limit: int64(maxBytes)}
+	}
+	if contentLength >= 0 {
+		raw := make([]byte, int(contentLength))
+		if _, err := io.ReadFull(body, raw); err != nil {
+			return nil, err
+		}
+		var extra [1]byte
+		if n, err := io.ReadFull(body, extra[:]); n > 0 {
+			return nil, fmt.Errorf("http: request body exceeds content length %d", contentLength)
+		} else if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, err
+		}
+		return raw, nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, int64(maxBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxBytes {
+		return nil, &http.MaxBytesError{Limit: int64(maxBytes)}
+	}
+	return raw, nil
 }
 
 func (h Handler) submitSignedClaim(ctx context.Context, signed model.SignedClaim) (submitClaimResponse, error) {

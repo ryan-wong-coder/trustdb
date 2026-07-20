@@ -94,6 +94,57 @@ func TestSubmitClaimsBatch(t *testing.T) {
 	}
 }
 
+func BenchmarkHTTPClaimBatchDecode1000(b *testing.B) {
+	claims := make([]model.SignedClaim, maxClaimBatchItems)
+	for i := range claims {
+		claims[i] = model.SignedClaim{
+			SchemaVersion: model.SchemaSignedClaim,
+			Claim: model.ClientClaim{
+				SchemaVersion:  model.SchemaClientClaim,
+				TenantID:       "tenant-benchmark",
+				ClientID:       "client-benchmark",
+				KeyID:          "key-benchmark",
+				Nonce:          bytes.Repeat([]byte{byte(i)}, 16),
+				IdempotencyKey: "benchmark-idempotency-key",
+				Content: model.Content{
+					HashAlg:       model.DefaultHashAlg,
+					ContentHash:   bytes.Repeat([]byte{byte(i + 1)}, 32),
+					ContentLength: 1024,
+					MediaType:     "application/json",
+				},
+				Metadata: model.Metadata{
+					EventType: "log.record",
+					Source:    "sdk-benchmark",
+					Custom: map[string]string{
+						"environment": "production",
+						"service":     "trustdb-benchmark",
+					},
+				},
+			},
+			Signature: model.Signature{
+				Alg:       model.DefaultSignatureAlg,
+				KeyID:     "key-benchmark",
+				Signature: bytes.Repeat([]byte{byte(i + 2)}, 64),
+			},
+		}
+	}
+	body, err := cborx.Marshal(submitClaimsBatchRequest{Claims: claims})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		var req submitClaimsBatchRequest
+		if err := decodeCBORRequest(bytes.NewReader(body), int64(len(body)), maxClaimBatchBytes, &req); err != nil {
+			b.Fatal(err)
+		}
+		if len(req.Claims) != maxClaimBatchItems {
+			b.Fatalf("decoded claims = %d", len(req.Claims))
+		}
+	}
+}
+
 func TestSubmitClaimEnqueuesBatch(t *testing.T) {
 	t.Parallel()
 
@@ -200,6 +251,56 @@ func TestSubmitClaimRejectsBadCBOR(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSubmitClaimRejectsTrailingCBORData(t *testing.T) {
+	t.Parallel()
+
+	svc := ingest.New(processorFunc(nil), ingest.Options{QueueSize: 1, Workers: 1}, nil)
+	defer svc.Shutdown(context.Background())
+	handler := New(svc, nil)
+	body, err := cborx.Marshal(model.SignedClaim{SchemaVersion: model.SchemaSignedClaim})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	body = append(body, 0x00)
+	req := httptest.NewRequest(http.MethodPost, "/v1/claims", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDecodeCBORRequestRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	var out []byte
+	err := decodeCBORRequest(bytes.NewReader([]byte{0x45, 1, 2, 3, 4, 5}), -1, 4, &out)
+	if err == nil || !strings.Contains(err.Error(), "request body too large") {
+		t.Fatalf("decodeCBORRequest() error = %v, want request body too large", err)
+	}
+}
+
+func TestDecodeCBORRequestRejectsContentLengthMismatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		body          []byte
+		contentLength int64
+	}{
+		{name: "short body", body: []byte{0x41}, contentLength: 2},
+		{name: "extra body", body: []byte{0x41, 1, 0}, contentLength: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out []byte
+			if err := decodeCBORRequest(bytes.NewReader(tt.body), tt.contentLength, maxClaimBytes, &out); err == nil {
+				t.Fatal("decodeCBORRequest() error = nil, want content length mismatch")
+			}
+		})
 	}
 }
 
