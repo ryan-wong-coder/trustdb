@@ -152,6 +152,30 @@ func TestStageSetRecordKeyMatchesKeyBuilders(t *testing.T) {
 	}
 }
 
+func TestEncodeBatchArtifactIntoMatchesWrapper(t *testing.T) {
+	t.Parallel()
+
+	bundle := syntheticProofBundles(1)[0]
+	want, err := encodeBatchArtifact(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.release()
+
+	var got encodedBatchArtifact
+	if err := encodeBatchArtifactInto(&got, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	defer got.release()
+
+	if got.recordID != want.recordID || !bytes.Equal(got.bundleValue, want.bundleValue) {
+		t.Fatal("direct batch artifact bundle differs from wrapper")
+	}
+	if got.index.idx.RecordID != want.index.idx.RecordID || !bytes.Equal(got.index.value, want.index.value) {
+		t.Fatal("direct batch artifact record index differs from wrapper")
+	}
+}
+
 func TestStorePutBundleWritesCompressedV2AndRoundTrips(t *testing.T) {
 	t.Parallel()
 

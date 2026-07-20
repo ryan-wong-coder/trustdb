@@ -520,7 +520,7 @@ func marshalArtifact(v any) ([]byte, *bytes.Buffer, error) {
 	return buf.Bytes(), buf, nil
 }
 
-func encodeStoredProofBundle(bundle model.ProofBundle) ([]byte, *bytes.Buffer, error) {
+func encodeStoredProofBundle(bundle *model.ProofBundle) ([]byte, *bytes.Buffer, error) {
 	if bundle.RecordID == "" {
 		return nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
 	}
@@ -601,35 +601,54 @@ func (s *Store) readStoredProofBundle(key []byte) (model.ProofBundle, bool, erro
 }
 
 func encodeRecordIndexArtifact(idx model.RecordIndex) (encodedRecordIndex, error) {
+	var encoded encodedRecordIndex
+	if err := encodeRecordIndexArtifactInto(&encoded, idx); err != nil {
+		return encodedRecordIndex{}, err
+	}
+	return encoded, nil
+}
+
+func encodeRecordIndexArtifactInto(encoded *encodedRecordIndex, idx model.RecordIndex) error {
 	if idx.RecordID == "" {
-		return encodedRecordIndex{}, trusterr.New(trusterr.CodeInvalidArgument, "record index record_id is required")
+		return trusterr.New(trusterr.CodeInvalidArgument, "record index record_id is required")
 	}
 	idx.ProofLevel = model.RecordIndexProofLevel(idx)
 	if idx.SchemaVersion == "" {
 		idx.SchemaVersion = model.SchemaRecordIndex
 	}
-	indexData, indexBuf, err := marshalArtifact(idx)
+	encoded.idx = idx
+	indexData, indexBuf, err := marshalArtifact(&encoded.idx)
 	if err != nil {
-		return encodedRecordIndex{}, trusterr.Wrap(trusterr.CodeDataLoss, "encode record index", err)
+		*encoded = encodedRecordIndex{}
+		return trusterr.Wrap(trusterr.CodeDataLoss, "encode record index", err)
 	}
-	return encodedRecordIndex{
-		idx:      idx,
-		value:    indexData,
-		valueBuf: indexBuf,
-	}, nil
+	encoded.value = indexData
+	encoded.valueBuf = indexBuf
+	return nil
 }
 
 func encodeBatchArtifact(bundle model.ProofBundle) (encodedBatchArtifact, error) {
+	var artifact encodedBatchArtifact
+	if err := encodeBatchArtifactInto(&artifact, &bundle); err != nil {
+		return encodedBatchArtifact{}, err
+	}
+	return artifact, nil
+}
+
+func encodeBatchArtifactInto(artifact *encodedBatchArtifact, bundle *model.ProofBundle) error {
 	bundleValue, bundleBuf, err := encodeStoredProofBundle(bundle)
 	if err != nil {
-		return encodedBatchArtifact{}, err
+		return err
 	}
-	index, err := encodeRecordIndexArtifact(model.RecordIndexFromBundle(bundle))
-	if err != nil {
+	artifact.recordID = bundle.RecordID
+	artifact.bundleValue = bundleValue
+	artifact.bundleBuf = bundleBuf
+	if err := encodeRecordIndexArtifactInto(&artifact.index, model.RecordIndexFromBundle(*bundle)); err != nil {
 		putArtifactBuffer(bundleBuf)
-		return encodedBatchArtifact{}, err
+		*artifact = encodedBatchArtifact{}
+		return err
 	}
-	return encodedBatchArtifact{recordID: bundle.RecordID, bundleValue: bundleValue, bundleBuf: bundleBuf, index: index}, nil
+	return nil
 }
 
 func encodeBatchArtifacts(ctx context.Context, bundles []model.ProofBundle) ([]encodedBatchArtifact, error) {
@@ -656,12 +675,10 @@ func encodeBatchArtifacts(ctx context.Context, bundles []model.ProofBundle) ([]e
 					errs[i] = trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore encode batch artifacts canceled", err)
 					continue
 				}
-				artifact, err := encodeBatchArtifact(bundles[i])
-				if err != nil {
+				if err := encodeBatchArtifactInto(&artifacts[i], &bundles[i]); err != nil {
 					errs[i] = err
 					continue
 				}
-				artifacts[i] = artifact
 			}
 		}()
 	}
