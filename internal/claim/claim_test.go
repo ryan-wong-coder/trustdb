@@ -90,3 +90,40 @@ func TestSigningInputReturnsIndependentOwnedBytes(t *testing.T) {
 		t.Fatalf("claim CBOR mutated: %v", claimCBOR)
 	}
 }
+
+func TestSignMatchesCanonicalSigningInputReference(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
+	claimValue, err := NewFileClaim(
+		"tenant-a",
+		"client-a",
+		"key-a",
+		time.Unix(100, 5),
+		bytes.Repeat([]byte{1}, 16),
+		"idem-reference",
+		model.Content{HashAlg: model.DefaultHashAlg, ContentHash: bytes.Repeat([]byte{2}, 32), ContentLength: 12},
+		model.Metadata{EventType: "file.snapshot"},
+	)
+	if err != nil {
+		t.Fatalf("NewFileClaim: %v", err)
+	}
+	signed, err := Sign(claimValue, privateKey)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	canonical, err := Canonical(claimValue)
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	want, err := trustcrypto.SignEd25519(claimValue.KeyID, privateKey, SigningInput(canonical))
+	if err != nil {
+		t.Fatalf("SignEd25519 reference: %v", err)
+	}
+	if !bytes.Equal(signed.Signature.Signature, want.Signature) || signed.Signature.Alg != want.Alg || signed.Signature.KeyID != want.KeyID {
+		t.Fatalf("signature = %+v, want %+v", signed.Signature, want)
+	}
+}

@@ -83,11 +83,13 @@ func SigningInput(claimCBOR []byte) []byte {
 }
 
 func Sign(claim model.ClientClaim, privateKey ed25519.PrivateKey) (model.SignedClaim, error) {
-	claimCBOR, err := Canonical(claim)
+	if claim.SchemaVersion != model.SchemaClientClaim {
+		return model.SignedClaim{}, fmt.Errorf("unexpected claim schema: %s", claim.SchemaVersion)
+	}
+	input, buf, err := pooledClaimSigningInput(claim)
 	if err != nil {
 		return model.SignedClaim{}, err
 	}
-	input, buf := pooledSigningInput(claimCBOR)
 	defer releaseSigningInputBuffer(buf)
 	sig, err := trustcrypto.SignEd25519(claim.KeyID, privateKey, input)
 	if err != nil {
@@ -122,6 +124,18 @@ func Verify(signed model.SignedClaim, publicKey ed25519.PublicKey) (Verified, er
 		Signature: signed.Signature,
 		RecordID:  RecordID(claimCBOR, signed.Signature),
 	}, nil
+}
+
+func pooledClaimSigningInput(claim model.ClientClaim) ([]byte, *bytes.Buffer, error) {
+	buf := signingInputBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.WriteString(signingDomain)
+	buf.WriteByte(0)
+	if err := cborx.MarshalBuffer(buf, claim); err != nil {
+		releaseSigningInputBuffer(buf)
+		return nil, nil, err
+	}
+	return buf.Bytes(), buf, nil
 }
 
 func pooledSigningInput(claimCBOR []byte) ([]byte, *bytes.Buffer) {
