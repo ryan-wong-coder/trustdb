@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Check, Copy, GithubLogo, ShieldCheck } from "@phosphor-icons/react";
+import { ArrowRight, Check, Copy, DownloadSimple, GithubLogo, Package, ShieldCheck } from "@phosphor-icons/react";
 import { Link } from "../router";
+import { checksumsAsset, homeDownloadGroups, release } from "../lib/release";
 import heroLandscape from "../assets/generated/trustdb-hero-landscape.png";
 import evidenceField from "../assets/generated/trustdb-evidence-field.png";
 import terminalLandscape from "../assets/generated/trustdb-terminal-landscape.png";
@@ -19,7 +20,7 @@ const knowledgeItems = [
   ["01", "文档中心", "从本地启动到服务部署、CLI、Go SDK 与桌面客户端。", "/docs"],
   ["02", "性能基线", "基于 267.5 万次有效提交的双机压测结果与适用边界。", "/performance"],
   ["03", ".sproof v1", "确定性 CBOR 单文件证据交换格式、等级上限与验证算法。", "/sproof"],
-  ["04", "版本与下载", "查看 1.0.0-beta 变更记录，并获取各平台构建产物。", "/changelog"],
+  ["04", "版本与下载", "查看 1.0.0-beta 的各平台构建产物与校验资料。", "/downloads"],
 ];
 
 function FlowCanvas({ mode = "hero" }) {
@@ -207,6 +208,35 @@ export function HomePage() {
             <article data-reveal><span>SDK</span><h3>嵌入你的业务</h3><p>Go SDK 在应用进程内完成签名、HTTP / gRPC 提交、证明导出与验证。</p><Link href="/docs/sdk">SDK 文档 <ArrowRight /></Link></article>
             <article data-reveal><span>DESKTOP</span><h3>无需学习命令</h3><p>面向文件工作流的原生客户端，让非研发用户也能存证、追踪与验证。</p><Link href="/docs/desktop">客户端文档 <ArrowRight /></Link></article>
           </div>
+        </div>
+      </section>
+
+      <section className="home-downloads" id="downloads">
+        <div className="section-shell">
+          <header className="home-downloads__heading" data-reveal>
+            <div><p>Release / {release.version}</p><h2>选好系统，<br />直接使用。</h2></div>
+            <div><Package weight="duotone" /><p>桌面客户端、服务器与 CLI 已为常用系统和架构打包。所有文件来自同一次发布，并提供统一的 SHA-256 校验清单。</p></div>
+          </header>
+          <div className="home-downloads__grid">
+            {homeDownloadGroups.map((group) => (
+              <article className="home-download-card" key={group.eyebrow} data-reveal>
+                <span>{group.eyebrow}</span>
+                <h3>{group.title}</h3>
+                <p>{group.description}</p>
+                <div>
+                  {group.downloads.map((download) => (
+                    <a href={download.url} key={download.filename} title={download.filename}>
+                      <span>{download.label}</span><DownloadSimple />
+                    </a>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+          <footer className="home-downloads__footer" data-reveal>
+            <Link href="/downloads">查看全部发布产物 <ArrowRight /></Link>
+            <a href={checksumsAsset.url}>下载 SHA256SUMS <DownloadSimple /></a>
+          </footer>
         </div>
       </section>
 
