@@ -37,14 +37,13 @@ func NewNonce(size int) ([]byte, error) {
 }
 
 func HashBytes(alg string, data []byte) ([]byte, error) {
-	h, err := newHash(alg)
-	if err != nil {
-		return nil, err
+	switch alg {
+	case model.DefaultHashAlg:
+		sum := sha256.Sum256(data)
+		return sum[:], nil
+	default:
+		return nil, fmt.Errorf("unsupported hash alg: %s", alg)
 	}
-	if _, err := h.Write(data); err != nil {
-		return nil, fmt.Errorf("hash bytes: %w", err)
-	}
-	return h.Sum(nil), nil
 }
 
 func HashReader(alg string, r io.Reader) (sum []byte, bytesRead int64, err error) {
