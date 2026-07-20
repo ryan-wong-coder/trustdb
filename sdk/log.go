@@ -112,7 +112,7 @@ func BuildSignedLogClaim(raw io.Reader, id Identity, opts LogClaimOptions) (Sign
 	if producedAt.IsZero() {
 		producedAt = time.Now().UTC()
 	}
-	nonce := append([]byte(nil), opts.Nonce...)
+	nonce := opts.Nonce
 	if len(nonce) == 0 {
 		nonce, err = trustcrypto.NewNonce(16)
 		if err != nil {
@@ -556,9 +556,9 @@ func mergeLogClaimOptions(defaults, override LogClaimOptions) LogClaimOptions {
 		out.ProducedAt = override.ProducedAt
 	}
 	if len(override.Nonce) > 0 {
-		out.Nonce = append([]byte(nil), override.Nonce...)
+		out.Nonce = override.Nonce
 	} else {
-		out.Nonce = append([]byte(nil), defaults.Nonce...)
+		out.Nonce = defaults.Nonce
 	}
 	if override.IdempotencyKey != "" {
 		out.IdempotencyKey = override.IdempotencyKey
@@ -582,9 +582,9 @@ func mergeLogClaimOptions(defaults, override LogClaimOptions) LogClaimOptions {
 		out.TraceID = override.TraceID
 	}
 	if len(override.Parents) > 0 {
-		out.Parents = copyStringSlice(override.Parents)
+		out.Parents = override.Parents
 	} else {
-		out.Parents = copyStringSlice(defaults.Parents)
+		out.Parents = defaults.Parents
 	}
 	out.CustomMetadata = mergeStringMap(defaults.CustomMetadata, override.CustomMetadata)
 	return out
@@ -617,6 +617,12 @@ func copyStringSlice(in []string) []string {
 }
 
 func mergeStringMap(defaults, override map[string]string) map[string]string {
+	if len(defaults) == 0 {
+		return override
+	}
+	if len(override) == 0 {
+		return defaults
+	}
 	out := make(map[string]string, len(defaults)+len(override))
 	for k, v := range defaults {
 		out[k] = v
