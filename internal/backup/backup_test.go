@@ -216,15 +216,29 @@ func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 	if restored.Roots != rootCount {
 		t.Fatalf("Restore Roots = %d, want %d", restored.Roots, rootCount)
 	}
-	roots, err := dst.ListRootsPage(ctx, model.RootListOptions{
-		Limit:     rootCount,
-		Direction: model.RecordListDirectionAsc,
-	})
-	if err != nil {
-		t.Fatalf("ListRootsPage: %v", err)
+	restoredRootCount := 0
+	afterClosedAtUnixN := int64(0)
+	afterBatchID := ""
+	for {
+		roots, err := dst.ListRootsPage(ctx, model.RootListOptions{
+			Limit:              scanPageSize,
+			Direction:          model.RecordListDirectionAsc,
+			AfterClosedAtUnixN: afterClosedAtUnixN,
+			AfterBatchID:       afterBatchID,
+		})
+		if err != nil {
+			t.Fatalf("ListRootsPage: %v", err)
+		}
+		if len(roots) == 0 {
+			break
+		}
+		restoredRootCount += len(roots)
+		lastRoot := roots[len(roots)-1]
+		afterClosedAtUnixN = lastRoot.ClosedAtUnixN
+		afterBatchID = lastRoot.BatchID
 	}
-	if len(roots) != rootCount {
-		t.Fatalf("restored root count = %d, want %d", len(roots), rootCount)
+	if restoredRootCount != rootCount {
+		t.Fatalf("restored root count = %d, want %d", restoredRootCount, rootCount)
 	}
 }
 
