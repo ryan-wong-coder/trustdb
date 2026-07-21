@@ -344,6 +344,14 @@ func (t *grpcTransport) GetGlobalProof(ctx context.Context, batchID string) (Glo
 	return out.Proof, nil
 }
 
+func (t *grpcTransport) GetGlobalEvidence(ctx context.Context, batchID string) (GlobalLogEvidence, error) {
+	var out grpcapi.GetGlobalEvidenceResponse
+	if err := t.invoke(ctx, grpcapi.FullMethodGetGlobalEvidence, &grpcapi.GetGlobalEvidenceRequest{BatchID: batchID}, &out); err != nil {
+		return GlobalLogEvidence{}, err
+	}
+	return out.Evidence, nil
+}
+
 func (t *grpcTransport) ListSTHs(ctx context.Context, opts ListPageOptions) (TreeHeadPage, error) {
 	var out grpcapi.ListSTHsResponse
 	in := grpcapi.ListSTHsRequest{Limit: opts.Limit, Direction: opts.Direction, Cursor: opts.Cursor}

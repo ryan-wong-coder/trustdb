@@ -232,6 +232,14 @@ func (t *httpTransport) GetGlobalProof(ctx context.Context, batchID string) (Glo
 	return proof, nil
 }
 
+func (t *httpTransport) GetGlobalEvidence(ctx context.Context, batchID string) (GlobalLogEvidence, error) {
+	var evidence model.GlobalLogEvidence
+	if err := t.getJSON(ctx, "/v1/global-log/evidence/"+url.PathEscape(batchID), nil, &evidence); err != nil {
+		return GlobalLogEvidence{}, err
+	}
+	return evidence, nil
+}
+
 func (t *httpTransport) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {
 	var env anchorEnvelope
 	if err := t.getJSON(ctx, "/v1/anchors/sth/"+strconv.FormatUint(treeSize, 10), nil, &env); err != nil {

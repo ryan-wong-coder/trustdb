@@ -19,6 +19,7 @@ type RecordIndex = model.RecordIndex
 type BatchRoot = model.BatchRoot
 type SignedTreeHead = model.SignedTreeHead
 type GlobalLogProof = model.GlobalLogProof
+type GlobalLogEvidence = model.GlobalLogEvidence
 type STHAnchorResult = model.STHAnchorResult
 type SingleProof = model.SingleProof
 

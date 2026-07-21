@@ -192,6 +192,16 @@ func (t *loadBalancedTransport) GetGlobalProof(ctx context.Context, batchID stri
 	})
 }
 
+func (t *loadBalancedTransport) GetGlobalEvidence(ctx context.Context, batchID string) (GlobalLogEvidence, error) {
+	return tryEndpoints(ctx, t, "get global evidence", func(ctx context.Context, transport Transport) (GlobalLogEvidence, error) {
+		evidenceTransport, ok := transport.(globalEvidenceTransport)
+		if !ok {
+			return GlobalLogEvidence{}, &Error{Op: "get global evidence", Message: "transport does not support global evidence"}
+		}
+		return evidenceTransport.GetGlobalEvidence(ctx, batchID)
+	})
+}
+
 func (t *loadBalancedTransport) ListGlobalLeaves(ctx context.Context, opts ListPageOptions) (GlobalLeafPage, error) {
 	return tryEndpoints(ctx, t, "list global leaves", func(ctx context.Context, transport Transport) (GlobalLeafPage, error) {
 		return transport.ListGlobalLeaves(ctx, opts)

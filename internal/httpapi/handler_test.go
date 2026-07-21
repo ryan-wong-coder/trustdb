@@ -697,6 +697,28 @@ func TestGlobalTreeEndpoints(t *testing.T) {
 	}
 }
 
+func TestGlobalEvidenceEndpoint(t *testing.T) {
+	t.Parallel()
+	want := model.GlobalLogEvidence{
+		GlobalProof:  model.GlobalLogProof{SchemaVersion: model.SchemaGlobalLogProof, BatchID: "batch-1", TreeSize: 3},
+		AnchorResult: &model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 3, AnchorID: "anchor-3"},
+	}
+	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, fakeGlobalService{evidence: want}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/global-log/evidence/batch-1", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("global evidence status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got model.GlobalLogEvidence
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode global evidence: %v", err)
+	}
+	if got.GlobalProof.TreeSize != 3 || got.AnchorResult == nil || got.AnchorResult.TreeSize != 3 {
+		t.Fatalf("global evidence=%+v", got)
+	}
+}
+
 func TestGlobalRoutesAreNotRegisteredWithoutGlobalService(t *testing.T) {
 	t.Parallel()
 
@@ -708,6 +730,7 @@ func TestGlobalRoutesAreNotRegisteredWithoutGlobalService(t *testing.T) {
 		"/v1/global-log/tree",
 		"/v1/global-log/tree/nodes",
 		"/v1/global-log/inclusion/batch-1",
+		"/v1/global-log/evidence/batch-1",
 		"/v1/global-log/consistency?from=1&to=2",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -731,6 +754,7 @@ func TestGlobalRoutesAreNotRegisteredWithTypedNilGlobalService(t *testing.T) {
 		"/v1/global-log/tree",
 		"/v1/global-log/tree/nodes",
 		"/v1/global-log/inclusion/batch-1",
+		"/v1/global-log/evidence/batch-1",
 		"/v1/global-log/consistency?from=1&to=2",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -923,10 +947,11 @@ func (f *fakeBatchService) enqueuedRecordID() string {
 }
 
 type fakeGlobalService struct {
-	sths   []model.SignedTreeHead
-	leaves []model.GlobalLogLeaf
-	state  model.GlobalLogState
-	nodes  []model.GlobalLogNode
+	sths     []model.SignedTreeHead
+	leaves   []model.GlobalLogLeaf
+	state    model.GlobalLogState
+	nodes    []model.GlobalLogNode
+	evidence model.GlobalLogEvidence
 }
 
 func (f fakeGlobalService) LatestSTH(context.Context) (model.SignedTreeHead, bool, error) {
@@ -1028,6 +1053,10 @@ func (f fakeGlobalService) InclusionProof(context.Context, string, uint64) (mode
 
 func (f fakeGlobalService) ConsistencyProof(context.Context, uint64, uint64) (model.GlobalConsistencyProof, error) {
 	return model.GlobalConsistencyProof{}, nil
+}
+
+func (f fakeGlobalService) Evidence(context.Context, string) (model.GlobalLogEvidence, error) {
+	return f.evidence, nil
 }
 
 type fakeAnchorService struct {
