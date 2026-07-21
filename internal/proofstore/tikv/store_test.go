@@ -64,6 +64,81 @@ func TestTiKVDoesNotUseSharedCheckpointForLocalWALPruning(t *testing.T) {
 	}
 }
 
+func TestTiKVPreparedManifestIndexBoundsAndTransitions(t *testing.T) {
+	db, countingClient := newMockTiKVDB(t, "prepared-manifests/")
+	store := &Store{db: db}
+	ctx := context.Background()
+
+	for i := range 128 {
+		if err := store.PutManifest(ctx, model.BatchManifest{
+			SchemaVersion: model.SchemaBatchManifest,
+			BatchID:       fmt.Sprintf("committed-%03d", i),
+			State:         model.BatchStateCommitted,
+		}); err != nil {
+			t.Fatalf("PutManifest(committed %d): %v", i, err)
+		}
+	}
+	readyA := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-a", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 10}
+	readyB := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-b", NodeID: "node-b", State: model.BatchStatePrepared, MaterializeNextUnixN: 20}
+	readyC := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-c", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 30}
+	future := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "future", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 1_000}
+	for _, manifest := range []model.BatchManifest{readyC, future, readyB, readyA} {
+		if err := store.PutManifest(ctx, manifest); err != nil {
+			t.Fatalf("PutManifest(%s): %v", manifest.BatchID, err)
+		}
+	}
+
+	countingClient.resetReadRequests()
+	got, err := store.ListPreparedManifests(ctx, "node-a", 100, 10)
+	if err != nil {
+		t.Fatalf("ListPreparedManifests: %v", err)
+	}
+	if len(got) != 2 || got[0].BatchID != "ready-a" || got[1].BatchID != "ready-c" {
+		t.Fatalf("prepared manifests = %#v", got)
+	}
+	if scans := countingClient.scanRequests.Load(); scans != 1 {
+		t.Fatalf("prepared scan requests = %d, want 1 independent of committed history", scans)
+	}
+	if gets := countingClient.getRequests.Load(); gets != 0 {
+		t.Fatalf("prepared point reads = %d, want 0", gets)
+	}
+
+	readyA.State = model.BatchStateCommitted
+	if err := store.PutManifest(ctx, readyA); err != nil {
+		t.Fatalf("PutManifest(commit ready-a): %v", err)
+	}
+	readyC.MaterializeNextUnixN = 2_000
+	if err := store.PutManifest(ctx, readyC); err != nil {
+		t.Fatalf("PutManifest(reschedule ready-c): %v", err)
+	}
+	got, err = store.ListPreparedManifests(ctx, "node-a", 100, 10)
+	if err != nil {
+		t.Fatalf("ListPreparedManifests(after transitions): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("prepared manifests after transitions = %#v", got)
+	}
+}
+
+func TestTiKVPreparedManifestIndexFailsClosedOnMismatch(t *testing.T) {
+	db, _ := newMockTiKVDB(t, "prepared-manifest-mismatch/")
+	store := &Store{db: db}
+	indexed := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "indexed", State: model.BatchStatePrepared}
+	wrong := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "wrong", State: model.BatchStatePrepared}
+	data, err := cborx.Marshal(wrong)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := db.Set(preparedManifestKey(indexed), data, syncWrite); err != nil {
+		t.Fatalf("seed mismatched index: %v", err)
+	}
+
+	_, err = store.ListPreparedManifests(context.Background(), "", time.Now().UnixNano(), 10)
+	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("ListPreparedManifests code = %s, err=%v", trusterr.CodeOf(err), err)
+	}
+}
+
 func TestNormalizeNamespace(t *testing.T) {
 	t.Parallel()
 
