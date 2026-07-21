@@ -20,6 +20,7 @@ const (
 	FullMethodGetSTH            = "/" + ServiceName + "/GetSTH"
 	FullMethodListGlobalLeaves  = "/" + ServiceName + "/ListGlobalLeaves"
 	FullMethodGetGlobalProof    = "/" + ServiceName + "/GetGlobalProof"
+	FullMethodGetGlobalEvidence = "/" + ServiceName + "/GetGlobalEvidence"
 	FullMethodListAnchors       = "/" + ServiceName + "/ListAnchors"
 	FullMethodGetAnchor         = "/" + ServiceName + "/GetAnchor"
 	FullMethodMetrics           = "/" + ServiceName + "/Metrics"
@@ -155,6 +156,14 @@ type GetGlobalProofRequest struct {
 
 type GetGlobalProofResponse struct {
 	Proof model.GlobalLogProof `cbor:"proof" json:"proof"`
+}
+
+type GetGlobalEvidenceRequest struct {
+	BatchID string `cbor:"batch_id" json:"batch_id"`
+}
+
+type GetGlobalEvidenceResponse struct {
+	Evidence model.GlobalLogEvidence `cbor:"evidence" json:"evidence"`
 }
 
 type ListGlobalLeavesRequest struct {

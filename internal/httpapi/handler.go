@@ -76,6 +76,10 @@ type GlobalLogService interface {
 	ConsistencyProof(context.Context, uint64, uint64) (model.GlobalConsistencyProof, error)
 }
 
+type GlobalEvidenceService interface {
+	Evidence(context.Context, string) (model.GlobalLogEvidence, error)
+}
+
 type healthResponse struct {
 	OK bool `json:"ok"`
 }
@@ -252,6 +256,7 @@ func buildMux(h Handler) http.Handler {
 		mux.HandleFunc("GET /v1/global-log/tree/nodes", h.listGlobalTreeNodes)
 		mux.HandleFunc("GET /v1/global-log/tree/leaves", h.listGlobalLeaves)
 		mux.HandleFunc("GET /v1/global-log/inclusion/{batch_id}", h.getGlobalInclusion)
+		mux.HandleFunc("GET /v1/global-log/evidence/{batch_id}", h.getGlobalEvidence)
 		mux.HandleFunc("GET /v1/global-log/consistency", h.getGlobalConsistency)
 	}
 	if h.Anchors != nil {
@@ -1319,6 +1324,20 @@ func (h Handler) getGlobalConsistency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, proof)
+}
+
+func (h Handler) getGlobalEvidence(w http.ResponseWriter, r *http.Request) {
+	service, ok := h.Global.(GlobalEvidenceService)
+	if !ok {
+		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "global evidence service is not configured"))
+		return
+	}
+	evidence, err := service.Evidence(r.Context(), r.PathValue("batch_id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, evidence)
 }
 
 // getAnchor exposes L5 anchor state for a committed batch. The shape

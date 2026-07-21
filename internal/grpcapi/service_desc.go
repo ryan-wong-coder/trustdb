@@ -20,6 +20,7 @@ type TrustDBServiceServer interface {
 	GetSTH(context.Context, *GetSTHRequest) (*GetSTHResponse, error)
 	ListGlobalLeaves(context.Context, *ListGlobalLeavesRequest) (*ListGlobalLeavesResponse, error)
 	GetGlobalProof(context.Context, *GetGlobalProofRequest) (*GetGlobalProofResponse, error)
+	GetGlobalEvidence(context.Context, *GetGlobalEvidenceRequest) (*GetGlobalEvidenceResponse, error)
 	ListAnchors(context.Context, *ListAnchorsRequest) (*ListAnchorsResponse, error)
 	GetAnchor(context.Context, *GetAnchorRequest) (*GetAnchorResponse, error)
 	Metrics(context.Context, *MetricsRequest) (*MetricsResponse, error)
@@ -45,6 +46,7 @@ var TrustDBService_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "GetSTH", Handler: _TrustDB_GetSTH_Handler},
 		{MethodName: "ListGlobalLeaves", Handler: _TrustDB_ListGlobalLeaves_Handler},
 		{MethodName: "GetGlobalProof", Handler: _TrustDB_GetGlobalProof_Handler},
+		{MethodName: "GetGlobalEvidence", Handler: _TrustDB_GetGlobalEvidence_Handler},
 		{MethodName: "ListAnchors", Handler: _TrustDB_ListAnchors_Handler},
 		{MethodName: "GetAnchor", Handler: _TrustDB_GetAnchor_Handler},
 		{MethodName: "Metrics", Handler: _TrustDB_Metrics_Handler},
@@ -177,6 +179,12 @@ func _TrustDB_ListGlobalLeaves_Handler(srv any, ctx context.Context, dec func(an
 func _TrustDB_GetGlobalProof_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	return unaryHandler[GetGlobalProofRequest](srv, ctx, dec, interceptor, "GetGlobalProof", func(s TrustDBServiceServer, ctx context.Context, req *GetGlobalProofRequest) (any, error) {
 		return s.GetGlobalProof(ctx, req)
+	})
+}
+
+func _TrustDB_GetGlobalEvidence_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return unaryHandler[GetGlobalEvidenceRequest](srv, ctx, dec, interceptor, "GetGlobalEvidence", func(s TrustDBServiceServer, ctx context.Context, req *GetGlobalEvidenceRequest) (any, error) {
+		return s.GetGlobalEvidence(ctx, req)
 	})
 }
 

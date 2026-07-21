@@ -10,10 +10,30 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchor"
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
+	"github.com/ryan-wong-coder/trustdb/internal/globallog"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
+
+type exportEvidenceTransport struct {
+	Transport
+	bundle        ProofBundle
+	evidence      GlobalLogEvidence
+	bundleCalls   atomic.Int32
+	evidenceCalls atomic.Int32
+}
+
+func (t *exportEvidenceTransport) GetProofBundle(context.Context, string) (ProofBundle, error) {
+	t.bundleCalls.Add(1)
+	return t.bundle, nil
+}
+
+func (t *exportEvidenceTransport) GetGlobalEvidence(context.Context, string) (GlobalLogEvidence, error) {
+	t.evidenceCalls.Add(1)
+	return t.evidence, nil
+}
 
 func TestClientSubmitSignedClaim(t *testing.T) {
 	t.Parallel()
@@ -388,7 +408,7 @@ func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testi
 					},
 				},
 			})
-		case r.URL.Path == "/v1/global-log/inclusion/batch-1":
+		case r.URL.Path == "/v1/global-log/evidence/batch-1":
 			writeJSONForTest(t, w, http.StatusNotFound, map[string]string{
 				"code":    string(trusterr.CodeNotFound),
 				"message": "global proof not found",
@@ -409,6 +429,76 @@ func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testi
 	}
 	if proof.RecordID != "tr1record" || proof.ProofLevel != ProofLevelL3 || proof.GlobalProof != nil {
 		t.Fatalf("proof = %+v", proof)
+	}
+}
+
+func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
+	t.Parallel()
+	bundle := ProofBundle{
+		SchemaVersion: model.SchemaProofBundle,
+		RecordID:      "tr1record",
+		NodeID:        "node-1",
+		LogID:         "log-1",
+		CommittedReceipt: CommittedReceipt{
+			BatchID:       "batch-1",
+			BatchRoot:     make([]byte, 32),
+			ClosedAtUnixN: 10,
+		},
+		BatchProof: model.BatchProof{TreeAlg: model.DefaultMerkleTreeAlg, TreeSize: 1},
+	}
+	leafHash, err := globallog.HashLeaf(model.GlobalLogLeaf{
+		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		NodeID:             bundle.NodeID,
+		LogID:              bundle.LogID,
+		BatchID:            bundle.CommittedReceipt.BatchID,
+		BatchRoot:          bundle.CommittedReceipt.BatchRoot,
+		BatchTreeSize:      bundle.BatchProof.TreeSize,
+		BatchClosedAtUnixN: bundle.CommittedReceipt.ClosedAtUnixN,
+	})
+	if err != nil {
+		t.Fatalf("HashLeaf: %v", err)
+	}
+	sth := SignedTreeHead{
+		SchemaVersion: model.SchemaSignedTreeHead,
+		NodeID:        bundle.NodeID,
+		LogID:         bundle.LogID,
+		TreeSize:      1,
+		RootHash:      leafHash,
+		TreeAlg:       model.DefaultMerkleTreeAlg,
+	}
+	global := GlobalLogProof{
+		SchemaVersion: model.SchemaGlobalLogProof,
+		NodeID:        bundle.NodeID,
+		LogID:         bundle.LogID,
+		BatchID:       bundle.CommittedReceipt.BatchID,
+		LeafHash:      leafHash,
+		TreeSize:      1,
+		STH:           sth,
+	}
+	anchored := STHAnchorResult{
+		SchemaVersion: model.SchemaSTHAnchorResult,
+		NodeID:        bundle.NodeID,
+		LogID:         bundle.LogID,
+		TreeSize:      1,
+		SinkName:      anchor.NoopSinkName,
+		AnchorID:      anchor.DeterministicNoopAnchorID(sth),
+		RootHash:      leafHash,
+		STH:           sth,
+	}
+	transport := &exportEvidenceTransport{bundle: bundle, evidence: GlobalLogEvidence{GlobalProof: global, AnchorResult: &anchored}}
+	client, err := NewClientWithTransport(transport)
+	if err != nil {
+		t.Fatalf("NewClientWithTransport: %v", err)
+	}
+	proof, err := client.ExportSingleProof(context.Background(), bundle.RecordID)
+	if err != nil {
+		t.Fatalf("ExportSingleProof: %v", err)
+	}
+	if proof.ProofLevel != ProofLevelL5 || proof.GlobalProof == nil || proof.AnchorResult == nil {
+		t.Fatalf("proof=%+v", proof)
+	}
+	if transport.bundleCalls.Load() != 1 || transport.evidenceCalls.Load() != 1 {
+		t.Fatalf("calls bundle=%d evidence=%d", transport.bundleCalls.Load(), transport.evidenceCalls.Load())
 	}
 }
 

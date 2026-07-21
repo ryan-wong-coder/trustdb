@@ -333,6 +333,21 @@ func (s *Server) GetGlobalProof(ctx context.Context, req *GetGlobalProofRequest)
 	return &GetGlobalProofResponse{Proof: proof}, nil
 }
 
+func (s *Server) GetGlobalEvidence(ctx context.Context, req *GetGlobalEvidenceRequest) (*GetGlobalEvidenceResponse, error) {
+	if s.Global == nil {
+		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))
+	}
+	service, ok := s.Global.(httpapi.GlobalEvidenceService)
+	if !ok {
+		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "global evidence service is not configured"))
+	}
+	evidence, err := service.Evidence(ctx, req.BatchID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	return &GetGlobalEvidenceResponse{Evidence: evidence}, nil
+}
+
 func (s *Server) ListGlobalLeaves(ctx context.Context, req *ListGlobalLeavesRequest) (*ListGlobalLeavesResponse, error) {
 	if s.Global == nil {
 		return nil, toStatusError(trusterr.New(trusterr.CodeFailedPrecondition, "global log service is not configured"))

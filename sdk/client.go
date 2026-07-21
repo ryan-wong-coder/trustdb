@@ -40,6 +40,10 @@ type signedClaimBatchTransport interface {
 	SubmitSignedClaims(context.Context, []SignedClaim) ([]signedClaimBatchItemResult, error)
 }
 
+type globalEvidenceTransport interface {
+	GetGlobalEvidence(context.Context, string) (GlobalLogEvidence, error)
+}
+
 type signedClaimStreamTransport interface {
 	SubmitSignedClaimStream(context.Context, <-chan signedClaimStreamItem) (<-chan signedClaimStreamItemResult, error)
 }
@@ -217,6 +221,14 @@ func (c *Client) GetGlobalProof(ctx context.Context, batchID string) (GlobalLogP
 	return c.transport.GetGlobalProof(ctx, batchID)
 }
 
+func (c *Client) GetGlobalEvidence(ctx context.Context, batchID string) (GlobalLogEvidence, error) {
+	transport, ok := c.transport.(globalEvidenceTransport)
+	if !ok {
+		return GlobalLogEvidence{}, &Error{Op: "get global evidence", Message: "transport does not support global evidence"}
+	}
+	return transport.GetGlobalEvidence(ctx, batchID)
+}
+
 func (c *Client) ListSTHs(ctx context.Context, opts ListPageOptions) (TreeHeadPage, error) {
 	return c.transport.ListSTHs(ctx, opts)
 }
@@ -247,22 +259,15 @@ func (c *Client) ExportSingleProof(ctx context.Context, recordID string) (Single
 		return SingleProof{}, err
 	}
 	opts := sproof.Options{ExportedAtUnixN: time.Now().UTC().UnixNano()}
-	global, err := c.GetGlobalProof(ctx, bundle.CommittedReceipt.BatchID)
+	evidence, err := c.GetGlobalEvidence(ctx, bundle.CommittedReceipt.BatchID)
 	if err != nil {
 		if !IsUnavailable(err) {
-			return SingleProof{}, fmt.Errorf("sdk: fetch global proof: %w", err)
+			return SingleProof{}, fmt.Errorf("sdk: fetch global evidence: %w", err)
 		}
 		return sproof.New(bundle, opts)
 	}
-	opts.GlobalProof = &global
-	anchor, err := c.GetAnchor(ctx, global.STH.TreeSize)
-	if err != nil {
-		if !IsUnavailable(err) {
-			return SingleProof{}, fmt.Errorf("sdk: fetch anchor: %w", err)
-		}
-		return sproof.New(bundle, opts)
-	}
-	opts.AnchorResult = anchor.Result
+	opts.GlobalProof = &evidence.GlobalProof
+	opts.AnchorResult = evidence.AnchorResult
 	return sproof.New(bundle, opts)
 }
 

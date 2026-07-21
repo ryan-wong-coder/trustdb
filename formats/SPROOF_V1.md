@@ -39,6 +39,11 @@
 
 `anchor_result` 不能跳过 `global_proof` 直接提升到 L5，因为 L5 锚定的是 STH/global root，不是 batch root。
 
+`global_proof` 可以直接指向包含该 batch 的后续 STH。导出器必须针对该
+STH 重新生成 inclusion path；存在 `anchor_result` 时，它仍须与该 STH 的
+`tree_size`、`root_hash` 和来源字段精确匹配。v1 不会把更大的 anchor
+隐式套用到较早的 proof，也不声明 batch 首次对应的 STH 曾被单独锚定。
+
 ## 验证算法
 
 离线验证器应按以下顺序处理：

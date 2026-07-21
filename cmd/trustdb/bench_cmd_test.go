@@ -333,6 +333,10 @@ func (f *fakeBenchTransport) GetGlobalProof(_ context.Context, batchID string) (
 	return model.GlobalLogProof{}, &sdk.Error{StatusCode: 404, Code: "NOT_FOUND", Message: "global proof not found"}
 }
 
+func (f *fakeBenchTransport) GetGlobalEvidence(_ context.Context, batchID string) (sdk.GlobalLogEvidence, error) {
+	return model.GlobalLogEvidence{}, &sdk.Error{StatusCode: 404, Code: "NOT_FOUND", Message: "global evidence not found"}
+}
+
 func (f *fakeBenchTransport) ListGlobalLeaves(context.Context, sdk.ListPageOptions) (sdk.GlobalLeafPage, error) {
 	return sdk.GlobalLeafPage{}, nil
 }

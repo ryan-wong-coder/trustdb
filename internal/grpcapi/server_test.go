@@ -5,10 +5,33 @@ import (
 	"encoding/base64"
 	"testing"
 
+	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+type evidenceGlobalService struct {
+	httpapi.GlobalLogService
+	evidence model.GlobalLogEvidence
+}
+
+func (s evidenceGlobalService) Evidence(context.Context, string) (model.GlobalLogEvidence, error) {
+	return s.evidence, nil
+}
+
+func TestGetGlobalEvidence(t *testing.T) {
+	t.Parallel()
+	want := model.GlobalLogEvidence{GlobalProof: model.GlobalLogProof{BatchID: "batch-1", TreeSize: 7}}
+	server := NewServer(nil, nil, evidenceGlobalService{evidence: want}, nil, nil)
+	got, err := server.GetGlobalEvidence(context.Background(), &GetGlobalEvidenceRequest{BatchID: "batch-1"})
+	if err != nil {
+		t.Fatalf("GetGlobalEvidence: %v", err)
+	}
+	if got.Evidence.GlobalProof.TreeSize != 7 {
+		t.Fatalf("GetGlobalEvidence=%+v", got)
+	}
+}
 
 func TestNewServerNormalizesTypedNilGlobalService(t *testing.T) {
 	t.Parallel()
