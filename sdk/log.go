@@ -331,22 +331,58 @@ func (c *Client) submitLogBatchNative(ctx context.Context, entries []LogEntry, i
 		workCtx = context.Background()
 	}
 	result := LogBatchResult{Results: make([]LogSubmitItemResult, len(entries))}
-	signed := make([]SignedClaim, 0, len(entries))
-	originalIndexes := make([]int, 0, len(entries))
+	built := make([]SignedClaim, len(entries))
+	builtOK := make([]bool, len(entries))
 	done := make([]bool, len(entries))
-	for index, entry := range entries {
+	workerCount := normalizeLogConcurrency(opts.Concurrency)
+	if workerCount > len(entries) {
+		workerCount = len(entries)
+	}
+	build := func(index int) {
 		if err := workCtx.Err(); err != nil {
 			result.Results[index] = LogSubmitItemResult{Index: index, Err: err}
 			done[index] = true
-			continue
+			return
 		}
-		claim, err := buildSignedLogEntry(entry, id, opts.Claim)
+		claim, err := buildSignedLogEntry(entries[index], id, opts.Claim)
 		if err != nil {
 			result.Results[index] = LogSubmitItemResult{Index: index, Err: err}
 			done[index] = true
+			return
+		}
+		built[index] = claim
+		builtOK[index] = true
+	}
+	if workerCount == 1 {
+		for index := range entries {
+			build(index)
+		}
+	} else {
+		jobs := make(chan int)
+		var workers sync.WaitGroup
+		workers.Add(workerCount)
+		for range workerCount {
+			go func() {
+				defer workers.Done()
+				for index := range jobs {
+					build(index)
+				}
+			}()
+		}
+		for index := range entries {
+			jobs <- index
+		}
+		close(jobs)
+		workers.Wait()
+	}
+
+	signed := built[:0]
+	originalIndexes := make([]int, 0, len(entries))
+	for index := range entries {
+		if !builtOK[index] {
 			continue
 		}
-		signed = append(signed, claim)
+		signed = append(signed, built[index])
 		originalIndexes = append(originalIndexes, index)
 	}
 	if len(signed) == 0 {

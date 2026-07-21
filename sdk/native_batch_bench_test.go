@@ -11,6 +11,14 @@ import (
 )
 
 func BenchmarkNativeLogBatch256(b *testing.B) {
+	for _, concurrency := range []int{1, 4} {
+		b.Run("concurrency="+strconv.Itoa(concurrency), func(b *testing.B) {
+			benchmarkNativeLogBatch256(b, concurrency)
+		})
+	}
+}
+
+func benchmarkNativeLogBatch256(b *testing.B, concurrency int) {
 	_, privateKey, err := trustcrypto.GenerateEd25519Key()
 	if err != nil {
 		b.Fatal(err)
@@ -39,7 +47,7 @@ func BenchmarkNativeLogBatch256(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		result, err := client.SubmitLogBatch(context.Background(), entries, identity, LogSubmitOptions{})
+		result, err := client.SubmitLogBatch(context.Background(), entries, identity, LogSubmitOptions{Concurrency: concurrency})
 		if err != nil {
 			b.Fatal(err)
 		}
