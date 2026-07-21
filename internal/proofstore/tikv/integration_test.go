@@ -77,6 +77,54 @@ func TestTiKVNamespaceIsolationAcrossStores(t *testing.T) {
 	}
 }
 
+func TestTiKVPreparedManifestIndexIntegration(t *testing.T) {
+	requireTiKVIntegration(t)
+
+	ctx := context.Background()
+	store := openIntegrationStore(t, integrationNamespace(t, "prepared-index"))
+	defer store.Close()
+	ready := model.BatchManifest{
+		SchemaVersion:          model.SchemaBatchManifest,
+		BatchID:                "ready",
+		NodeID:                 "node-a",
+		State:                  model.BatchStatePrepared,
+		MaterializeNextUnixN:   10,
+		MaterializeAttempts:    1,
+		MaterializeFailureCode: "retry",
+	}
+	future := ready
+	future.BatchID = "future"
+	future.MaterializeNextUnixN = 1_000
+	for _, manifest := range []model.BatchManifest{
+		{SchemaVersion: model.SchemaBatchManifest, BatchID: "committed", State: model.BatchStateCommitted},
+		future,
+		ready,
+	} {
+		if err := store.PutManifest(ctx, manifest); err != nil {
+			t.Fatalf("PutManifest(%s): %v", manifest.BatchID, err)
+		}
+	}
+
+	got, err := store.ListPreparedManifests(ctx, "node-a", 100, 10)
+	if err != nil {
+		t.Fatalf("ListPreparedManifests: %v", err)
+	}
+	if len(got) != 1 || got[0].BatchID != ready.BatchID {
+		t.Fatalf("prepared manifests = %#v", got)
+	}
+	ready.State = model.BatchStateCommitted
+	if err := store.PutManifest(ctx, ready); err != nil {
+		t.Fatalf("PutManifest(commit ready): %v", err)
+	}
+	got, err = store.ListPreparedManifests(ctx, "node-a", 100, 10)
+	if err != nil {
+		t.Fatalf("ListPreparedManifests(after commit): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("prepared manifests after commit = %#v", got)
+	}
+}
+
 func requireTiKVIntegration(t *testing.T) {
 	t.Helper()
 	if strings := os.Getenv("TRUSTDB_TIKV_PD_ENDPOINTS"); strings == "" {

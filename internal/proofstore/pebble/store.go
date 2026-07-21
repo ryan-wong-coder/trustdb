@@ -2262,7 +2262,7 @@ func (s *Store) ListPreparedManifests(ctx context.Context, nodeID string, nowUni
 			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode prepared manifest", err)
 		}
 		if manifest.MaterializeNextUnixN > nowUnixN {
-			continue
+			break
 		}
 		if nodeID != "" && manifest.NodeID != "" && manifest.NodeID != nodeID {
 			continue

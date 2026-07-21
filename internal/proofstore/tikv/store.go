@@ -465,6 +465,7 @@ const (
 	prefixRecordByHash   = "record/by-content/"
 	prefixRecordByToken  = "record/by-storage-token/"
 	prefixManifest       = "manifest/"
+	prefixManifestReady  = "manifest-prepared/"
 	prefixRoot           = "root/"
 	prefixBatchTreeLeaf  = "batch-tree/leaf/"
 	prefixBatchTreeNode  = "batch-tree/node/"
@@ -925,6 +926,14 @@ func recordIndexKeyCap(idx model.RecordIndex) int {
 
 func manifestKey(batchID string) []byte {
 	return append([]byte(prefixManifest), batchID...)
+}
+
+func preparedManifestKey(manifest model.BatchManifest) []byte {
+	nextAttempt := manifest.MaterializeNextUnixN
+	if nextAttempt < 0 {
+		nextAttempt = 0
+	}
+	return []byte(fmt.Sprintf("%s%0*d/%s/%s", prefixManifestReady, rootSortKeyWidth, nextAttempt, recordSecondaryPart(manifest.NodeID), recordSecondaryPart(manifest.BatchID)))
 }
 
 // rootKey preserves the same %020d sort-order trick used by the file
@@ -2111,9 +2120,54 @@ func (s *Store) PutManifest(ctx context.Context, manifest model.BatchManifest) e
 	if manifest.SchemaVersion == "" {
 		manifest.SchemaVersion = model.SchemaBatchManifest
 	}
-	if err := s.writeCBOR(manifestKey(manifest.BatchID), manifest); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "write batch manifest", err)
+	data, err := cborx.Marshal(manifest)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "encode batch manifest", err)
 	}
+	txn, err := s.db.client.Begin()
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "begin batch manifest transaction", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = txn.Rollback()
+		}
+	}()
+	physicalManifestKey := s.db.physicalKey(manifestKey(manifest.BatchID))
+	oldData, err := txn.Get(ctx, physicalManifestKey)
+	switch {
+	case err == nil:
+		var old model.BatchManifest
+		if err := cborx.UnmarshalLimit(oldData, &old, maxStoredObjectBytes); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "decode old batch manifest", err)
+		}
+		if old.State == model.BatchStatePrepared {
+			if err := txn.Delete(s.db.physicalKey(preparedManifestKey(old))); err != nil {
+				return trusterr.Wrap(trusterr.CodeDataLoss, "delete old prepared manifest index", err)
+			}
+		}
+	case tikverr.IsErrNotFound(err):
+	case ctx.Err() != nil:
+		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "read old batch manifest canceled", ctx.Err())
+	default:
+		return trusterr.Wrap(trusterr.CodeDataLoss, "read old batch manifest", err)
+	}
+	if err := txn.Set(physicalManifestKey, data); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage batch manifest", err)
+	}
+	if manifest.State == model.BatchStatePrepared {
+		if err := txn.Set(s.db.physicalKey(preparedManifestKey(manifest)), data); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage prepared manifest index", err)
+		}
+	}
+	if err := txn.Commit(ctx); err != nil {
+		if ctx.Err() != nil {
+			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "commit batch manifest canceled", ctx.Err())
+		}
+		return trusterr.Wrap(trusterr.CodeDataLoss, "commit batch manifest", err)
+	}
+	committed = true
 	return nil
 }
 
@@ -2204,6 +2258,45 @@ func (s *Store) ListManifestsAfter(ctx context.Context, afterBatchID string, lim
 	}
 	if err := iter.Error(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate manifests after", err)
+	}
+	return manifests, nil
+}
+
+func (s *Store) ListPreparedManifests(ctx context.Context, nodeID string, nowUnixN int64, limit int) ([]model.BatchManifest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list prepared manifests canceled", err)
+	}
+	if limit <= 0 {
+		limit = 128
+	}
+	lower, upper := prefixBounds(prefixManifestReady)
+	iter, err := s.db.NewIter(&iterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open prepared manifest iterator", err)
+	}
+	defer iter.Close()
+	manifests := make([]model.BatchManifest, 0, limit)
+	for ok := iter.First(); ok && len(manifests) < limit; ok = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list prepared manifests canceled", err)
+		}
+		var manifest model.BatchManifest
+		if err := cborx.UnmarshalLimit(iter.Value(), &manifest, maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode prepared manifest", err)
+		}
+		if manifest.State != model.BatchStatePrepared || !bytes.Equal(iter.key, preparedManifestKey(manifest)) {
+			return nil, trusterr.New(trusterr.CodeDataLoss, "prepared manifest index does not match value")
+		}
+		if manifest.MaterializeNextUnixN > nowUnixN {
+			break
+		}
+		if nodeID != "" && manifest.NodeID != "" && manifest.NodeID != nodeID {
+			continue
+		}
+		manifests = append(manifests, manifest)
+	}
+	if err := iter.Error(); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate prepared manifests", err)
 	}
 	return manifests, nil
 }
