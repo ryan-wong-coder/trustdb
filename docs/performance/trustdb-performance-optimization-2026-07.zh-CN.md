@@ -32,4 +32,4 @@ Linux `perf` 显示剩余 CPU 主要由 Ed25519 签名/验签、Snappy 和内存
 
 ## 兼容性
 
-HTTP、gRPC、SDK 和 proof schema 不变。Pebble 物理 key schema 升级为 v2；启动时若发现没有 v2 schema 标记但已有数据，会返回 failed precondition。系统不会自动删除或迁移旧 proofstore。
+HTTP、gRPC、SDK 和 proof schema 不变。以下 v2 描述记录的是本次历史优化当时的边界；当前实现已统一升级为 proofstore storage schema v4。旧版本或无标记但非空的存储会返回 failed precondition，系统不会自动删除、迁移或双读旧 proofstore。
