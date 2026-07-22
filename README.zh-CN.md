@@ -18,21 +18,21 @@ github.com/wowtrust/trustdb
 
 许可证：AGPL-3.0-only，见 [LICENSE](LICENSE)。
 
-## v1.0.0-beta.1
+## v1.0.0
 
-第二个公开测试版通过 [GitHub Releases](https://github.com/wowtrust/trustdb/releases/tag/v1.0.0-beta.1) 发布。除 Linux、macOS、Windows 两种架构的服务器与 CLI、四种桌面客户端和统一的 `SHA256SUMS` 外，本版还为官网、桌面客户端和 Admin Web 增加中、英、俄、日、法、韩六种语言，并让官网按当前语言展示真实客户端画面。
+首个正式版通过 [GitHub Releases](https://github.com/wowtrust/trustdb/releases/tag/v1.0.0) 发布，包含 Linux、macOS、Windows 的服务器与 CLI、四种自签名桌面客户端、多架构 Docker 镜像和统一的 `SHA256SUMS`。
 
-仓库 `main` 分支现在声明 `github.com/wowtrust/trustdb`。历史标签 `v1.0.0-beta.1` 发布于本次迁移之前，仍保留旧 module identity，因此不能通过新的 module 路径请求该标签。下一个新路径版本标签发布前，请使用首次合并新路径后的 canonical pseudo-version。固定这个精确版本可避开分支查询缓存，并保证构建可复现：
+本版正式确立 `github.com/wowtrust/trustdb` module 路径，并包含持久化 STH 合并锚定、covering anchor 离线证据导出、可恢复 L5 coverage 投影、存储 schema v4 和当前逻辑备份格式。Go SDK 可直接固定正式标签：
 
 ```bash
-go get github.com/wowtrust/trustdb@v1.0.0-beta.1.0.20260722051404-c91313f7f40e
+go get github.com/wowtrust/trustdb@v1.0.0
 ```
 
-Docker Hub 同步发布 amd64 与 arm64 镜像；测试版不会占用 `latest`：
+Docker Hub 同步发布 amd64 与 arm64 镜像，并提供不可变版本标签与稳定通道标签：
 
 ```bash
-docker pull wsy19990317/trustdb:1.0.0-beta.1
-docker run --name trustdb -p 8080:8080 -v trustdb-data:/var/lib/trustdb wsy19990317/trustdb:1.0.0-beta.1
+docker pull wsy19990317/trustdb:1.0.0
+docker run --name trustdb -p 8080:8080 -v trustdb-data:/var/lib/trustdb wsy19990317/trustdb:1.0.0
 ```
 
 桌面包使用本次发版临时生成的自签名证书，并附带公开 `.cer` 文件，可供用户核对本次发布所用的签名证书。它不会取得 Apple 或 Microsoft 的系统信任；Gatekeeper 或 SmartScreen 仍可能提示未知开发者。安装前请用 `SHA256SUMS` 核对下载文件。
@@ -89,9 +89,9 @@ TrustDB 默认可按单节点服务运行。启用 TiKV proofstore 后，多个 
 
 ## 快速开始
 
-从 [v1.0.0-beta.1 发布页](https://github.com/wowtrust/trustdb/releases/tag/v1.0.0-beta.1)下载与你的系统和处理器相符的服务器 / CLI 压缩包，解压后在发布目录运行下列命令，不需要安装 Go 工具链。示例使用 `./bin/trustdb`；Windows 请改为 `.\bin\trustdb.exe`。
+从 [v1.0.0 发布页](https://github.com/wowtrust/trustdb/releases/tag/v1.0.0)下载与你的系统和处理器相符的服务器 / CLI 压缩包，解压后在发布目录运行下列命令，不需要安装 Go 工具链。示例使用 `./bin/trustdb`；Windows 请改为 `.\bin\trustdb.exe`。
 
-运行前请用 [`SHA256SUMS`](https://github.com/wowtrust/trustdb/releases/download/v1.0.0-beta.1/SHA256SUMS)核对下载文件。源码编译步骤见单独的[从源码构建](https://www.trustdb.ryan-wong.cn/docs/source-build)章节。
+运行前请用 [`SHA256SUMS`](https://github.com/wowtrust/trustdb/releases/download/v1.0.0/SHA256SUMS)核对下载文件。源码编译步骤见单独的[从源码构建](https://www.trustdb.ryan-wong.cn/docs/source-build)章节。
 
 生成客户端和服务端密钥：
 
