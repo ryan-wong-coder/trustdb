@@ -6,12 +6,13 @@ import { ArrowRight } from "@phosphor-icons/react";
 import { SiteFooter, SiteHeader, PageHero } from "./components/SiteChrome";
 import { useRoute, Link } from "./router";
 import { HomePage } from "./pages/HomePage";
-import { CliDocsPage, ConceptsDocsPage, DesktopDocsPage, DesktopInstallPage, DocsIndexPage, MissingDocsPage, QuickStartPage, SdkDocsPage, ServerDocsPage, SourceBuildPage } from "./pages/DocsPages";
+import { CliDocsPage, ConceptsDocsPage, DesktopDocsPage, DesktopInstallPage, DocsIndexPage, MissingDocsPage, OfflineVerificationPage, QuickStartPage, SdkDocsPage, ServerDocsPage, SourceBuildPage, TroubleshootingPage } from "./pages/DocsPages";
 import { PerformancePage } from "./pages/PerformancePage";
 import { SproofPage } from "./pages/SproofPage";
 import { ChangelogPage, DownloadsPage } from "./pages/ReleasePages";
 import { t, useLocale } from "./i18n";
 import { productExplanation } from "./content/productExplanation";
+import { useDocsOnboarding } from "./content/docsOnboarding";
 
 gsap.registerPlugin(ScrollTrigger, useGSAP);
 
@@ -23,9 +24,11 @@ const titles = {
   "/docs/server": "服务器 · TrustDB 文档",
   "/docs/cli": "CLI · TrustDB 文档",
   "/docs/sdk": "Go SDK · TrustDB 文档",
+  "/docs/offline-verification": "离线验证 · TrustDB 文档",
   "/docs/desktop": "桌面客户端 · TrustDB 文档",
   "/docs/desktop-install": "安装桌面客户端 · TrustDB 文档",
   "/docs/source-build": "从源码构建 · TrustDB 文档",
+  "/docs/troubleshooting": "故障排查 · TrustDB 文档",
   "/performance": "性能基线 · TrustDB",
   "/sproof": ".sproof v1 · TrustDB",
   "/changelog": "版本与开发日志 · TrustDB",
@@ -40,9 +43,11 @@ function RouteView({ route }) {
   if (route === "/docs/server") return <ServerDocsPage route={route} />;
   if (route === "/docs/cli") return <CliDocsPage route={route} />;
   if (route === "/docs/sdk") return <SdkDocsPage route={route} />;
+  if (route === "/docs/offline-verification") return <OfflineVerificationPage route={route} />;
   if (route === "/docs/desktop") return <DesktopDocsPage route={route} />;
   if (route === "/docs/desktop-install") return <DesktopInstallPage route={route} />;
   if (route === "/docs/source-build") return <SourceBuildPage route={route} />;
+  if (route === "/docs/troubleshooting") return <TroubleshootingPage route={route} />;
   if (route.startsWith("/docs/")) return <MissingDocsPage />;
   if (route === "/performance") return <PerformancePage />;
   if (route === "/sproof") return <SproofPage />;
@@ -54,13 +59,24 @@ function RouteView({ route }) {
 export function App() {
   const { route, navigationKey } = useRoute();
   const locale = useLocale();
+  const docsCopy = useDocsOnboarding(locale, route.startsWith("/docs"));
   const root = useRef(null);
 
   useEffect(() => {
+    const onboardingTitles = {
+      "/docs": docsCopy.ui.home,
+      "/docs/quick-start": docsCopy.quickStart.title,
+      "/docs/sdk": docsCopy.sdk.title,
+      "/docs/offline-verification": docsCopy.offline.title,
+      "/docs/server": docsCopy.server.title,
+      "/docs/troubleshooting": docsCopy.troubleshooting.title,
+    };
     document.title = route === "/docs/concepts"
       ? `${productExplanation(locale).concepts.title} · TrustDB`
-      : t(titles[route] || "页面未找到 · TrustDB");
-  }, [route, locale]);
+      : onboardingTitles[route]
+        ? `${onboardingTitles[route]} · TrustDB`
+        : t(titles[route] || "页面未找到 · TrustDB");
+  }, [route, locale, docsCopy]);
 
   useLayoutEffect(() => {
     const rootElement = document.documentElement;
