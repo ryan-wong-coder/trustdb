@@ -1,5 +1,6 @@
-import { ArrowUpRight, GithubLogo, List, X } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { ArrowUpRight, Check, CopySimple, GithubLogo, List, X } from "@phosphor-icons/react";
+import { Children, useEffect, useRef, useState } from "react";
+import { useLocale } from "../i18n";
 import { Link } from "../router";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 
@@ -92,10 +93,49 @@ export function PageHero({ eyebrow, title, lead, meta, children }) {
   );
 }
 
-export function CodeBlock({ label = "shell", children }) {
+export function CodeBlock({ label = "shell", children, reveal = true }) {
+  const locale = useLocale();
+  const [copyState, setCopyState] = useState("idle");
+  const resetTimer = useRef(null);
+  const copyLabels = {
+    "zh-CN": ["复制", "已复制", "复制失败"], en: ["Copy", "Copied", "Copy failed"], ru: ["Копировать", "Скопировано", "Не удалось скопировать"],
+    ja: ["コピー", "コピー済み", "コピー失敗"], fr: ["Copier", "Copié", "Échec de la copie"], ko: ["복사", "복사됨", "복사 실패"],
+  };
+  const source = Children.toArray(children).map((value) => typeof value === "string" || typeof value === "number" ? String(value) : "").join("");
+
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
+  const copy = async () => {
+    let succeeded = false;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(source);
+      succeeded = true;
+    } catch {
+      const textarea = document.createElement("textarea");
+      try {
+        textarea.value = source;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        succeeded = document.execCommand("copy");
+      } catch {
+        succeeded = false;
+      } finally {
+        textarea.remove();
+      }
+    }
+    setCopyState(succeeded ? "copied" : "failed");
+    window.clearTimeout(resetTimer.current);
+    resetTimer.current = window.setTimeout(() => setCopyState("idle"), 1800);
+  };
+
+  const [copyLabel, copiedLabel, failedLabel] = copyLabels[locale] || copyLabels.en;
+  const statusLabel = copyState === "copied" ? copiedLabel : copyState === "failed" ? failedLabel : copyLabel;
   return (
-    <div className="code-block" data-reveal>
-      <div className="code-block__label"><span />{label}</div>
+    <div className="code-block" data-reveal={reveal || undefined}>
+      <div className="code-block__label"><span />{label}<button type="button" onClick={copy} aria-label={statusLabel} aria-live="polite">{copyState === "copied" ? <Check /> : <CopySimple />}{statusLabel}</button></div>
       <pre><code>{children}</code></pre>
     </div>
   );
