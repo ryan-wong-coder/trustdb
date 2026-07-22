@@ -1,10 +1,10 @@
 // Package anchor implements the L5 (Anchored) proof layer. It defines a
 // generic Sink interface for external notaries (file, Certificate
 // Transparency, public blockchains, ...) and a background worker that
-// drains the proofstore anchor outbox and records the publish result.
+// claims the durable coalescing schedule and records immutable results.
 //
-// The separation is intentional: commit-time code only writes a single
-// AnchorOutboxItem and is done. All retry, backoff, observability and
+// The separation is intentional: publication code only coalesces one
+// Pending target. All retry, backoff, observability and
 // sink-specific quirks live behind the Sink contract, so swapping a
 // FileSink for a CtLogSink is a configuration change rather than a
 // code change in the batch pipeline.
@@ -18,23 +18,19 @@ import (
 )
 
 // Sink is the one-method contract every external notary must satisfy.
-// Implementations are expected to be safe for concurrent use because
-// the worker uses a small pool of goroutines; a Sink that cannot
-// handle concurrency must serialise internally.
-//
 // Name returns a short stable identifier ("file", "ct", "bitcoin",
-// ...) recorded in every STHAnchorOutboxItem / STHAnchorResult so that a
+// ...) recorded in every STHAnchorResult so that a
 // proof verifier can pick the right Sink-specific proof parser.
 //
 // Publish must return either:
 //
-//   - (result, nil)    on success; the worker stores the result and
-//     transitions the outbox item to AnchorStatePublished.
+//   - (result, nil)    on success; the worker stores the immutable result
+//     and atomically completes the matching InFlight generation.
 //   - (_, ErrPermanent) wrapped error on a non-retryable failure
 //     (e.g. schema rejected, signature algorithm unknown). The worker
-//     marks the item Failed and never retries.
+//     records a terminal schedule failure and never retries that target.
 //   - (_, any other error) on a transient failure. The worker bumps
-//     the attempts counter and schedules the item for a later retry.
+//     the attempts counter and reschedules the same immutable InFlight target.
 //
 // Implementations should use errors.Is(err, anchor.ErrPermanent) when
 // they need to declare a permanent failure so the worker can

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
@@ -22,6 +24,7 @@ const (
 	defaultUpgradePollInterval = 1 * time.Hour
 	defaultUpgradeBatchSize    = 64
 	defaultUpgradePerCallTO    = 30 * time.Second
+	MaxOtsUpgradeBatchSize     = 1000
 )
 
 // UpgraderConfig collects every knob OtsUpgrader respects. Store is
@@ -76,10 +79,10 @@ func (c *UpgraderConfig) applyDefaults() {
 	}
 }
 
-// OtsUpgrader periodically walks every published OTS STHAnchorResult and
+// OtsUpgrader periodically walks every immutable OTS STHAnchorResult and
 // asks each calendar whether its commitment has been folded into a
 // Bitcoin block. When yes, it rewrites STHAnchorResult.Proof in place
-// (via proofstore.MarkSTHAnchorPublished) so verification tooling sees
+// (via proofstore.STHAnchorResultUpdater) so verification tooling sees
 // the upgraded bytes without operator intervention.
 //
 // The loop is intentionally idempotent: a Calendar marked Upgraded
@@ -87,11 +90,19 @@ func (c *UpgraderConfig) applyDefaults() {
 // every subsequent sweep, so a fully-attested batch costs zero HTTP
 // requests forever after.
 type OtsUpgrader struct {
-	cfg UpgraderConfig
+	cfg     UpgraderConfig
+	pager   proofstore.STHAnchorResultPager
+	reader  proofstore.STHAnchorResultKeyedReader
+	updater proofstore.STHAnchorResultUpdater
 
 	// trigger is a 1-buffered channel so a manual Trigger() never
 	// blocks and never enqueues more than one extra sweep.
 	trigger chan struct{}
+
+	tickMu            sync.Mutex
+	backfillCursor    model.STHAnchorResultKey
+	hasBackfillCursor bool
+	tailTurn          bool
 
 	mu      sync.Mutex
 	running bool
@@ -105,10 +116,29 @@ func NewOtsUpgrader(cfg UpgraderConfig) (*OtsUpgrader, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("ots upgrader: store is required")
 	}
+	pager, ok := cfg.Store.(proofstore.STHAnchorResultPager)
+	if !ok {
+		return nil, errors.New("ots upgrader: store does not support immutable anchor result paging")
+	}
+	reader, ok := cfg.Store.(proofstore.STHAnchorResultKeyedReader)
+	if !ok {
+		return nil, errors.New("ots upgrader: store does not support keyed immutable anchor result reads")
+	}
+	updater, ok := cfg.Store.(proofstore.STHAnchorResultUpdater)
+	if !ok {
+		return nil, errors.New("ots upgrader: store does not support immutable anchor result updates")
+	}
+	if cfg.BatchSize < 0 || cfg.BatchSize > MaxOtsUpgradeBatchSize {
+		return nil, fmt.Errorf("ots upgrader: batch size must be between 0 and %d", MaxOtsUpgradeBatchSize)
+	}
 	cfg.applyDefaults()
 	return &OtsUpgrader{
-		cfg:     cfg,
-		trigger: make(chan struct{}, 1),
+		cfg:      cfg,
+		pager:    pager,
+		reader:   reader,
+		updater:  updater,
+		trigger:  make(chan struct{}, 1),
+		tailTurn: true,
 	}, nil
 }
 
@@ -121,12 +151,14 @@ func (u *OtsUpgrader) Start(ctx context.Context) {
 		u.mu.Unlock()
 		return
 	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
 	u.running = true
-	u.stop = make(chan struct{})
-	u.done = make(chan struct{})
+	u.stop = stop
+	u.done = done
 	u.mu.Unlock()
 
-	go u.run(ctx)
+	go u.run(ctx, stop, done)
 }
 
 // Stop signals the worker to exit and blocks until the in-flight
@@ -138,9 +170,11 @@ func (u *OtsUpgrader) Stop() {
 		u.mu.Unlock()
 		return
 	}
-	close(u.stop)
+	if u.stop != nil {
+		close(u.stop)
+		u.stop = nil
+	}
 	done := u.done
-	u.running = false
 	u.mu.Unlock()
 	if done != nil {
 		<-done
@@ -160,8 +194,8 @@ func (u *OtsUpgrader) Trigger() {
 // run owns the timer + select loop. Errors inside tick() are logged
 // but never propagate, so a transient store / HTTP failure cannot
 // silently kill the upgrader.
-func (u *OtsUpgrader) run(ctx context.Context) {
-	defer close(u.done)
+func (u *OtsUpgrader) run(ctx context.Context, stop, done chan struct{}) {
+	defer u.finishRun(done)
 	// First sweep happens promptly so a server that just started
 	// up and inherits a backlog of pending batches makes immediate
 	// forward progress instead of idling for PollInterval.
@@ -172,7 +206,7 @@ func (u *OtsUpgrader) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-u.stop:
+		case <-stop:
 			return
 		case <-timer.C:
 			u.tick(ctx)
@@ -188,6 +222,17 @@ func (u *OtsUpgrader) run(ctx context.Context) {
 			timer.Reset(u.cfg.PollInterval)
 		}
 	}
+}
+
+func (u *OtsUpgrader) finishRun(done chan struct{}) {
+	u.mu.Lock()
+	if u.done == done {
+		u.running = false
+		u.stop = nil
+		u.done = nil
+	}
+	u.mu.Unlock()
+	close(done)
 }
 
 // TickOnce runs a single sweep synchronously and returns the per-
@@ -214,6 +259,9 @@ type UpgraderTickStats struct {
 }
 
 func (u *OtsUpgrader) tick(ctx context.Context) UpgraderTickStats {
+	u.tickMu.Lock()
+	defer u.tickMu.Unlock()
+
 	var stats UpgraderTickStats
 	if ctx.Err() != nil {
 		return stats
@@ -221,12 +269,12 @@ func (u *OtsUpgrader) tick(ctx context.Context) UpgraderTickStats {
 	if u.cfg.Metrics != nil {
 		u.cfg.Metrics.OtsUpgradeRuns.Inc()
 	}
-	items, err := u.cfg.Store.ListPublishedSTHAnchors(ctx, u.cfg.BatchSize)
+	items, err := u.nextResultPage(ctx)
 	if err != nil {
-		u.cfg.Logger.Warn().Err(err).Msg("ots-upgrader: list published failed")
+		u.cfg.Logger.Warn().Err(err).Msg("ots-upgrader: list immutable results failed")
 		return stats
 	}
-	otsItems := make([]model.STHAnchorOutboxItem, 0, len(items))
+	otsItems := make([]model.STHAnchorResult, 0, len(items))
 	for _, item := range items {
 		if item.SinkName == OtsSinkName {
 			otsItems = append(otsItems, item)
@@ -234,7 +282,7 @@ func (u *OtsUpgrader) tick(ctx context.Context) UpgraderTickStats {
 	}
 	workers := min(u.cfg.Workers, len(otsItems))
 	if workers > 0 {
-		jobs := make(chan model.STHAnchorOutboxItem)
+		jobs := make(chan model.STHAnchorResult)
 		results := make(chan UpgraderTickStats, len(otsItems))
 		var wg sync.WaitGroup
 		for i := 0; i < workers; i++ {
@@ -248,11 +296,12 @@ func (u *OtsUpgrader) tick(ctx context.Context) UpgraderTickStats {
 				}
 			}()
 		}
+	feedJobs:
 		for _, item := range otsItems {
 			select {
 			case jobs <- item:
 			case <-ctx.Done():
-				break
+				break feedJobs
 			}
 		}
 		close(jobs)
@@ -274,6 +323,91 @@ func (u *OtsUpgrader) tick(ctx context.Context) UpgraderTickStats {
 	return stats
 }
 
+// nextResultPage reserves part of every sweep for the newest immutable anchor
+// results and uses the remainder for a descending historical backfill. The
+// tail read keeps newly-created OTS results prompt even after restarts or in a
+// namespace with years of file/noop history, while the cursor still makes old
+// pending OTS proofs converge without an unbounded scan.
+func (u *OtsUpgrader) nextResultPage(ctx context.Context) ([]model.STHAnchorResult, error) {
+	if u.cfg.BatchSize == 1 {
+		if u.tailTurn || !u.hasBackfillCursor {
+			u.tailTurn = false
+			items, err := u.pageResults(ctx, model.STHAnchorResultKey{}, false, 1)
+			if err != nil || len(items) == 0 {
+				return items, err
+			}
+			if !u.hasBackfillCursor {
+				u.backfillCursor = anchorschedule.ResultKey(items[len(items)-1])
+				u.hasBackfillCursor = true
+			}
+			return items, nil
+		}
+		u.tailTurn = true
+		items, err := u.pageResults(ctx, u.backfillCursor, true, 1)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			u.backfillCursor = model.STHAnchorResultKey{}
+			u.hasBackfillCursor = false
+			return nil, nil
+		}
+		u.backfillCursor = anchorschedule.ResultKey(items[len(items)-1])
+		return items, nil
+	}
+
+	tailLimit := (u.cfg.BatchSize + 1) / 2
+	backfillLimit := u.cfg.BatchSize - tailLimit
+	tail, err := u.pageResults(ctx, model.STHAnchorResultKey{}, false, tailLimit)
+	if err != nil || len(tail) == 0 || backfillLimit == 0 {
+		return tail, err
+	}
+	if !u.hasBackfillCursor {
+		u.backfillCursor = anchorschedule.ResultKey(tail[len(tail)-1])
+		u.hasBackfillCursor = true
+	}
+	backfill, err := u.pageResults(ctx, u.backfillCursor, true, backfillLimit)
+	if err != nil {
+		return nil, err
+	}
+	if len(backfill) == 0 {
+		u.backfillCursor = anchorschedule.ResultKey(tail[len(tail)-1])
+		backfill, err = u.pageResults(ctx, u.backfillCursor, true, backfillLimit)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(backfill) > 0 {
+		u.backfillCursor = anchorschedule.ResultKey(backfill[len(backfill)-1])
+	}
+	return appendUniqueAnchorResults(tail, backfill), nil
+}
+
+func (u *OtsUpgrader) pageResults(ctx context.Context, after model.STHAnchorResultKey, hasAfter bool, limit int) ([]model.STHAnchorResult, error) {
+	return u.pager.ListSTHAnchorResultsPage(ctx, model.AnchorListOptions{
+		Limit: limit, Direction: model.RecordListDirectionDesc, AfterResultKey: after, HasAfter: hasAfter,
+	})
+}
+
+func appendUniqueAnchorResults(first, second []model.STHAnchorResult) []model.STHAnchorResult {
+	if len(second) == 0 {
+		return first
+	}
+	result := make([]model.STHAnchorResult, 0, len(first)+len(second))
+	seen := make(map[model.STHAnchorResultKey]struct{}, len(first)+len(second))
+	for _, items := range [...][]model.STHAnchorResult{first, second} {
+		for _, item := range items {
+			key := anchorschedule.ResultKey(item)
+			if _, found := seen[key]; found {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 func mergeUpgraderTickStats(dst *UpgraderTickStats, src UpgraderTickStats) {
 	dst.Visited += src.Visited
 	dst.Skipped += src.Skipped
@@ -286,37 +420,11 @@ func mergeUpgraderTickStats(dst *UpgraderTickStats, src UpgraderTickStats) {
 	dst.CalendarErrored += src.CalendarErrored
 }
 
-// processOne loads the STHAnchorResult, runs the upgrade probe, and
+// processOne upgrades one immutable STHAnchorResult and
 // persists when something changed. errors are logged + reflected in
 // stats; the loop keeps going so one bad batch can't stall the rest.
-func (u *OtsUpgrader) processOne(ctx context.Context, item model.STHAnchorOutboxItem, stats *UpgraderTickStats) {
-	logger := u.cfg.Logger.With().Uint64("tree_size", item.TreeSize).Logger()
-	var ar model.STHAnchorResult
-	var ok bool
-	var err error
-	if reader, supported := u.cfg.Store.(proofstore.STHAnchorResultKeyedReader); supported {
-		ar, ok, err = reader.GetSTHAnchorResultForKey(ctx, model.STHAnchorResultKey{
-			NodeID: item.STH.NodeID, LogID: item.STH.LogID, SinkName: item.SinkName, TreeSize: item.TreeSize,
-		})
-	} else {
-		ar, ok, err = u.cfg.Store.GetSTHAnchorResult(ctx, item.TreeSize)
-	}
-	if err != nil {
-		stats.Errored++
-		u.markBatchOutcome("error")
-		logger.Warn().Err(err).Msg("ots-upgrader: get anchor result failed")
-		return
-	}
-	if !ok {
-		// Outbox says published but the result is missing. The
-		// anchor worker already tolerates this race during
-		// crash recovery; we simply skip the batch this tick and
-		// let the worker restore the result on its own schedule.
-		stats.Skipped++
-		u.markBatchOutcome("skipped")
-		return
-	}
-
+func (u *OtsUpgrader) processOne(ctx context.Context, ar model.STHAnchorResult, stats *UpgraderTickStats) {
+	logger := u.cfg.Logger.With().Uint64("tree_size", ar.TreeSize).Logger()
 	updated, summary, err := UpgradeAnchorResult(ctx, ar, u.cfg.HTTPOptions)
 	if err != nil {
 		stats.Errored++
@@ -351,20 +459,27 @@ func (u *OtsUpgrader) processOne(ctx context.Context, item model.STHAnchorOutbox
 		u.markBatchOutcome("unchanged")
 		return
 	}
-	if err := u.cfg.Store.MarkSTHAnchorPublished(ctx, updated); err != nil {
+	persisted, changed, err := PersistOtsAnchorResultUpgrade(ctx, u.reader, u.updater, ar, updated)
+	if err != nil {
 		stats.Errored++
 		u.markBatchOutcome("error")
 		logger.Warn().Err(err).Msg("ots-upgrader: persist upgraded result failed")
 		return
 	}
-	stats.Changed++
-	u.markBatchOutcome("changed")
-	if proof, decodeErr := decodeOtsProofEnvelope(updated.Proof); decodeErr == nil && !proof.AllUpgraded() {
+	if changed {
+		stats.Changed++
+		u.markBatchOutcome("changed")
+	} else {
+		stats.Unchanged++
+		u.markBatchOutcome("unchanged")
+	}
+	if proof, decodeErr := decodeOtsProofEnvelope(persisted.Proof); decodeErr == nil && !proof.AllUpgraded() {
 		stats.StillPending++
 	}
 	logger.Info().
 		Int("calendars_changed", stats.CalendarChanged).
-		Msg("ots-upgrader: persisted upgraded proof")
+		Bool("stored", changed).
+		Msg("ots-upgrader: converged upgraded proof")
 }
 
 // decodeOtsProofEnvelope is a tiny private helper that lets the
@@ -382,13 +497,6 @@ func decodeOtsProofEnvelope(b []byte) (*OtsAnchorProof, error) {
 	}
 	return &p, nil
 }
-
-// _ = model.STHAnchorOutboxItem is a deliberate import-pin to document
-// that the upgrader only cares about a tiny subset (TreeSize +
-// SinkName) of STHAnchorOutboxItem and would not break if the wider
-// shape changes. Removing it is fine; keeping it makes intent
-// explicit during code review.
-var _ = model.STHAnchorOutboxItem{}
 
 // markBatchOutcome / markCalendarOutcome guard the metric Inc() calls
 // so callers don't have to spell out the nil-guard at every site.

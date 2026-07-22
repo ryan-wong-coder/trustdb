@@ -378,11 +378,15 @@ func (t *grpcTransport) ListAnchors(ctx context.Context, opts ListPageOptions) (
 	}
 	items := make([]AnchorPageItem, 0, len(out.Anchors))
 	for _, item := range out.Anchors {
+		if err := validatePublishedAnchorEnvelope("list anchors", t.Endpoint(), anchorEnvelope{
+			TreeSize: item.TreeSize, Status: item.Status, ProofLevel: item.ProofLevel, Result: item.Result,
+		}); err != nil {
+			return AnchorPage{}, err
+		}
 		items = append(items, AnchorPageItem{
 			TreeSize: item.TreeSize,
 			Status:   item.Status,
 			Result:   item.Result,
-			Outbox:   item.Outbox,
 		})
 	}
 	return AnchorPage{Anchors: items, Limit: out.Limit, Direction: out.Direction, NextCursor: out.NextCursor}, nil
@@ -391,6 +395,11 @@ func (t *grpcTransport) ListAnchors(ctx context.Context, opts ListPageOptions) (
 func (t *grpcTransport) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {
 	var out grpcapi.GetAnchorResponse
 	if err := t.invoke(ctx, grpcapi.FullMethodGetAnchor, &grpcapi.GetAnchorRequest{TreeSize: treeSize}, &out); err != nil {
+		return AnchorStatus{}, err
+	}
+	if err := validatePublishedAnchorEnvelope("get anchor", t.Endpoint(), anchorEnvelope{
+		TreeSize: out.TreeSize, Status: out.Status, ProofLevel: out.ProofLevel, Result: out.Result,
+	}); err != nil {
 		return AnchorStatus{}, err
 	}
 	return AnchorStatus{TreeSize: out.TreeSize, Status: out.Status, Result: out.Result}, nil

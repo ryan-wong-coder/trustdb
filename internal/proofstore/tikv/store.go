@@ -499,8 +499,7 @@ const (
 	prefixGlobalTile     = "global/tile/"
 	prefixGlobalOutbox   = "global/outbox/"
 	prefixGlobalStatus   = "global/outbox-status/"
-	prefixAnchorOutbox   = "anchor/sth-outbox/"
-	prefixAnchorStatus   = "anchor/sth-status/"
+	prefixGlobalStream   = "global/outbox-stream-status/"
 	prefixAnchorResult   = "anchor/sth-result/v2/"
 	prefixAnchorLatest   = "anchor/sth-latest/v1/"
 	prefixAnchorTreeRoot = "anchor/sth-tree-root/v1/"
@@ -508,11 +507,13 @@ const (
 	prefixL5Coverage     = "anchor/l5-coverage/v1/"
 	prefixCheckpoint     = "checkpoint/wal/v2/"
 	prefixIdempotency    = "idempotency/decision/"
+	storageSchemaKey     = "meta/storage-schema"
 	idempotencyReadyKey  = "meta/idempotency-projection/ready"
 	idempotencyFenceKey  = "meta/idempotency-projection/fence"
 	globalStateKey       = "global/state/latest"
 	anchorLatestAllKey   = "anchor/sth-latest-all/v1"
 	rootSortKeyWidth     = 20
+	storageSchemaV4      = "trustdb-proofstore-v4"
 	idempotencyReadyV1   = "trustdb.idempotency-projection.ready.v1"
 )
 
@@ -651,13 +652,75 @@ func OpenWithOptions(opts Options) (*Store, error) {
 	if err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeInternal, "open tikv proofstore", err)
 	}
+	db := &tikvDB{client: client, namespace: namespaceKeyPrefix(opts.Namespace)}
+	if err := ensureStorageSchema(db); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
 	return &Store{
-		db:               &tikvDB{client: client, namespace: namespaceKeyPrefix(opts.Namespace)},
+		db:               db,
 		recordIndexMode:  normalizeRecordIndexMode(opts),
 		artifactSyncMode: normalizeArtifactSyncMode(opts.ArtifactSyncMode),
 		checkpointNodeID: strings.TrimSpace(opts.CheckpointNodeID),
 		checkpointWALID:  strings.TrimSpace(opts.CheckpointWALID),
 	}, nil
+}
+
+func ensureStorageSchema(db *tikvDB) error {
+	value, closer, err := db.Get([]byte(storageSchemaKey))
+	if err == nil {
+		defer closer.Close()
+		if string(value) != storageSchemaV4 {
+			return trusterr.New(trusterr.CodeFailedPrecondition, fmt.Sprintf("unsupported tikv proofstore schema %q; expected %q; clear or rebuild the proofstore namespace", string(value), storageSchemaV4))
+		}
+		return nil
+	}
+	if !errors.Is(err, errNotFound) {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "read tikv proofstore schema", err)
+	}
+
+	lower, upper := prefixBounds("")
+	iter, err := db.NewIter(&iterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "inspect tikv proofstore schema", err)
+	}
+	hasExistingData := iter.First()
+	iterErr := iter.Error()
+	if closeErr := iter.Close(); iterErr == nil {
+		iterErr = closeErr
+	}
+	if iterErr != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "inspect tikv proofstore contents", iterErr)
+	}
+	if hasExistingData {
+		// Another node may have initialized the previously empty namespace and
+		// published additional metadata after our first point read. Re-read the
+		// marker before classifying the namespace as an unversioned legacy store.
+		value, closer, readErr := db.Get([]byte(storageSchemaKey))
+		if readErr == nil {
+			defer closer.Close()
+			if string(value) != storageSchemaV4 {
+				return trusterr.New(trusterr.CodeFailedPrecondition, fmt.Sprintf("unsupported tikv proofstore schema %q; expected %q; clear or rebuild the proofstore namespace", string(value), storageSchemaV4))
+			}
+			return nil
+		}
+		if !errors.Is(readErr, errNotFound) {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "re-read tikv proofstore schema", readErr)
+		}
+		return trusterr.New(trusterr.CodeFailedPrecondition, "unversioned tikv proofstore namespace detected; clear or rebuild the proofstore namespace")
+	}
+	if err := db.Set([]byte(storageSchemaKey), []byte(storageSchemaV4), syncWrite); err != nil {
+		// A concurrent opener may have initialized the same empty namespace.
+		value, closer, readErr := db.Get([]byte(storageSchemaKey))
+		if readErr == nil {
+			defer closer.Close()
+			if string(value) == storageSchemaV4 {
+				return nil
+			}
+		}
+		return trusterr.Wrap(trusterr.CodeDataLoss, "initialize tikv proofstore schema", err)
+	}
+	return nil
 }
 
 func NormalizeNamespace(namespace string) string {
@@ -2910,6 +2973,23 @@ func globalStatusPrefix(status string) string {
 	return prefixGlobalStatus + status + "/"
 }
 
+func globalStreamStatusKey(item model.GlobalLogOutboxItem) []byte {
+	return []byte(fmt.Sprintf(
+		"%s%s/%s/%s/%0*d/%s",
+		prefixGlobalStream,
+		item.Status,
+		recordSecondaryPart(item.BatchRoot.NodeID),
+		recordSecondaryPart(item.BatchRoot.LogID),
+		rootSortKeyWidth,
+		globalStatusSortUnixN(item),
+		item.BatchID,
+	))
+}
+
+func globalStreamStatusPrefix(status, nodeID, logID string) string {
+	return fmt.Sprintf("%s%s/%s/%s/", prefixGlobalStream, status, recordSecondaryPart(nodeID), recordSecondaryPart(logID))
+}
+
 func globalStatusSortUnixN(item model.GlobalLogOutboxItem) int64 {
 	switch item.Status {
 	case model.AnchorStatePending:
@@ -2922,34 +3002,6 @@ func globalStatusSortUnixN(item model.GlobalLogOutboxItem) int64 {
 			return item.CompletedAtUnixN
 		}
 		return item.LastAttemptUnixN
-	default:
-		return item.EnqueuedAtUnixN
-	}
-}
-
-func anchorOutboxKey(treeSize uint64) []byte {
-	return []byte(fmt.Sprintf("%s%0*d", prefixAnchorOutbox, rootSortKeyWidth, treeSize))
-}
-
-func anchorStatusKey(status string, sortUnixN int64, treeSize uint64) []byte {
-	return []byte(fmt.Sprintf("%s%s/%0*d/%0*d", prefixAnchorStatus, status, rootSortKeyWidth, sortUnixN, rootSortKeyWidth, treeSize))
-}
-
-func anchorStatusPrefix(status string) string {
-	return prefixAnchorStatus + status + "/"
-}
-
-func anchorStatusSortUnixN(item model.STHAnchorOutboxItem) int64 {
-	switch item.Status {
-	case model.AnchorStatePending:
-		if item.NextAttemptUnixN > 0 {
-			return item.NextAttemptUnixN
-		}
-		return item.EnqueuedAtUnixN
-	case model.AnchorStatePublished:
-		return item.EnqueuedAtUnixN
-	case model.AnchorStateFailed:
-		return item.EnqueuedAtUnixN
 	default:
 		return item.EnqueuedAtUnixN
 	}
@@ -3718,6 +3770,9 @@ func (s *Store) EnqueueGlobalLog(ctx context.Context, item model.GlobalLogOutbox
 	if err := batch.Set(globalStatusKey(item.Status, globalStatusSortUnixN(item), item.BatchID), data, nil); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log status index", err)
 	}
+	if err := batch.Set(globalStreamStatusKey(item), data, nil); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log stream status index", err)
+	}
 	if err := batch.Commit(syncWrite); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "commit global log outbox item", err)
 	}
@@ -3725,11 +3780,19 @@ func (s *Store) EnqueueGlobalLog(ctx context.Context, item model.GlobalLogOutbox
 }
 
 func (s *Store) ListPendingGlobalLog(ctx context.Context, nowUnixN int64, limit int) ([]model.GlobalLogOutboxItem, error) {
+	return s.listPendingGlobalLogPrefix(ctx, globalStatusPrefix(model.AnchorStatePending), nowUnixN, limit)
+}
+
+func (s *Store) ListPendingGlobalLogForStream(ctx context.Context, nodeID, logID string, nowUnixN int64, limit int) ([]model.GlobalLogOutboxItem, error) {
+	return s.listPendingGlobalLogPrefix(ctx, globalStreamStatusPrefix(model.AnchorStatePending, nodeID, logID), nowUnixN, limit)
+}
+
+func (s *Store) listPendingGlobalLogPrefix(ctx context.Context, prefix string, nowUnixN int64, limit int) ([]model.GlobalLogOutboxItem, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	items := make([]model.GlobalLogOutboxItem, 0)
-	err := s.scanPrefix(ctx, globalStatusPrefix(model.AnchorStatePending), func(value []byte) error {
+	err := s.scanPrefix(ctx, prefix, func(value []byte) error {
 		if len(items) >= limit {
 			return errStopScan
 		}
@@ -3889,129 +3952,193 @@ func globalOutboxBatchReadError(ctx context.Context, err error) error {
 }
 
 func (s *Store) MarkGlobalLogPublished(ctx context.Context, batchID string, sth model.SignedTreeHead) error {
-	item, ok, err := s.GetGlobalLogOutboxItem(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return trusterr.New(trusterr.CodeNotFound, "global log outbox item not found")
-	}
-	old := item
-	now := time.Now().UTC().UnixNano()
-	item.Status = model.AnchorStatePublished
-	item.STH = sth
-	item.LastErrorMessage = ""
-	item.LastAttemptUnixN = now
-	item.NextAttemptUnixN = 0
-	item.CompletedAtUnixN = now
-	if err := s.promoteBatchRecords(ctx, batchID, "L4"); err != nil {
-		return err
-	}
-	if err := s.replaceGlobalLogOutbox(ctx, old, item); err != nil {
-		return err
-	}
-	return nil
+	return s.markGlobalLogPublishedBatch(ctx, []string{batchID}, []model.SignedTreeHead{sth}, nil)
 }
 
 func (s *Store) MarkGlobalLogPublishedBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead) error {
 	return s.markGlobalLogPublishedBatch(ctx, batchIDs, sths, nil)
 }
 
-func (s *Store) MarkGlobalLogPublishedBatchWithAnchors(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, anchors []model.STHAnchorOutboxItem) error {
-	return s.markGlobalLogPublishedBatch(ctx, batchIDs, sths, anchors)
+func (s *Store) MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, candidate model.STHAnchorCandidate) error {
+	return s.markGlobalLogPublishedBatch(ctx, batchIDs, sths, &candidate)
 }
 
-func (s *Store) markGlobalLogPublishedBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, anchors []model.STHAnchorOutboxItem) error {
+func (s *Store) markGlobalLogPublishedBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, candidate *model.STHAnchorCandidate) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore mark global log batch published canceled", err)
 	}
 	if len(batchIDs) == 0 || len(batchIDs) != len(sths) {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log published batch inputs are inconsistent")
 	}
-	if len(anchors) != 0 && len(anchors) != len(sths) {
-		return trusterr.New(trusterr.CodeInvalidArgument, "global log anchor batch inputs are inconsistent")
+	for _, batchID := range batchIDs {
+		if batchID == "" {
+			return trusterr.New(trusterr.CodeInvalidArgument, "batch_id is required")
+		}
 	}
-	type update struct {
-		old  model.GlobalLogOutboxItem
-		next model.GlobalLogOutboxItem
-		data []byte
+	batchIDs, sths = coalesceGlobalLogPublicationInputs(batchIDs, sths)
+	if candidate != nil {
+		if err := anchorschedule.ValidateCandidate(*candidate); err != nil {
+			return err
+		}
+		_, highest, err := anchorschedule.SelectPublicationTargets(sths, 0)
+		if err != nil {
+			return err
+		}
+		if !anchorschedule.SameTarget(candidate.STH, highest) {
+			return trusterr.New(trusterr.CodeInvalidArgument, "anchor candidate must be the highest published STH")
+		}
 	}
-	updates := make([]update, len(batchIDs))
-	type anchorUpdate struct {
-		item model.STHAnchorOutboxItem
-		data []byte
-	}
-	anchorUpdates := make([]anchorUpdate, len(anchors))
-	now := time.Now().UTC().UnixNano()
-	items, err := s.readGlobalLogOutboxItems(ctx, batchIDs)
-	if err != nil {
+
+	// Fence the complete input set and persist the coalesced anchor intent
+	// before any L4 record becomes visible. Record-index projection is then
+	// chunked per batch so production-sized outbox batches cannot exceed TiKV's
+	// transaction mutation/size limits. A crash leaves the outbox item pending,
+	// making every completed promotion chunk safe to replay.
+	if err := s.prepareGlobalLogPublicationBatch(ctx, batchIDs, sths, candidate); err != nil {
 		return err
 	}
 	for i := range batchIDs {
-		item := items[i]
-		next := item
-		next.Status = model.AnchorStatePublished
-		next.STH = sths[i]
-		next.LastErrorMessage = ""
-		next.LastAttemptUnixN = now
-		next.NextAttemptUnixN = 0
-		next.CompletedAtUnixN = now
-		data, err := cborx.Marshal(next)
-		if err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "encode global log outbox item", err)
-		}
-		updates[i] = update{old: item, next: next, data: data}
-	}
-	for i := range anchors {
-		item := anchors[i]
-		if item.TreeSize == 0 || item.TreeSize != sths[i].TreeSize {
-			return trusterr.New(trusterr.CodeInvalidArgument, "sth anchor tree_size is inconsistent")
-		}
-		if item.SchemaVersion == "" {
-			item.SchemaVersion = model.SchemaSTHAnchorOutbox
-		}
-		if item.Status == "" {
-			item.Status = model.AnchorStatePending
-		}
-		if item.EnqueuedAtUnixN == 0 {
-			item.EnqueuedAtUnixN = now
-		}
-		data, err := cborx.Marshal(item)
-		if err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "encode sth anchor outbox item", err)
-		}
-		anchorUpdates[i] = anchorUpdate{item: item, data: data}
-	}
-	for i := range batchIDs {
 		if err := s.promoteBatchRecords(ctx, batchIDs[i], "L4"); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "promote global log batch records to L4", err)
+		}
+	}
+	return s.publishGlobalLogOutboxBatch(ctx, batchIDs, sths)
+}
+
+func coalesceGlobalLogPublicationInputs(batchIDs []string, sths []model.SignedTreeHead) ([]string, []model.SignedTreeHead) {
+	uniqueBatchIDs := make([]string, 0, len(batchIDs))
+	uniqueSTHs := make([]model.SignedTreeHead, 0, len(sths))
+	positions := make(map[string]int, len(batchIDs))
+	for i, batchID := range batchIDs {
+		if position, found := positions[batchID]; found {
+			uniqueSTHs[position] = sths[i]
+			continue
+		}
+		positions[batchID] = len(uniqueBatchIDs)
+		uniqueBatchIDs = append(uniqueBatchIDs, batchID)
+		uniqueSTHs = append(uniqueSTHs, sths[i])
+	}
+	return uniqueBatchIDs, uniqueSTHs
+}
+
+func (s *Store) prepareGlobalLogPublicationBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, candidate *model.STHAnchorCandidate) error {
+	return s.runAnchorScheduleTransaction(ctx, "prepare global log publication with anchor candidate", func(txn *transaction.KVTxn) error {
+		items, err := s.readGlobalLogOutboxItemsTransaction(ctx, txn, batchIDs)
+		if err != nil {
 			return err
 		}
-	}
-	batch := s.db.NewBatch()
-	defer batch.Close()
-	for i := range updates {
-		if err := batch.Set(globalOutboxKey(updates[i].next.BatchID), updates[i].data, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log outbox item", err)
+		if err := validateGlobalLogPublicationItems(items, batchIDs, sths); err != nil {
+			return err
 		}
-		if err := batch.Delete(globalStatusKey(updates[i].old.Status, globalStatusSortUnixN(updates[i].old), updates[i].old.BatchID), nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage old global log status delete", err)
+		if candidate == nil {
+			return nil
 		}
-		if err := batch.Set(globalStatusKey(updates[i].next.Status, globalStatusSortUnixN(updates[i].next), updates[i].next.BatchID), updates[i].data, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log status index", err)
+		next, changed, err := s.mergeSTHAnchorCandidateTransaction(ctx, txn, *candidate)
+		if err != nil || !changed {
+			return err
 		}
-	}
-	for i := range anchorUpdates {
-		if err := batch.Set(anchorOutboxKey(anchorUpdates[i].item.TreeSize), anchorUpdates[i].data, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor outbox item", err)
+		return s.writeAnchorScheduleTransaction(txn, next)
+	})
+}
+
+func validateGlobalLogPublicationItems(items []model.GlobalLogOutboxItem, batchIDs []string, sths []model.SignedTreeHead) error {
+	for i := range batchIDs {
+		item := items[i]
+		if item.BatchID != batchIDs[i] {
+			return trusterr.New(trusterr.CodeDataLoss, "global log outbox key does not match item")
 		}
-		if err := batch.Set(anchorStatusKey(anchorUpdates[i].item.Status, anchorStatusSortUnixN(anchorUpdates[i].item), anchorUpdates[i].item.TreeSize), anchorUpdates[i].data, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor status index", err)
+		switch item.Status {
+		case model.AnchorStatePending:
+		case model.AnchorStatePublished:
+			if !anchorschedule.SameTarget(item.STH, sths[i]) {
+				return trusterr.New(trusterr.CodeDataLoss, "published global log outbox STH does not match retry")
+			}
+		default:
+			return trusterr.New(trusterr.CodeDataLoss, "global log outbox item has invalid status")
 		}
-	}
-	if err := batch.Commit(syncWrite); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "commit global log outbox batch", err)
 	}
 	return nil
+}
+
+func (s *Store) publishGlobalLogOutboxBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead) error {
+	return s.runAnchorScheduleTransaction(ctx, "commit global log outbox publication", func(txn *transaction.KVTxn) error {
+		items, err := s.readGlobalLogOutboxItemsTransaction(ctx, txn, batchIDs)
+		if err != nil {
+			return err
+		}
+		if err := validateGlobalLogPublicationItems(items, batchIDs, sths); err != nil {
+			return err
+		}
+		now := time.Now().UTC().UnixNano()
+		batch := s.db.NewBatch()
+		defer batch.Close()
+		for i, item := range items {
+			if item.Status == model.AnchorStatePublished {
+				continue
+			}
+			next := item
+			next.Status = model.AnchorStatePublished
+			next.STH = sths[i]
+			next.LastErrorMessage = ""
+			next.LastAttemptUnixN = now
+			next.NextAttemptUnixN = 0
+			next.CompletedAtUnixN = now
+			encoded, err := cborx.Marshal(next)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeDataLoss, "encode global log outbox item", err)
+			}
+			if err := batch.Set(globalOutboxKey(next.BatchID), encoded, nil); err != nil {
+				return err
+			}
+			if err := batch.Delete(globalStatusKey(item.Status, globalStatusSortUnixN(item), item.BatchID), nil); err != nil {
+				return err
+			}
+			if err := batch.Delete(globalStreamStatusKey(item), nil); err != nil {
+				return err
+			}
+			if err := batch.Set(globalStatusKey(next.Status, globalStatusSortUnixN(next), next.BatchID), encoded, nil); err != nil {
+				return err
+			}
+			if err := batch.Set(globalStreamStatusKey(next), encoded, nil); err != nil {
+				return err
+			}
+		}
+		return batch.apply(txn)
+	})
+}
+
+func (s *Store) readGlobalLogOutboxItemsTransaction(ctx context.Context, txn *transaction.KVTxn, batchIDs []string) ([]model.GlobalLogOutboxItem, error) {
+	unique := make([][]byte, 0, len(batchIDs))
+	physicalByBatch := make(map[string][]byte, len(batchIDs))
+	for _, batchID := range batchIDs {
+		if batchID == "" {
+			return nil, trusterr.New(trusterr.CodeInvalidArgument, "batch_id is required")
+		}
+		if _, found := physicalByBatch[batchID]; found {
+			continue
+		}
+		key := s.db.physicalKey(globalOutboxKey(batchID))
+		physicalByBatch[batchID] = key
+		unique = append(unique, key)
+	}
+	values, err := txn.BatchGet(ctx, unique)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]model.GlobalLogOutboxItem, len(batchIDs))
+	for i, batchID := range batchIDs {
+		value, found := values[string(physicalByBatch[batchID])]
+		if !found {
+			return nil, trusterr.New(trusterr.CodeNotFound, "global log outbox item not found")
+		}
+		if err := cborx.UnmarshalLimit(value, &items[i], maxStoredObjectBytes); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode global log outbox item", err)
+		}
+		if items[i].BatchID != batchID {
+			return nil, trusterr.New(trusterr.CodeDataLoss, "global log outbox key does not match item")
+		}
+	}
+	return items, nil
 }
 
 func (s *Store) RescheduleGlobalLog(ctx context.Context, batchID string, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error {
@@ -4029,343 +4156,6 @@ func (s *Store) RescheduleGlobalLog(ctx context.Context, batchID string, attempt
 	item.LastErrorMessage = lastErrorMessage
 	item.LastAttemptUnixN = time.Now().UTC().UnixNano()
 	return s.replaceGlobalLogOutbox(ctx, old, item)
-}
-
-func (s *Store) EnqueueSTHAnchor(ctx context.Context, item model.STHAnchorOutboxItem) error {
-	if err := ctx.Err(); err != nil {
-		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore enqueue sth anchor canceled", err)
-	}
-	if item.TreeSize == 0 {
-		return trusterr.New(trusterr.CodeInvalidArgument, "sth anchor tree_size is required")
-	}
-	if item.SchemaVersion == "" {
-		item.SchemaVersion = model.SchemaSTHAnchorOutbox
-	}
-	if item.Status == "" {
-		item.Status = model.AnchorStatePending
-	}
-	if item.EnqueuedAtUnixN == 0 {
-		item.EnqueuedAtUnixN = time.Now().UTC().UnixNano()
-	}
-	key := anchorOutboxKey(item.TreeSize)
-	if _, closer, err := s.db.Get(key); err == nil {
-		closer.Close()
-		return trusterr.New(trusterr.CodeAlreadyExists, "sth anchor outbox item already exists")
-	} else if !isNotFound(err) {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "check sth anchor outbox item", err)
-	}
-	data, err := cborx.Marshal(item)
-	if err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "encode sth anchor outbox item", err)
-	}
-	batch := s.db.NewBatch()
-	defer batch.Close()
-	if err := batch.Set(key, data, nil); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor outbox item", err)
-	}
-	if err := batch.Set(anchorStatusKey(item.Status, anchorStatusSortUnixN(item), item.TreeSize), data, nil); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor status index", err)
-	}
-	if err := batch.Commit(syncWrite); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "commit sth anchor outbox item", err)
-	}
-	return nil
-}
-
-func (s *Store) EnqueueSTHAnchors(ctx context.Context, items []model.STHAnchorOutboxItem) error {
-	if err := ctx.Err(); err != nil {
-		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore enqueue sth anchor batch canceled", err)
-	}
-	type encodedItem struct {
-		item model.STHAnchorOutboxItem
-		data []byte
-	}
-	encoded := make([]encodedItem, 0, len(items))
-	now := time.Now().UTC().UnixNano()
-	for i := range items {
-		item := items[i]
-		if item.TreeSize == 0 {
-			return trusterr.New(trusterr.CodeInvalidArgument, "sth anchor tree_size is required")
-		}
-		if item.SchemaVersion == "" {
-			item.SchemaVersion = model.SchemaSTHAnchorOutbox
-		}
-		if item.Status == "" {
-			item.Status = model.AnchorStatePending
-		}
-		if item.EnqueuedAtUnixN == 0 {
-			item.EnqueuedAtUnixN = now
-		}
-		key := anchorOutboxKey(item.TreeSize)
-		if _, closer, err := s.db.Get(key); err == nil {
-			closer.Close()
-			continue
-		} else if !isNotFound(err) {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "check sth anchor outbox item", err)
-		}
-		data, err := cborx.Marshal(item)
-		if err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "encode sth anchor outbox item", err)
-		}
-		encoded = append(encoded, encodedItem{item: item, data: data})
-	}
-	if len(encoded) == 0 {
-		return nil
-	}
-	batch := s.db.NewBatch()
-	defer batch.Close()
-	for i := range encoded {
-		if err := batch.Set(anchorOutboxKey(encoded[i].item.TreeSize), encoded[i].data, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor outbox item", err)
-		}
-		if err := batch.Set(anchorStatusKey(encoded[i].item.Status, anchorStatusSortUnixN(encoded[i].item), encoded[i].item.TreeSize), encoded[i].data, nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor status index", err)
-		}
-	}
-	if err := batch.Commit(syncWrite); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "commit sth anchor outbox batch", err)
-	}
-	return nil
-}
-
-func (s *Store) ListPendingSTHAnchors(ctx context.Context, nowUnixN int64, limit int) ([]model.STHAnchorOutboxItem, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	items := make([]model.STHAnchorOutboxItem, 0)
-	err := s.scanPrefix(ctx, anchorStatusPrefix(model.AnchorStatePending), func(value []byte) error {
-		if len(items) >= limit {
-			return errStopScan
-		}
-		var item model.STHAnchorOutboxItem
-		if err := cborx.UnmarshalLimit(value, &item, maxStoredObjectBytes); err != nil {
-			return err
-		}
-		if item.NextAttemptUnixN > nowUnixN {
-			return errStopScan
-		}
-		if len(items) == 0 {
-			items = make([]model.STHAnchorOutboxItem, 0, limit)
-		}
-		items = append(items, item)
-		return nil
-	})
-	if err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "list pending sth anchors", err)
-	}
-	return items, nil
-}
-
-func (s *Store) ListPublishedSTHAnchors(ctx context.Context, limit int) ([]model.STHAnchorOutboxItem, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	items := make([]model.STHAnchorOutboxItem, 0)
-	err := s.scanPrefix(ctx, anchorStatusPrefix(model.AnchorStatePublished), func(value []byte) error {
-		if len(items) >= limit {
-			return errStopScan
-		}
-		var item model.STHAnchorOutboxItem
-		if err := cborx.UnmarshalLimit(value, &item, maxStoredObjectBytes); err != nil {
-			return err
-		}
-		if len(items) == 0 {
-			items = make([]model.STHAnchorOutboxItem, 0, limit)
-		}
-		items = append(items, item)
-		return nil
-	})
-	if err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "list published sth anchors", err)
-	}
-	return items, nil
-}
-
-func (s *Store) GetSTHAnchorOutboxItem(ctx context.Context, treeSize uint64) (model.STHAnchorOutboxItem, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return model.STHAnchorOutboxItem{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get sth anchor canceled", err)
-	}
-	if treeSize == 0 {
-		return model.STHAnchorOutboxItem{}, false, trusterr.New(trusterr.CodeInvalidArgument, "tree_size is required")
-	}
-	var item model.STHAnchorOutboxItem
-	found, err := s.readCBOR(anchorOutboxKey(treeSize), &item)
-	if err != nil {
-		return model.STHAnchorOutboxItem{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "read sth anchor outbox item", err)
-	}
-	return item, found, nil
-}
-
-func (s *Store) ListSTHAnchorOutboxItemsAfter(ctx context.Context, afterTreeSize uint64, limit int) ([]model.STHAnchorOutboxItem, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor outbox after canceled", err)
-	}
-	if limit <= 0 {
-		limit = 100
-	}
-	lower, upper := prefixBounds(prefixAnchorOutbox)
-	iter, err := s.db.NewIter(&iterOptions{LowerBound: lower, UpperBound: upper})
-	if err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open sth anchor outbox iterator", err)
-	}
-	defer iter.Close()
-
-	items := make([]model.STHAnchorOutboxItem, 0, limit)
-	for ok := iter.SeekGE(anchorOutboxKey(afterTreeSize + 1)); ok; ok = iter.Next() {
-		if err := ctx.Err(); err != nil {
-			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor outbox after canceled", err)
-		}
-		if len(items) >= limit {
-			break
-		}
-		var item model.STHAnchorOutboxItem
-		if err := cborx.UnmarshalLimit(iter.Value(), &item, maxStoredObjectBytes); err != nil {
-			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode sth anchor outbox item", err)
-		}
-		items = append(items, item)
-	}
-	if err := iter.Error(); err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate sth anchor outbox after", err)
-	}
-	return items, nil
-}
-
-func (s *Store) ListSTHAnchorsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchors page canceled", err)
-	}
-	limit := normaliseRecordLimit(opts.Limit)
-	lower, upper := prefixBounds(prefixAnchorOutbox)
-	iter, err := s.db.NewIter(&iterOptions{LowerBound: lower, UpperBound: upper})
-	if err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open sth anchor outbox iterator", err)
-	}
-	defer iter.Close()
-
-	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
-	var ok bool
-	if desc {
-		if opts.AfterTreeSize > 0 {
-			ok = iter.SeekLT(anchorOutboxKey(opts.AfterTreeSize))
-		} else {
-			ok = iter.Last()
-		}
-	} else if opts.AfterTreeSize > 0 {
-		ok = iter.SeekGE(anchorOutboxKey(opts.AfterTreeSize))
-	} else {
-		ok = iter.First()
-	}
-
-	items := make([]model.STHAnchorOutboxItem, 0, limit)
-	for ok {
-		if err := ctx.Err(); err != nil {
-			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchors page canceled", err)
-		}
-		if len(items) >= limit {
-			break
-		}
-		var item model.STHAnchorOutboxItem
-		if err := cborx.UnmarshalLimit(iter.Value(), &item, maxStoredObjectBytes); err != nil {
-			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode sth anchor outbox item", err)
-		}
-		if model.Uint64AfterCursor(item.TreeSize, opts.AfterTreeSize, opts.Direction) {
-			items = append(items, item)
-		}
-		if desc {
-			ok = iter.Prev()
-		} else {
-			ok = iter.Next()
-		}
-	}
-	if err := iter.Error(); err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate sth anchors page", err)
-	}
-	return items, nil
-}
-
-func (s *Store) RescheduleSTHAnchor(ctx context.Context, treeSize uint64, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error {
-	item, ok, err := s.GetSTHAnchorOutboxItem(ctx, treeSize)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return trusterr.New(trusterr.CodeNotFound, "sth anchor outbox item not found")
-	}
-	old := item
-	item.Status = model.AnchorStatePending
-	item.Attempts = attempts
-	item.NextAttemptUnixN = nextAttemptUnixN
-	item.LastErrorMessage = lastErrorMessage
-	item.LastAttemptUnixN = time.Now().UTC().UnixNano()
-	return s.replaceSTHAnchorOutbox(ctx, old, item)
-}
-
-func (s *Store) MarkSTHAnchorPublished(ctx context.Context, result model.STHAnchorResult) error {
-	if err := ctx.Err(); err != nil {
-		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore mark sth anchor published canceled", err)
-	}
-	if result.TreeSize == 0 {
-		return trusterr.New(trusterr.CodeInvalidArgument, "sth anchor result tree_size is required")
-	}
-	item, ok, err := s.GetSTHAnchorOutboxItem(ctx, result.TreeSize)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return trusterr.New(trusterr.CodeNotFound, "sth anchor outbox item not found")
-	}
-	result, err = anchorschedule.BindOutboxResult(item, result, time.Now().UTC().UnixNano())
-	if err != nil {
-		return err
-	}
-	old := item
-	item.Status = model.AnchorStatePublished
-	item.LastErrorMessage = ""
-	item.LastAttemptUnixN = result.PublishedAtUnixN
-	item.NextAttemptUnixN = 0
-
-	itemBytes, err := cborx.Marshal(item)
-	if err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "encode sth anchor outbox item", err)
-	}
-	if err := s.runAnchorScheduleTransaction(ctx, "commit sth anchor published", func(txn *transaction.KVTxn) error {
-		if err := s.writeAnchorResultTransaction(ctx, txn, result, true); err != nil {
-			return err
-		}
-		if err := txn.Set(s.db.physicalKey(anchorOutboxKey(result.TreeSize)), itemBytes); err != nil {
-			return err
-		}
-		if err := txn.Delete(s.db.physicalKey(anchorStatusKey(old.Status, anchorStatusSortUnixN(old), old.TreeSize))); err != nil {
-			return err
-		}
-		return txn.Set(s.db.physicalKey(anchorStatusKey(item.Status, anchorStatusSortUnixN(item), item.TreeSize)), itemBytes)
-	}); err != nil {
-		return err
-	}
-	leaf, ok, err := s.GetGlobalLeaf(ctx, result.TreeSize-1)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-	return s.promoteBatchRecords(ctx, leaf.BatchID, "L5")
-}
-
-func (s *Store) MarkSTHAnchorFailed(ctx context.Context, treeSize uint64, lastErrorMessage string) error {
-	item, ok, err := s.GetSTHAnchorOutboxItem(ctx, treeSize)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return trusterr.New(trusterr.CodeNotFound, "sth anchor outbox item not found")
-	}
-	old := item
-	item.Status = model.AnchorStateFailed
-	item.LastErrorMessage = lastErrorMessage
-	item.LastAttemptUnixN = time.Now().UTC().UnixNano()
-	item.NextAttemptUnixN = 0
-	return s.replaceSTHAnchorOutbox(ctx, old, item)
 }
 
 func (s *Store) GetSTHAnchorResult(ctx context.Context, treeSize uint64) (model.STHAnchorResult, bool, error) {
@@ -4431,6 +4221,39 @@ func (s *Store) PutSTHAnchorResult(ctx context.Context, result model.STHAnchorRe
 	})
 }
 
+func (s *Store) UpdateSTHAnchorResult(ctx context.Context, expected, result model.STHAnchorResult) error {
+	key := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
+	if err := anchorschedule.ValidateResult(key, result); err != nil {
+		return err
+	}
+	expectedKey := model.STHAnchorScheduleKey{NodeID: expected.NodeID, LogID: expected.LogID, SinkName: expected.SinkName}
+	if err := anchorschedule.ValidateResult(expectedKey, expected); err != nil {
+		return err
+	}
+	if !anchorschedule.SameResultBinding(expected, result) {
+		return trusterr.New(trusterr.CodeDataLoss, "sth anchor result update changes immutable binding")
+	}
+	expectedUpdate := expected
+	expectedUpdate.Proof = append([]byte(nil), result.Proof...)
+	if !reflect.DeepEqual(expectedUpdate, result) {
+		return trusterr.New(trusterr.CodeDataLoss, "sth anchor result update changes immutable metadata")
+	}
+	return s.runAnchorScheduleTransaction(ctx, "update sth anchor result", func(txn *transaction.KVTxn) error {
+		physicalKey := s.db.physicalKey(anchorResultKey(anchorschedule.ResultKey(result)))
+		stored, found, err := readAnchorResultTransaction(ctx, txn, physicalKey)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return trusterr.New(trusterr.CodeNotFound, "sth anchor result not found")
+		}
+		if !reflect.DeepEqual(stored, expected) {
+			return trusterr.New(trusterr.CodeFailedPrecondition, "sth anchor result changed concurrently")
+		}
+		return s.writeAnchorResultTransaction(ctx, txn, result, true)
+	})
+}
+
 func (s *Store) GetSTHAnchorResultForKey(ctx context.Context, key model.STHAnchorResultKey) (model.STHAnchorResult, bool, error) {
 	if err := anchorschedule.ValidateResultKey(key); err != nil {
 		return model.STHAnchorResult{}, false, err
@@ -4463,14 +4286,19 @@ func (s *Store) LatestSTHAnchorResultForKey(ctx context.Context, key model.STHAn
 }
 
 func (s *Store) ListSTHAnchorResultsAfter(ctx context.Context, after model.STHAnchorResultKey, limit int) ([]model.STHAnchorResult, error) {
+	return s.ListSTHAnchorResultsPage(ctx, model.AnchorListOptions{
+		Limit: limit, Direction: model.RecordListDirectionAsc,
+		AfterResultKey: after, HasAfter: after.TreeSize != 0,
+	})
+}
+
+func (s *Store) ListSTHAnchorResultsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorResult, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor results canceled", err)
+		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor result page canceled", err)
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if after.TreeSize != 0 {
-		if err := anchorschedule.ValidateResultKey(after); err != nil {
+	limit := normaliseRecordLimit(opts.Limit)
+	if opts.HasAfter {
+		if err := anchorschedule.ValidateResultKey(opts.AfterResultKey); err != nil {
 			return nil, err
 		}
 	}
@@ -4482,30 +4310,39 @@ func (s *Store) ListSTHAnchorResultsAfter(ctx context.Context, after model.STHAn
 	defer iter.Close()
 
 	results := make([]model.STHAnchorResult, 0, limit)
+	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
 	var ok bool
-	if after.TreeSize == 0 {
-		ok = iter.First()
-	} else {
-		ok = iter.SeekGE(anchorResultKey(after))
-		if ok && bytes.Equal(iter.key, anchorResultKey(after)) {
+	if desc {
+		if opts.HasAfter {
+			ok = iter.SeekLT(anchorResultKey(opts.AfterResultKey))
+		} else {
+			ok = iter.Last()
+		}
+	} else if opts.HasAfter {
+		ok = iter.SeekGE(anchorResultKey(opts.AfterResultKey))
+		if ok && bytes.Equal(iter.key, anchorResultKey(opts.AfterResultKey)) {
 			ok = iter.Next()
 		}
+	} else {
+		ok = iter.First()
 	}
-	for ; ok; ok = iter.Next() {
+	for ok && len(results) < limit {
 		if err := ctx.Err(); err != nil {
-			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor results canceled", err)
-		}
-		if len(results) >= limit {
-			break
+			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor result page canceled", err)
 		}
 		result, err := decodeTiKVSTHAnchorResult(iter.key, iter.Value())
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, result)
+		if desc {
+			ok = iter.Prev()
+		} else {
+			ok = iter.Next()
+		}
 	}
 	if err := iter.Error(); err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate sth anchor results", err)
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "iterate sth anchor result page", err)
 	}
 	return results, nil
 }
@@ -4516,39 +4353,7 @@ func (s *Store) UpsertSTHAnchorCandidate(ctx context.Context, candidate model.ST
 	}
 	var committed model.STHAnchorSchedule
 	err := s.runAnchorScheduleTransaction(ctx, "upsert sth anchor candidate", func(txn *transaction.KVTxn) error {
-		current, found, err := s.readAnchorScheduleTransaction(ctx, txn, candidate.Key)
-		if err != nil {
-			return err
-		}
-		if err := s.validateOrSetAnchorTreeRootTransaction(ctx, txn, candidate.Key.NodeID, candidate.Key.LogID, candidate.STH.TreeSize, candidate.STH.RootHash); err != nil {
-			return err
-		}
-		exactResultKey := model.STHAnchorResultKey{
-			NodeID: candidate.Key.NodeID, LogID: candidate.Key.LogID, SinkName: candidate.Key.SinkName, TreeSize: candidate.STH.TreeSize,
-		}
-		exact, exactFound, err := readAnchorResultTransaction(ctx, txn, s.db.physicalKey(anchorResultKey(exactResultKey)))
-		if err != nil {
-			return err
-		}
-		if exactFound {
-			if err := anchorschedule.ValidateCandidateAgainstExactResult(candidate, exact); err != nil {
-				return err
-			}
-		}
-		latest, latestFound, err := s.latestAnchorResultTransaction(ctx, txn, &candidate.Key)
-		if err != nil {
-			return err
-		}
-		var latestForKey *model.STHAnchorResult
-		if latestFound {
-			latestForKey = &latest
-		}
-		if exactFound {
-			if latestForKey == nil || exact.TreeSize > latestForKey.TreeSize {
-				latestForKey = &exact
-			}
-		}
-		next, changed, err := anchorschedule.MergeCandidate(current, found, candidate, latestForKey)
+		next, changed, err := s.mergeSTHAnchorCandidateTransaction(ctx, txn, candidate)
 		if err != nil {
 			return err
 		}
@@ -4562,6 +4367,40 @@ func (s *Store) UpsertSTHAnchorCandidate(ctx context.Context, candidate model.ST
 		return model.STHAnchorSchedule{}, err
 	}
 	return committed, nil
+}
+
+func (s *Store) mergeSTHAnchorCandidateTransaction(ctx context.Context, txn *transaction.KVTxn, candidate model.STHAnchorCandidate) (model.STHAnchorSchedule, bool, error) {
+	current, found, err := s.readAnchorScheduleTransaction(ctx, txn, candidate.Key)
+	if err != nil {
+		return model.STHAnchorSchedule{}, false, err
+	}
+	if err := s.validateOrSetAnchorTreeRootTransaction(ctx, txn, candidate.Key.NodeID, candidate.Key.LogID, candidate.STH.TreeSize, candidate.STH.RootHash); err != nil {
+		return model.STHAnchorSchedule{}, false, err
+	}
+	exactResultKey := model.STHAnchorResultKey{
+		NodeID: candidate.Key.NodeID, LogID: candidate.Key.LogID, SinkName: candidate.Key.SinkName, TreeSize: candidate.STH.TreeSize,
+	}
+	exact, exactFound, err := readAnchorResultTransaction(ctx, txn, s.db.physicalKey(anchorResultKey(exactResultKey)))
+	if err != nil {
+		return model.STHAnchorSchedule{}, false, err
+	}
+	if exactFound {
+		if err := anchorschedule.ValidateCandidateAgainstExactResult(candidate, exact); err != nil {
+			return model.STHAnchorSchedule{}, false, err
+		}
+	}
+	latest, latestFound, err := s.latestAnchorResultTransaction(ctx, txn, &candidate.Key)
+	if err != nil {
+		return model.STHAnchorSchedule{}, false, err
+	}
+	var latestForKey *model.STHAnchorResult
+	if latestFound {
+		latestForKey = &latest
+	}
+	if exactFound && (latestForKey == nil || exact.TreeSize > latestForKey.TreeSize) {
+		latestForKey = &exact
+	}
+	return anchorschedule.MergeCandidate(current, found, candidate, latestForKey)
 }
 
 func (s *Store) GetSTHAnchorSchedule(ctx context.Context, key model.STHAnchorScheduleKey) (model.STHAnchorSchedule, bool, error) {
@@ -4621,6 +4460,14 @@ func (s *Store) ListSTHAnchorSchedules(ctx context.Context) ([]model.STHAnchorSc
 }
 
 func (s *Store) PutSTHAnchorSchedule(ctx context.Context, schedule model.STHAnchorSchedule) error {
+	return s.restoreSTHAnchorSchedule(ctx, schedule, false)
+}
+
+func (s *Store) ReplaceSTHAnchorSchedule(ctx context.Context, schedule model.STHAnchorSchedule) error {
+	return s.restoreSTHAnchorSchedule(ctx, schedule, true)
+}
+
+func (s *Store) restoreSTHAnchorSchedule(ctx context.Context, schedule model.STHAnchorSchedule, replace bool) error {
 	if err := anchorschedule.ValidateSchedule(schedule); err != nil {
 		return err
 	}
@@ -4628,18 +4475,77 @@ func (s *Store) PutSTHAnchorSchedule(ctx context.Context, schedule model.STHAnch
 		return trusterr.New(trusterr.CodeInvalidArgument, "restored sth anchor schedule retains a process lease")
 	}
 	return s.runAnchorScheduleTransaction(ctx, "put sth anchor schedule", func(txn *transaction.KVTxn) error {
-		current, found, err := s.readAnchorScheduleTransaction(ctx, txn, schedule.Key)
+		restored := schedule
+		var err error
+		restored, _, err = s.reconcileStoredAnchorResultsTransaction(ctx, txn, restored)
+		if err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "reconcile restored sth anchor schedule", err)
+		}
+		current, found, err := s.readAnchorScheduleTransaction(ctx, txn, restored.Key)
 		if err != nil {
 			return err
 		}
 		if found {
-			if reflect.DeepEqual(current, schedule) {
+			if reflect.DeepEqual(current, restored) {
 				return nil
 			}
-			return trusterr.New(trusterr.CodeDataLoss, "sth anchor schedule conflicts with existing state")
+			if !replace {
+				return trusterr.New(trusterr.CodeDataLoss, "sth anchor schedule conflicts with existing state")
+			}
 		}
-		return s.writeAnchorScheduleTransaction(txn, schedule)
+		for _, target := range tikvSTHAnchorScheduleTargets(restored) {
+			if err := s.validateOrSetAnchorTreeRootTransaction(ctx, txn, restored.Key.NodeID, restored.Key.LogID, target.TreeSize, target.RootHash); err != nil {
+				return err
+			}
+		}
+		return s.writeAnchorScheduleTransaction(txn, restored)
 	})
+}
+
+func (s *Store) reconcileStoredAnchorResultsTransaction(ctx context.Context, txn *transaction.KVTxn, schedule model.STHAnchorSchedule) (model.STHAnchorSchedule, bool, error) {
+	changed := false
+	if schedule.InFlight != nil {
+		resultKey := model.STHAnchorResultKey{
+			NodeID: schedule.Key.NodeID, LogID: schedule.Key.LogID, SinkName: schedule.Key.SinkName, TreeSize: schedule.InFlight.Target.TreeSize,
+		}
+		stored, found, err := readAnchorResultTransaction(ctx, txn, s.db.physicalKey(anchorResultKey(resultKey)))
+		if err != nil {
+			return model.STHAnchorSchedule{}, false, err
+		}
+		if found {
+			if err := validateTiKVStoredSTHAnchorResult(resultKey, stored); err != nil {
+				return model.STHAnchorSchedule{}, false, err
+			}
+			next, reconciled, err := anchorschedule.ReconcileCompleted(schedule, stored)
+			if err != nil {
+				return model.STHAnchorSchedule{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "reconcile completed STH anchor in-flight target", err)
+			}
+			schedule, changed = next, changed || reconciled
+		}
+	}
+	if schedule.Pending == nil {
+		return schedule, changed, nil
+	}
+	latest, found, err := s.latestAnchorResultTransaction(ctx, txn, &schedule.Key)
+	if err != nil || !found {
+		return schedule, changed, err
+	}
+	next, reconciled, err := anchorschedule.ReconcileCompleted(schedule, latest)
+	if err != nil {
+		return model.STHAnchorSchedule{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "reconcile completed STH anchor pending target", err)
+	}
+	return next, changed || reconciled, nil
+}
+
+func tikvSTHAnchorScheduleTargets(schedule model.STHAnchorSchedule) []model.SignedTreeHead {
+	targets := make([]model.SignedTreeHead, 0, 2)
+	if schedule.InFlight != nil {
+		targets = append(targets, schedule.InFlight.Target)
+	}
+	if schedule.Pending != nil {
+		targets = append(targets, schedule.Pending.Target)
+	}
+	return targets
 }
 
 func (s *Store) GetL5CoverageCheckpoint(ctx context.Context, key model.STHAnchorScheduleKey) (model.L5CoverageCheckpoint, bool, error) {
@@ -4719,22 +4625,9 @@ func (s *Store) ClaimSTHAnchorAttempt(ctx context.Context, key model.STHAnchorSc
 			committed, claimed = model.STHAnchorAttempt{}, false
 			return nil
 		}
-		reconciled := false
-		if current.InFlight != nil {
-			resultKey := model.STHAnchorResultKey{NodeID: key.NodeID, LogID: key.LogID, SinkName: key.SinkName, TreeSize: current.InFlight.Target.TreeSize}
-			stored, storedFound, err := readAnchorResultTransaction(ctx, txn, s.db.physicalKey(anchorResultKey(resultKey)))
-			if err != nil {
-				return err
-			}
-			if storedFound {
-				if err := anchorschedule.ValidateResult(key, stored); err != nil {
-					return trusterr.Wrap(trusterr.CodeDataLoss, "invalid stored sth anchor result", err)
-				}
-				current, reconciled, err = anchorschedule.ReconcileCompleted(current, stored)
-				if err != nil {
-					return err
-				}
-			}
+		current, reconciled, err := s.reconcileStoredAnchorResultsTransaction(ctx, txn, current)
+		if err != nil {
+			return err
 		}
 		next, attempt, changed, err := anchorschedule.Claim(current, nowUnixN, leaseUntilUnixN, leaseOwner, leaseToken)
 		if err != nil {
@@ -5006,10 +4899,23 @@ func (s *Store) latestAnchorResultTransaction(ctx context.Context, txn *transact
 	physicalReferenceKey := s.db.physicalKey(storageKey)
 	if data, err := txn.Get(ctx, physicalReferenceKey); err == nil {
 		var ref model.STHAnchorLatestReference
-		if cborx.UnmarshalLimit(data, &ref, maxStoredObjectBytes) == nil && anchorschedule.ValidateLatestReference(ref) == nil {
-			result, found, readErr := readAnchorResultTransaction(ctx, txn, s.db.physicalKey(anchorResultKey(ref.Key)))
-			if readErr == nil && found && anchorschedule.ReferenceMatchesResult(ref, result) && (stream == nil || anchorschedule.SameKey(*stream, anchorschedule.ScheduleKey(ref.Key))) {
-				return result, true, nil
+		if cborx.UnmarshalLimit(data, &ref, maxStoredObjectBytes) == nil {
+			if anchorschedule.EmptyLatestReferenceMatches(ref, stream) {
+				return model.STHAnchorResult{}, false, nil
+			}
+			if anchorschedule.ValidateLatestReference(ref) == nil {
+				result, found, readErr := readAnchorResultTransaction(ctx, txn, s.db.physicalKey(anchorResultKey(ref.Key)))
+				if readErr != nil {
+					return model.STHAnchorResult{}, false, readErr
+				}
+				if found {
+					if err := validateTiKVStoredSTHAnchorResult(ref.Key, result); err != nil {
+						return model.STHAnchorResult{}, false, err
+					}
+				}
+				if found && anchorschedule.ReferenceMatchesResult(ref, result) && (stream == nil || anchorschedule.SameKey(*stream, anchorschedule.ScheduleKey(ref.Key))) {
+					return result, true, nil
+				}
 			}
 		}
 	} else if !tikverr.IsErrNotFound(err) {
@@ -5050,7 +4956,11 @@ func (s *Store) latestAnchorResultTransaction(ctx context.Context, txn *transact
 		}
 		return result, true, nil
 	}
-	if err := txn.Delete(physicalReferenceKey); err != nil {
+	encoded, err := cborx.Marshal(anchorschedule.EmptyLatestReference(stream))
+	if err != nil {
+		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "encode empty latest sth anchor reference", err)
+	}
+	if err := txn.Set(physicalReferenceKey, encoded); err != nil {
 		return model.STHAnchorResult{}, false, err
 	}
 	return model.STHAnchorResult{}, false, nil
@@ -5121,41 +5031,6 @@ func waitAnchorScheduleRetry(ctx context.Context, attempt int) error {
 		return ctx.Err()
 	case <-timer.C:
 		return nil
-	}
-}
-
-func (s *Store) listSTHAnchors(ctx context.Context, limit int, include func(model.STHAnchorOutboxItem) bool) ([]model.STHAnchorOutboxItem, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	items := []model.STHAnchorOutboxItem{}
-	err := s.scanPrefix(ctx, prefixAnchorOutbox, func(value []byte) error {
-		var item model.STHAnchorOutboxItem
-		if err := cborx.UnmarshalLimit(value, &item, maxStoredObjectBytes); err != nil {
-			return err
-		}
-		if include(item) {
-			items = append(items, item)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "list sth anchors", err)
-	}
-	sortSTHAnchorItems(items)
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return items, nil
-}
-
-func sortSTHAnchorItems(items []model.STHAnchorOutboxItem) {
-	for i := 1; i < len(items); i++ {
-		j := i
-		for j > 0 && items[j-1].EnqueuedAtUnixN > items[j].EnqueuedAtUnixN {
-			items[j-1], items[j] = items[j], items[j-1]
-			j--
-		}
 	}
 }
 
@@ -5298,9 +5173,15 @@ func (s *Store) replaceGlobalLogOutbox(ctx context.Context, old, next model.Glob
 		if err := batch.Delete(globalStatusKey(old.Status, globalStatusSortUnixN(old), old.BatchID), nil); err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "stage old global log status delete", err)
 		}
+		if err := batch.Delete(globalStreamStatusKey(old), nil); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "stage old global log stream status delete", err)
+		}
 	}
 	if err := batch.Set(globalStatusKey(next.Status, globalStatusSortUnixN(next), next.BatchID), data, nil); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log status index", err)
+	}
+	if err := batch.Set(globalStreamStatusKey(next), data, nil); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "stage global log stream status index", err)
 	}
 	if err := batch.Commit(syncWrite); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "commit global log outbox update", err)
@@ -5446,6 +5327,51 @@ func (s *Store) stageRecordIndexPromotion(batch *tikvBatch, promotion recordInde
 	return nil
 }
 
+func (s *Store) stageRecordIndexPromotionsTransaction(ctx context.Context, txn *transaction.KVTxn, batch *tikvBatch, updates []recordIndexPromotion) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	keys := make([][]byte, len(updates))
+	for index := range updates {
+		keys[index] = s.db.physicalKey(recordByIDKey(updates[index].next.RecordID))
+	}
+	currentValues, err := txn.BatchGet(ctx, keys)
+	if err != nil {
+		return err
+	}
+	for index := range updates {
+		promotion := updates[index]
+		if value, found := currentValues[string(keys[index])]; found {
+			var current model.RecordIndex
+			if err := cborx.UnmarshalLimit(value, &current, maxStoredObjectBytes); err != nil {
+				return err
+			}
+			targetLevel := promotion.next.ProofLevel
+			if model.ProofLevelRank(model.RecordIndexProofLevel(current)) >= model.ProofLevelRank(targetLevel) {
+				if !promotion.replaceAll {
+					continue
+				}
+				promotion.stale = promotion.old
+				promotion.old = current
+				promotion.next = current
+			} else {
+				if promotion.replaceAll {
+					promotion.stale = promotion.old
+				}
+				promotion.old = current
+				promotion.next = current
+				promotion.next.ProofLevel = targetLevel
+			}
+		} else if !promotion.replaceAll {
+			return trusterr.New(trusterr.CodeDataLoss, "record index reference target not found")
+		}
+		if err := s.stageRecordIndexPromotion(batch, promotion); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) commitRecordIndexPromotions(ctx context.Context, updates []recordIndexPromotion) error {
 	for start := 0; start < len(updates); start += batchArtifactChunkSize {
 		end := start + batchArtifactChunkSize
@@ -5558,33 +5484,6 @@ func isRetryablePromotionCommitError(err error) bool {
 	}
 	var deadlock *tikverr.ErrDeadlock
 	return errors.As(err, &deadlock) && deadlock.IsRetryable
-}
-
-func (s *Store) replaceSTHAnchorOutbox(ctx context.Context, old, next model.STHAnchorOutboxItem) error {
-	if err := ctx.Err(); err != nil {
-		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore update sth anchor canceled", err)
-	}
-	data, err := cborx.Marshal(next)
-	if err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "encode sth anchor outbox item", err)
-	}
-	batch := s.db.NewBatch()
-	defer batch.Close()
-	if err := batch.Set(anchorOutboxKey(next.TreeSize), data, nil); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor outbox item", err)
-	}
-	if old.TreeSize != 0 && old.Status != "" {
-		if err := batch.Delete(anchorStatusKey(old.Status, anchorStatusSortUnixN(old), old.TreeSize), nil); err != nil {
-			return trusterr.Wrap(trusterr.CodeDataLoss, "stage old sth anchor status delete", err)
-		}
-	}
-	if err := batch.Set(anchorStatusKey(next.Status, anchorStatusSortUnixN(next), next.TreeSize), data, nil); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "stage sth anchor status index", err)
-	}
-	if err := batch.Commit(syncWrite); err != nil {
-		return trusterr.Wrap(trusterr.CodeDataLoss, "commit sth anchor update", err)
-	}
-	return nil
 }
 
 func (s *Store) scanPrefix(ctx context.Context, prefix string, visit func([]byte) error) error {

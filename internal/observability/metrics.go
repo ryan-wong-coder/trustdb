@@ -191,7 +191,7 @@ func NewMetrics() *Metrics {
 		}),
 		AnchorPending: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "trustdb_anchor_pending_total",
-			Help: "Current pending anchor outbox entries.",
+			Help: "Current pending anchor coalescing windows.",
 		}),
 		AnchorInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "trustdb_anchor_in_flight",

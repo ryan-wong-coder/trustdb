@@ -7,10 +7,13 @@ import (
 	"time"
 
 	"github.com/ryan-wong-coder/trustdb/internal/anchor"
+	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 	"github.com/spf13/cobra"
 )
+
+const anchorResultLookupPageSize = 100
 
 // newAnchorCommand groups anchor-sink-related maintenance subcommands
 // that run outside of `trustdb serve`. These tools operate directly on
@@ -108,7 +111,7 @@ func newAnchorUpgradeCommand(rt *runtimeConfig) *cobra.Command {
 Re-queries every calendar that previously accepted this STH/global root digest and,
 if a calendar has folded the commitment into a Bitcoin block, replaces the
 stored raw_timestamp with the upgraded bytes. The STHAnchorResult is
-then written back via proofstore.MarkSTHAnchorPublished.
+then written back through the immutable anchor-result updater.
 
 Use --dry-run to preview the calendar responses without persisting anything
 back to the proof store. The command is safe to re-run: unchanged calendars
@@ -145,17 +148,13 @@ are silently skipped, previously-failed calendars are never re-submitted.
 			}
 			defer func() { _ = store.Close() }()
 
-			ar, ok, err := store.GetSTHAnchorResult(ctx, treeSize)
+			ar, ok, err := findSTHAnchorResultBySink(ctx, store, treeSize, anchor.OtsSinkName)
 			if err != nil {
 				return err
 			}
 			if !ok {
 				return trusterr.New(trusterr.CodeNotFound,
-					fmt.Sprintf("no STHAnchorResult for tree_size=%d (is --anchor-sink=ots enabled and has this STH been anchored yet?)", treeSize))
-			}
-			if ar.SinkName != anchor.OtsSinkName {
-				return trusterr.New(trusterr.CodeFailedPrecondition,
-					fmt.Sprintf("STH tree_size=%d was anchored by sink=%q, not ots; upgrade only supports the ots sink", treeSize, ar.SinkName))
+					fmt.Sprintf("no ots STHAnchorResult for tree_size=%d (is --anchor-sink=ots enabled and has this STH been anchored yet?)", treeSize))
 			}
 
 			prevProofLen := len(ar.Proof)
@@ -180,9 +179,19 @@ are silently skipped, previously-failed calendars are never re-submitted.
 			}
 
 			if summary.Changed && !dryRun {
-				if err := store.MarkSTHAnchorPublished(ctx, updated); err != nil {
+				updater, ok := store.(proofstore.STHAnchorResultUpdater)
+				if !ok {
+					return trusterr.New(trusterr.CodeFailedPrecondition, "proofstore does not support immutable anchor result updates")
+				}
+				reader, ok := store.(proofstore.STHAnchorResultKeyedReader)
+				if !ok {
+					return trusterr.New(trusterr.CodeFailedPrecondition, "proofstore does not support keyed immutable anchor result reads")
+				}
+				persisted, _, err := anchor.PersistOtsAnchorResultUpgrade(ctx, reader, updater, ar, updated)
+				if err != nil {
 					return trusterr.Wrap(trusterr.CodeDataLoss, "persist upgraded anchor result", err)
 				}
+				report.NewProof = len(persisted.Proof)
 				report.Persisted = true
 			}
 			return rt.writeJSON(report)
@@ -196,4 +205,44 @@ are silently skipped, previously-failed calendars are never re-submitted.
 	cmd.Flags().StringVar(&timeoutText, "timeout", "", "per-calendar GET timeout (default 30s)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "query calendars but do not persist upgraded bytes")
 	return cmd
+}
+
+// findSTHAnchorResultBySink seeks directly below treeSize+1, then walks only
+// the sink-specific results at treeSize. TreeSize is not a unique identity
+// once one STH may be published through multiple sinks.
+func findSTHAnchorResultBySink(ctx context.Context, store proofstore.Store, treeSize uint64, sinkName string) (model.STHAnchorResult, bool, error) {
+	pager, ok := store.(proofstore.STHAnchorResultPager)
+	if !ok {
+		return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeFailedPrecondition, "proofstore does not support composite anchor result lookup")
+	}
+	opts := model.AnchorListOptions{
+		Limit:     anchorResultLookupPageSize,
+		Direction: model.RecordListDirectionDesc,
+	}
+	if treeSize != ^uint64(0) {
+		opts.HasAfter = true
+		opts.AfterResultKey = model.STHAnchorResultKey{TreeSize: treeSize + 1, SinkName: "cursor"}
+	}
+	for {
+		results, err := pager.ListSTHAnchorResultsPage(ctx, opts)
+		if err != nil {
+			return model.STHAnchorResult{}, false, err
+		}
+		if len(results) == 0 {
+			return model.STHAnchorResult{}, false, nil
+		}
+		for _, result := range results {
+			if result.TreeSize < treeSize {
+				return model.STHAnchorResult{}, false, nil
+			}
+			if result.TreeSize == treeSize && result.SinkName == sinkName {
+				return result, true, nil
+			}
+		}
+		last := results[len(results)-1]
+		opts.HasAfter = true
+		opts.AfterResultKey = model.STHAnchorResultKey{
+			NodeID: last.NodeID, LogID: last.LogID, SinkName: last.SinkName, TreeSize: last.TreeSize,
+		}
+	}
 }

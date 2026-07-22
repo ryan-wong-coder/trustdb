@@ -17,15 +17,17 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 )
 
-// seedOtsAnchor pre-populates a file-backed proofstore with an outbox
-// item + an STHAnchorResult that looks exactly like what the ots sink
-// would have written after a successful Publish. The helper returns
-// the STHAnchorResult back so tests can diff before/after upgrade without
+// seedOtsAnchor pre-populates a file-backed proofstore with the immutable
+// STHAnchorResult that the OTS sink writes after a successful publication.
+// The helper returns the result so tests can diff before/after upgrade without
 // reaching into the store a second time.
 func seedOtsAnchor(t *testing.T, dir string, calendarURL string) model.STHAnchorResult {
 	t.Helper()
 	ctx := context.Background()
-	store := &proofstore.LocalStore{Root: dir}
+	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: dir})
+	if err != nil {
+		t.Fatalf("open file proofstore: %v", err)
+	}
 
 	digest := make([]byte, 32)
 	for i := range digest {
@@ -41,15 +43,6 @@ func seedOtsAnchor(t *testing.T, dir string, calendarURL string) model.STHAnchor
 	}
 	if err := store.PutSignedTreeHead(ctx, sth); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
-	}
-	if err := store.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{
-		SchemaVersion: model.SchemaSTHAnchorOutbox,
-		TreeSize:      sth.TreeSize,
-		Status:        model.AnchorStatePending,
-		SinkName:      anchor.OtsSinkName,
-		STH:           sth,
-	}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
 	}
 
 	proof := anchor.OtsAnchorProof{
@@ -76,10 +69,19 @@ func seedOtsAnchor(t *testing.T, dir string, calendarURL string) model.STHAnchor
 		Proof:            proofBytes,
 		PublishedAtUnixN: time.Now().UTC().UnixNano(),
 	}
-	if err := store.MarkSTHAnchorPublished(ctx, ar); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
-	}
+	putSTHAnchorResult(t, store, ar)
 	return ar
+}
+
+func putSTHAnchorResult(t *testing.T, store proofstore.Store, result model.STHAnchorResult) {
+	t.Helper()
+	writer, ok := store.(proofstore.STHAnchorResultWriter)
+	if !ok {
+		t.Fatal("proofstore does not support immutable anchor result writes")
+	}
+	if err := writer.PutSTHAnchorResult(context.Background(), result); err != nil {
+		t.Fatalf("PutSTHAnchorResult: %v", err)
+	}
 }
 
 // TestAnchorUpgradeCommand_PersistsUpgradedProof exercises the CLI
@@ -104,6 +106,12 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 	defer srv.Close()
 
 	seeded := seedOtsAnchor(t, proofDir, srv.URL)
+	store := &proofstore.LocalStore{Root: proofDir}
+	fileResult := seeded
+	fileResult.SinkName = "file"
+	fileResult.AnchorID = anchor.DeterministicFileAnchorID(seeded.STH)
+	fileResult.Proof = []byte("file-proof-must-remain-unchanged")
+	putSTHAnchorResult(t, store, fileResult)
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -130,13 +138,18 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 		t.Fatalf("per-calendar report missing Changed=true: %+v", report.Calendars)
 	}
 
-	store := &proofstore.LocalStore{Root: proofDir}
-	got, ok, err := store.GetSTHAnchorResult(context.Background(), seeded.TreeSize)
+	keyed, ok := any(store).(proofstore.STHAnchorResultKeyedReader)
+	if !ok {
+		t.Fatal("proofstore does not support keyed anchor result reads")
+	}
+	got, ok, err := keyed.GetSTHAnchorResultForKey(context.Background(), model.STHAnchorResultKey{
+		NodeID: seeded.NodeID, LogID: seeded.LogID, SinkName: seeded.SinkName, TreeSize: seeded.TreeSize,
+	})
 	if err != nil {
-		t.Fatalf("GetSTHAnchorResult: %v", err)
+		t.Fatalf("GetSTHAnchorResultForKey: %v", err)
 	}
 	if !ok {
-		t.Fatal("STHAnchorResult missing after upgrade")
+		t.Fatal("OTS STHAnchorResult missing after upgrade")
 	}
 	var after anchor.OtsAnchorProof
 	if err := json.Unmarshal(got.Proof, &after); err != nil {
@@ -148,6 +161,12 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 	// Digest (set by the original sink) must survive untouched.
 	if hex.EncodeToString(after.Digest) != hex.EncodeToString(seeded.RootHash) {
 		t.Fatalf("digest mutated across upgrade")
+	}
+	gotFile, ok, err := keyed.GetSTHAnchorResultForKey(context.Background(), model.STHAnchorResultKey{
+		NodeID: fileResult.NodeID, LogID: fileResult.LogID, SinkName: fileResult.SinkName, TreeSize: fileResult.TreeSize,
+	})
+	if err != nil || !ok || !bytes.Equal(gotFile.Proof, fileResult.Proof) {
+		t.Fatalf("file result changed while upgrading ots: result=%+v ok=%v err=%v", gotFile, ok, err)
 	}
 }
 
@@ -217,7 +236,10 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 	tmp := t.TempDir()
 	proofDir := filepath.Join(tmp, "proofs")
 	ctx := context.Background()
-	store := &proofstore.LocalStore{Root: proofDir}
+	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: proofDir})
+	if err != nil {
+		t.Fatalf("open file proofstore: %v", err)
+	}
 
 	root := make([]byte, 32)
 	root[0] = 0x01
@@ -232,15 +254,6 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 	if err := store.PutSignedTreeHead(ctx, sth); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
-	if err := store.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{
-		SchemaVersion: model.SchemaSTHAnchorOutbox,
-		TreeSize:      sth.TreeSize,
-		Status:        model.AnchorStatePending,
-		SinkName:      "file",
-		STH:           sth,
-	}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
 	ar := model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
@@ -251,14 +264,12 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 		Proof:            []byte("opaque"),
 		PublishedAtUnixN: time.Now().UnixNano(),
 	}
-	if err := store.MarkSTHAnchorPublished(ctx, ar); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
-	}
+	putSTHAnchorResult(t, store, ar)
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
 	cmd.SetArgs([]string{"anchor", "upgrade", "--tree-size", "2", "--metastore-path", proofDir})
-	err := cmd.Execute()
+	err = cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for non-ots STH")
 	}
@@ -274,7 +285,10 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 	proofDir := filepath.Join(tmp, "proofs")
 	outPath := filepath.Join(tmp, "sth-2.tdsth-anchor-result")
 	ctx := context.Background()
-	store := &proofstore.LocalStore{Root: proofDir}
+	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: proofDir})
+	if err != nil {
+		t.Fatalf("open file proofstore: %v", err)
+	}
 
 	root := bytes.Repeat([]byte{0xaa}, 32)
 	sth := model.SignedTreeHead{
@@ -288,15 +302,6 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 	if err := store.PutSignedTreeHead(ctx, sth); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
-	if err := store.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{
-		SchemaVersion: model.SchemaSTHAnchorOutbox,
-		TreeSize:      sth.TreeSize,
-		Status:        model.AnchorStatePending,
-		SinkName:      "file",
-		STH:           sth,
-	}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
 	result := model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
@@ -307,9 +312,7 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 		Proof:            []byte("file-proof"),
 		PublishedAtUnixN: time.Now().UnixNano(),
 	}
-	if err := store.MarkSTHAnchorPublished(ctx, result); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
-	}
+	putSTHAnchorResult(t, store, result)
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)

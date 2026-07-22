@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
@@ -135,73 +136,205 @@ func TestLocalStoreGlobalOutboxDuplicateTransitionConverges(t *testing.T) {
 	}
 }
 
-func TestLocalStoreGlobalOutboxPublishesAnchorsBeforeConverging(t *testing.T) {
+func TestLocalStoreGlobalOutboxPublishesCandidateBeforeConverging(t *testing.T) {
 	t.Parallel()
 
 	store := LocalStore{Root: t.TempDir()}
 	ctx := context.Background()
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	batchIDs := []string{"batch-anchor-1", "batch-anchor-2"}
-	sths := []model.SignedTreeHead{
-		{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{1}},
-		{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 2, RootHash: []byte{2}},
-	}
-	anchors := make([]model.STHAnchorOutboxItem, len(sths))
-	for i := range batchIDs {
-		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{BatchID: batchIDs[i], Status: model.AnchorStatePending}); err != nil {
-			t.Fatalf("EnqueueGlobalLog(%q): %v", batchIDs[i], err)
-		}
-		anchors[i] = model.STHAnchorOutboxItem{TreeSize: sths[i].TreeSize, Status: model.AnchorStatePending, STH: sths[i]}
-	}
-	// Simulate a crash after the first anchor became durable but before any
-	// Global Log outbox item moved to published.
-	if err := store.EnqueueSTHAnchor(ctx, anchors[0]); err != nil {
-		t.Fatalf("EnqueueSTHAnchor partial state: %v", err)
-	}
-
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := store.MarkGlobalLogPublishedBatchWithAnchors(ctx, batchIDs, sths, anchors); err != nil {
-			t.Fatalf("MarkGlobalLogPublishedBatchWithAnchors attempt %d: %v", attempt+1, err)
-		}
-	}
-	for i := range batchIDs {
-		globalItem, ok, err := store.GetGlobalLogOutboxItem(ctx, batchIDs[i])
-		if err != nil || !ok || globalItem.Status != model.AnchorStatePublished || globalItem.STH.TreeSize != sths[i].TreeSize {
-			t.Fatalf("global item %q = %+v ok=%v err=%v", batchIDs[i], globalItem, ok, err)
-		}
-		anchorItem, ok, err := store.GetSTHAnchorOutboxItem(ctx, sths[i].TreeSize)
-		if err != nil || !ok || anchorItem.Status != model.AnchorStatePending || !sameLocalSignedTreeHead(anchorItem.STH, sths[i]) {
-			t.Fatalf("anchor item %d = %+v ok=%v err=%v", sths[i].TreeSize, anchorItem, ok, err)
-		}
-	}
-}
-
-func TestLocalStoreGlobalOutboxValidatesAnchorBatchBeforeMutation(t *testing.T) {
-	t.Parallel()
-
-	store := LocalStore{Root: t.TempDir()}
-	ctx := context.Background()
-	batchIDs := []string{"batch-valid-1", "batch-valid-2"}
-	sths := []model.SignedTreeHead{{TreeSize: 1, RootHash: []byte{1}}, {TreeSize: 2, RootHash: []byte{2}}}
+	sths := []model.SignedTreeHead{localScheduleSTH(key, 1, 0x11), localScheduleSTH(key, 2, 0x22)}
 	for _, batchID := range batchIDs {
 		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{BatchID: batchID, Status: model.AnchorStatePending}); err != nil {
 			t.Fatalf("EnqueueGlobalLog(%q): %v", batchID, err)
 		}
 	}
-	anchors := []model.STHAnchorOutboxItem{
-		{TreeSize: 1, Status: model.AnchorStatePending, STH: sths[0]},
-		{TreeSize: 3, Status: model.AnchorStatePending, STH: sths[1]},
+	candidate := model.STHAnchorCandidate{Key: key, STH: sths[len(sths)-1], ObservedAtUnixN: 100, DueAtUnixN: 200}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := store.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, batchIDs, sths, candidate); err != nil {
+			t.Fatalf("MarkGlobalLogPublishedBatchWithAnchorCandidate attempt %d: %v", attempt+1, err)
+		}
 	}
-	if err := store.MarkGlobalLogPublishedBatchWithAnchors(ctx, batchIDs, sths, anchors); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
-		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchors error = %v, want invalid argument", err)
+	for i := range batchIDs {
+		item, found, err := store.GetGlobalLogOutboxItem(ctx, batchIDs[i])
+		if err != nil || !found || item.Status != model.AnchorStatePublished || item.STH.TreeSize != sths[i].TreeSize {
+			t.Fatalf("global item %q = %+v found=%v err=%v", batchIDs[i], item, found, err)
+		}
+	}
+	schedule, found, err := store.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || schedule.Pending == nil || schedule.InFlight != nil {
+		t.Fatalf("anchor schedule=%+v found=%v err=%v", schedule, found, err)
+	}
+	if schedule.Pending.Target.TreeSize != 2 || schedule.Pending.OpenedAtUnixN != 100 || schedule.Pending.DueAtUnixN != 200 {
+		t.Fatalf("coalesced candidate=%+v", schedule.Pending)
+	}
+}
+
+func TestLocalStoreGlobalOutboxValidatesAnchorCandidateBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	store := LocalStore{Root: t.TempDir()}
+	ctx := context.Background()
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
+	batchIDs := []string{"batch-valid-1", "batch-valid-2"}
+	sths := []model.SignedTreeHead{localScheduleSTH(key, 1, 0x11), localScheduleSTH(key, 2, 0x22)}
+	for _, batchID := range batchIDs {
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{BatchID: batchID, Status: model.AnchorStatePending}); err != nil {
+			t.Fatalf("EnqueueGlobalLog(%q): %v", batchID, err)
+		}
+	}
+	bad := model.STHAnchorCandidate{Key: key, STH: sths[0], ObservedAtUnixN: 100, DueAtUnixN: 200}
+	if err := store.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, batchIDs, sths, bad); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
+		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchorCandidate error = %v, want invalid argument", err)
+	}
+	for _, batchID := range batchIDs {
+		item, found, err := store.GetGlobalLogOutboxItem(ctx, batchID)
+		if err != nil || !found || item.Status != model.AnchorStatePending {
+			t.Fatalf("global item %q = %+v found=%v err=%v", batchID, item, found, err)
+		}
+	}
+	if _, found, err := store.GetSTHAnchorSchedule(ctx, key); err != nil || found {
+		t.Fatalf("anchor schedule found=%v err=%v, want absent", found, err)
+	}
+}
+
+func TestLocalStoreReplaysDurableAnchorPublicationJournal(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	store := LocalStore{Root: root}
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
+	batchIDs := []string{"batch-journal-1", "batch-journal-2"}
+	sths := []model.SignedTreeHead{localScheduleSTH(key, 1, 0x41), localScheduleSTH(key, 2, 0x42)}
+	for i, batchID := range batchIDs {
+		if err := store.PutRecordIndex(ctx, model.RecordIndex{
+			SchemaVersion: model.SchemaRecordIndex, RecordID: "record-journal-" + batchID,
+			BatchID: batchID, ProofLevel: "L3", ReceivedAtUnixN: int64(i + 1),
+		}); err != nil {
+			t.Fatalf("PutRecordIndex(%s): %v", batchID, err)
+		}
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+			SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: batchID,
+			BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{byte(i + 1)}, TreeSize: 1},
+			Status:    model.AnchorStatePending,
+		}); err != nil {
+			t.Fatalf("EnqueueGlobalLog(%s): %v", batchID, err)
+		}
+	}
+	candidate := model.STHAnchorCandidate{Key: key, STH: sths[1], ObservedAtUnixN: 100, DueAtUnixN: 200}
+	schedule, changed, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, candidate, nil)
+	if err != nil || !changed {
+		t.Fatalf("MergeCandidate changed=%v err=%v", changed, err)
+	}
+	journal := localAnchorPublicationJournal{
+		SchemaVersion: localAnchorPublishSchema, Key: key,
+		BatchIDs: append([]string(nil), batchIDs...), STHs: append([]model.SignedTreeHead(nil), sths...), Schedule: schedule,
+	}
+	// Crash point: the intent journal is durable, but neither the scheduler
+	// state nor L4 publication has become visible yet.
+	if err := writeCBORAtomic(store.sthAnchorPublicationJournalPath(key), journal); err != nil {
+		t.Fatalf("write publication journal: %v", err)
+	}
+
+	restarted := LocalStore{Root: root}
+	gotSchedule, found, err := restarted.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || gotSchedule.Pending == nil || gotSchedule.Pending.Target.TreeSize != 2 {
+		t.Fatalf("replayed schedule=%+v found=%v err=%v", gotSchedule, found, err)
 	}
 	for i, batchID := range batchIDs {
-		item, ok, err := store.GetGlobalLogOutboxItem(ctx, batchID)
-		if err != nil || !ok || item.Status != model.AnchorStatePending {
-			t.Fatalf("global item %q = %+v ok=%v err=%v", batchID, item, ok, err)
+		item, found, err := restarted.GetGlobalLogOutboxItem(ctx, batchID)
+		if err != nil || !found || item.Status != model.AnchorStatePublished || !sameLocalSignedTreeHead(item.STH, sths[i]) {
+			t.Fatalf("replayed global item %s=%+v found=%v err=%v", batchID, item, found, err)
 		}
-		if _, ok, err := store.GetSTHAnchorOutboxItem(ctx, sths[i].TreeSize); err != nil || ok {
-			t.Fatalf("anchor item %d ok=%v err=%v, want absent", sths[i].TreeSize, ok, err)
+		idx, found, err := restarted.GetRecordIndex(ctx, "record-journal-"+batchID)
+		if err != nil || !found || model.RecordIndexProofLevel(idx) != "L4" {
+			t.Fatalf("replayed record %s=%+v found=%v err=%v", batchID, idx, found, err)
 		}
+	}
+	if _, err := os.Stat(restarted.sthAnchorPublicationJournalPath(key)); !os.IsNotExist(err) {
+		t.Fatalf("publication journal remains after replay: %v", err)
+	}
+}
+
+func TestLocalStoreJournalReplayRemovesStalePendingAfterPublishedCopy(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	store := LocalStore{Root: root}
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
+	batchID := "batch-published-before-pending-delete"
+	sth := localScheduleSTH(key, 1, 0x51)
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: batchID,
+		BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{0x51}, TreeSize: 1},
+		Status:    model.AnchorStatePending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	candidate := model.STHAnchorCandidate{Key: key, STH: sth, ObservedAtUnixN: 100, DueAtUnixN: 200}
+	schedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, candidate, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := localAnchorPublicationJournal{
+		SchemaVersion: localAnchorPublishSchema, Key: key, BatchIDs: []string{batchID},
+		STHs: []model.SignedTreeHead{sth}, Schedule: schedule,
+	}
+	if err := store.writeSTHAnchorSchedule(schedule); err != nil {
+		t.Fatal(err)
+	}
+	published := model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: batchID,
+		BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{0x51}, TreeSize: 1},
+		Status:    model.AnchorStatePublished, STH: sth, CompletedAtUnixN: 300,
+	}
+	if err := writeCBORAtomic(store.globalOutboxPath(model.AnchorStatePublished, batchID), published); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCBORAtomic(store.sthAnchorPublicationJournalPath(key), journal); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := LocalStore{Root: root}
+	if _, found, err := restarted.GetSTHAnchorSchedule(ctx, key); err != nil || !found {
+		t.Fatalf("GetSTHAnchorSchedule found=%v err=%v", found, err)
+	}
+	if _, err := os.Stat(restarted.globalOutboxPath(model.AnchorStatePending, batchID)); !os.IsNotExist(err) {
+		t.Fatalf("stale pending file survived journal replay: %v", err)
+	}
+	if _, err := os.Stat(restarted.sthAnchorPublicationJournalPath(key)); !os.IsNotExist(err) {
+		t.Fatalf("publication journal survived convergence: %v", err)
+	}
+}
+
+func TestLocalStoreJournalReplayRejectsPathKeyMismatch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := LocalStore{Root: t.TempDir()}
+	expected := model.STHAnchorScheduleKey{NodeID: "node-a", LogID: "log-a", SinkName: "file"}
+	journalKey := model.STHAnchorScheduleKey{NodeID: "node-b", LogID: "log-b", SinkName: "file"}
+	sth := localScheduleSTH(journalKey, 1, 0x61)
+	candidate := model.STHAnchorCandidate{Key: journalKey, STH: sth, ObservedAtUnixN: 100, DueAtUnixN: 200}
+	schedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, candidate, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := localAnchorPublicationJournal{
+		SchemaVersion: localAnchorPublishSchema, Key: journalKey, BatchIDs: []string{"batch-mismatch"},
+		STHs: []model.SignedTreeHead{sth}, Schedule: schedule,
+	}
+	if err := writeCBORAtomic(store.sthAnchorPublicationJournalPath(expected), journal); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := store.GetSTHAnchorSchedule(ctx, expected); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("GetSTHAnchorSchedule error=%v, want data loss", err)
+	}
+	if _, found, err := store.getSTHAnchorSchedule(journalKey); err != nil || found {
+		t.Fatalf("mismatched journal mutated foreign schedule found=%v err=%v", found, err)
 	}
 }
 

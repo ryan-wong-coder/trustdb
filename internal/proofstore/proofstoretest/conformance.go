@@ -46,8 +46,9 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("ConcurrentPutBundle", func(t *testing.T) { testConcurrentPutBundle(t, newStore) })
 	t.Run("GlobalLogRoundTrip", func(t *testing.T) { testGlobalLogRoundTrip(t, newStore) })
 	t.Run("GlobalLogListPendingRespectsBackoff", func(t *testing.T) { testGlobalLogListPendingRespectsBackoff(t, newStore) })
+	t.Run("GlobalLogListPendingScopesStream", func(t *testing.T) { testGlobalLogListPendingScopesStream(t, newStore) })
 	t.Run("GlobalLogAppendCommitRoundTrip", func(t *testing.T) { testGlobalLogAppendCommitRoundTrip(t, newStore) })
-	t.Run("GlobalLogPublishedBatchWithAnchorsOptional", func(t *testing.T) { testGlobalLogPublishedBatchWithAnchorsOptional(t, newStore) })
+	t.Run("GlobalLogPublishedBatchWithAnchorCandidateOptional", func(t *testing.T) { testGlobalLogPublishedBatchWithAnchorCandidateOptional(t, newStore) })
 	t.Run("GlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite", func(t *testing.T) {
 		testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t, newStore)
 	})
@@ -55,21 +56,12 @@ func RunConformance(t *testing.T, newStore Factory) {
 	t.Run("GlobalLeafListPagePaginates", func(t *testing.T) { testGlobalLeafListPagePaginates(t, newStore) })
 	t.Run("GlobalLogTileRoundTrip", func(t *testing.T) { testGlobalLogTileRoundTrip(t, newStore) })
 	t.Run("GlobalLogTileListAfterPaginates", func(t *testing.T) { testGlobalLogTileListAfterPaginates(t, newStore) })
-	t.Run("STHAnchorEnqueueIsIdempotent", func(t *testing.T) { testSTHAnchorEnqueueIsIdempotent(t, newStore) })
-	t.Run("STHAnchorBatchEnqueueOptional", func(t *testing.T) { testSTHAnchorBatchEnqueueOptional(t, newStore) })
 	t.Run("SignedTreeHeadListPagePaginates", func(t *testing.T) { testSignedTreeHeadListPagePaginates(t, newStore) })
-	t.Run("STHAnchorListPagePaginates", func(t *testing.T) { testSTHAnchorListPagePaginates(t, newStore) })
-	t.Run("STHAnchorListAfterPaginates", func(t *testing.T) { testSTHAnchorListAfterPaginates(t, newStore) })
-	t.Run("STHAnchorListPendingRespectsBackoff", func(t *testing.T) { testSTHAnchorListPendingRespectsBackoff(t, newStore) })
-	t.Run("STHAnchorListPendingIsCommitOrdered", func(t *testing.T) { testSTHAnchorListPendingIsCommitOrdered(t, newStore) })
-	t.Run("STHAnchorListPublishedFiltersTerminalOnly", func(t *testing.T) { testSTHAnchorListPublishedFilters(t, newStore) })
-	t.Run("STHAnchorMarkPublished", func(t *testing.T) { testSTHAnchorMarkPublished(t, newStore) })
 	t.Run("LatestSTHAnchorResultIsMonotonic", func(t *testing.T) { testLatestSTHAnchorResultIsMonotonic(t, newStore) })
+	t.Run("STHAnchorResultUpdatePreservesLatest", func(t *testing.T) { testSTHAnchorResultUpdatePreservesLatest(t, newStore) })
 	t.Run("STHAnchorScheduleStateMachineOptional", func(t *testing.T) { testSTHAnchorScheduleStateMachineOptional(t, newStore) })
 	t.Run("L5CoverageProjectionStateOptional", func(t *testing.T) { testL5CoverageProjectionStateOptional(t, newStore) })
-	t.Run("STHAnchorMarkFailed", func(t *testing.T) { testSTHAnchorMarkFailed(t, newStore) })
-	t.Run("STHAnchorRescheduleKeepsPending", func(t *testing.T) { testSTHAnchorRescheduleKeepsPending(t, newStore) })
-	t.Run("STHAnchorMissing", func(t *testing.T) { testSTHAnchorMissing(t, newStore) })
+	t.Run("STHAnchorResultMissing", func(t *testing.T) { testSTHAnchorResultMissing(t, newStore) })
 }
 
 func testBatchArtifactsOptional(t *testing.T, newStore Factory) {
@@ -293,11 +285,12 @@ func testRecordIndexProofLevelPromotes(t *testing.T, newStore Factory) {
 	if level := model.RecordIndexProofLevel(idx); level != "L4" {
 		t.Fatalf("proof level after global publish = %s, want L4", level)
 	}
-	if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(1, "ots", 100)); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
+	promoter, ok := store.(proofstore.BatchProofLevelPromoter)
+	if !ok {
+		t.Fatalf("proofstore must implement BatchProofLevelPromoter")
 	}
-	if err := store.MarkSTHAnchorPublished(ctx, sthAnchorResult(1, "ots", "anchor-1")); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
+	if err := promoter.PromoteBatchProofLevel(ctx, "batch-1", "L5"); err != nil {
+		t.Fatalf("PromoteBatchProofLevel: %v", err)
 	}
 	idx, ok, err = store.GetRecordIndex(ctx, "rec-1")
 	if err != nil || !ok {
@@ -749,6 +742,58 @@ func testGlobalLogListPendingRespectsBackoff(t *testing.T, newStore Factory) {
 	}
 }
 
+func testGlobalLogListPendingScopesStream(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	items := []model.GlobalLogOutboxItem{
+		{
+			BatchID:          "batch-foreign-stream",
+			BatchRoot:        model.BatchRoot{BatchID: "batch-foreign-stream", NodeID: "node-a", LogID: "log-a"},
+			EnqueuedAtUnixN:  10,
+			NextAttemptUnixN: 10,
+		},
+		{
+			BatchID:          "batch-local-stream",
+			BatchRoot:        model.BatchRoot{BatchID: "batch-local-stream", NodeID: "node-b", LogID: "log-b"},
+			EnqueuedAtUnixN:  20,
+			NextAttemptUnixN: 20,
+		},
+	}
+	for _, item := range items {
+		if err := store.EnqueueGlobalLog(ctx, item); err != nil {
+			t.Fatalf("EnqueueGlobalLog %s: %v", item.BatchID, err)
+		}
+	}
+	got, err := store.ListPendingGlobalLogForStream(ctx, "node-b", "log-b", 100, 1)
+	if err != nil {
+		t.Fatalf("ListPendingGlobalLogForStream: %v", err)
+	}
+	if len(got) != 1 || got[0].BatchID != "batch-local-stream" {
+		t.Fatalf("ListPendingGlobalLogForStream = %+v, want batch-local-stream", got)
+	}
+	if err := store.RescheduleGlobalLog(ctx, "batch-local-stream", 1, 200, "retry"); err != nil {
+		t.Fatalf("RescheduleGlobalLog: %v", err)
+	}
+	got, err = store.ListPendingGlobalLogForStream(ctx, "node-b", "log-b", 150, 1)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("scoped list before retry = %+v err=%v, want empty", got, err)
+	}
+	got, err = store.ListPendingGlobalLogForStream(ctx, "node-b", "log-b", 250, 1)
+	if err != nil || len(got) != 1 || got[0].Attempts != 1 {
+		t.Fatalf("scoped list after retry = %+v err=%v", got, err)
+	}
+	if err := store.MarkGlobalLogPublished(ctx, "batch-local-stream", model.SignedTreeHead{TreeSize: 1}); err != nil {
+		t.Fatalf("MarkGlobalLogPublished: %v", err)
+	}
+	got, err = store.ListPendingGlobalLogForStream(ctx, "node-b", "log-b", 300, 1)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("scoped list after publication = %+v err=%v, want empty", got, err)
+	}
+}
+
 func testGlobalLogAppendCommitRoundTrip(t *testing.T, newStore Factory) {
 	t.Parallel()
 	store, cleanup := newStore(t)
@@ -825,57 +870,69 @@ func testGlobalLogAppendCommitRoundTrip(t *testing.T, newStore Factory) {
 	}
 }
 
-func testGlobalLogPublishedBatchWithAnchorsOptional(t *testing.T, newStore Factory) {
+func testGlobalLogPublishedBatchWithAnchorCandidateOptional(t *testing.T, newStore Factory) {
 	t.Parallel()
 	store, cleanup := newStore(t)
 	defer cleanup()
-	marker, ok := store.(proofstore.GlobalLogPublishedBatchWithAnchorsMarker)
+	marker, ok := store.(proofstore.GlobalLogPublishedBatchWithAnchorCandidateMarker)
 	if !ok {
-		t.Skip("store does not implement GlobalLogPublishedBatchWithAnchorsMarker")
+		t.Skip("store does not implement GlobalLogPublishedBatchWithAnchorCandidateMarker")
+	}
+	scheduler, ok := store.(proofstore.STHAnchorScheduleStore)
+	if !ok {
+		t.Fatalf("candidate marker requires STHAnchorScheduleStore")
 	}
 	ctx := context.Background()
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	batchIDs := []string{"anchor-batch-1", "anchor-batch-2"}
-	sths := []model.SignedTreeHead{
-		{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{1}},
-		{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 2, RootHash: []byte{2}},
-	}
-	anchors := make([]model.STHAnchorOutboxItem, len(sths))
+	sths := []model.SignedTreeHead{scheduleSTH(key, 1, 0x11), scheduleSTH(key, 2, 0x22)}
 	for i := range batchIDs {
 		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 			SchemaVersion: model.SchemaGlobalLogOutbox,
 			BatchID:       batchIDs[i],
-			BatchRoot: model.BatchRoot{
-				SchemaVersion: model.SchemaBatchRoot,
-				BatchID:       batchIDs[i],
-				BatchRoot:     []byte{byte(i + 1)},
-				TreeSize:      1,
-			},
-			Status: model.AnchorStatePending,
+			BatchRoot:     model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchIDs[i], BatchRoot: []byte{byte(i + 1)}, TreeSize: 1},
+			Status:        model.AnchorStatePending,
 		}); err != nil {
 			t.Fatalf("EnqueueGlobalLog %s: %v", batchIDs[i], err)
 		}
-		anchors[i] = model.STHAnchorOutboxItem{
-			SchemaVersion: model.SchemaSTHAnchorOutbox,
-			TreeSize:      sths[i].TreeSize,
-			Status:        model.AnchorStatePending,
-			STH:           sths[i],
+	}
+	candidate := model.STHAnchorCandidate{Key: key, STH: sths[len(sths)-1], ObservedAtUnixN: 100, DueAtUnixN: 200}
+	if err := marker.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, batchIDs, sths, candidate); err != nil {
+		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchorCandidate: %v", err)
+	}
+	for _, batchID := range batchIDs {
+		item, found, err := store.GetGlobalLogOutboxItem(ctx, batchID)
+		if err != nil || !found || item.Status != model.AnchorStatePublished {
+			t.Fatalf("global item %s found=%v err=%v item=%+v", batchID, found, err, item)
 		}
 	}
-	if err := marker.MarkGlobalLogPublishedBatchWithAnchors(ctx, batchIDs, sths, anchors); err != nil {
-		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchors: %v", err)
+	schedule, found, err := scheduler.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || schedule.Pending == nil {
+		t.Fatalf("GetSTHAnchorSchedule found=%v err=%v schedule=%+v", found, err, schedule)
 	}
-	for i := range batchIDs {
-		globalItem, ok, err := store.GetGlobalLogOutboxItem(ctx, batchIDs[i])
-		if err != nil || !ok || globalItem.Status != model.AnchorStatePublished {
-			t.Fatalf("global item %s ok=%v err=%v item=%+v", batchIDs[i], ok, err, globalItem)
-		}
-		anchorItem, ok, err := store.GetSTHAnchorOutboxItem(ctx, sths[i].TreeSize)
-		if err != nil || !ok || anchorItem.Status != model.AnchorStatePending {
-			t.Fatalf("anchor item %d ok=%v err=%v item=%+v", sths[i].TreeSize, ok, err, anchorItem)
-		}
+	if schedule.Pending.Target.TreeSize != 2 || schedule.Pending.OpenedAtUnixN != 100 || schedule.Pending.DueAtUnixN != 200 {
+		t.Fatalf("coalesced schedule=%+v", schedule)
+	}
+
+	const nextBatchID = "anchor-batch-3"
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: nextBatchID,
+		BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: nextBatchID, BatchRoot: []byte{3}, TreeSize: 1},
+		Status:    model.AnchorStatePending,
+	}); err != nil {
+		t.Fatalf("EnqueueGlobalLog next: %v", err)
+	}
+	sth3 := scheduleSTH(key, 3, 0x33)
+	if err := marker.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, []string{nextBatchID}, []model.SignedTreeHead{sth3}, model.STHAnchorCandidate{
+		Key: key, STH: sth3, ObservedAtUnixN: 150, DueAtUnixN: 900,
+	}); err != nil {
+		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchorCandidate merge: %v", err)
+	}
+	schedule, found, err = scheduler.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || schedule.Pending == nil || schedule.Pending.Target.TreeSize != 3 || schedule.Pending.OpenedAtUnixN != 100 || schedule.Pending.DueAtUnixN != 200 {
+		t.Fatalf("fixed non-sliding schedule=%+v found=%v err=%v", schedule, found, err)
 	}
 }
-
 func testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t *testing.T, newStore Factory) {
 	t.Parallel()
 	store, cleanup := newStore(t)
@@ -1167,270 +1224,6 @@ func testGlobalLogTileListAfterPaginates(t *testing.T, newStore Factory) {
 	}
 }
 
-func testSTHAnchorListAfterPaginates(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	for _, size := range []uint64{3, 1, 2} {
-		if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(size, "file", int64(size))); err != nil {
-			t.Fatalf("EnqueueSTHAnchor %d: %v", size, err)
-		}
-	}
-	first, err := store.ListSTHAnchorOutboxItemsAfter(ctx, 0, 2)
-	if err != nil {
-		t.Fatalf("ListSTHAnchorOutboxItemsAfter first: %v", err)
-	}
-	if len(first) != 2 || first[0].TreeSize != 1 || first[1].TreeSize != 2 {
-		t.Fatalf("first anchor page = %+v", first)
-	}
-	next, err := store.ListSTHAnchorOutboxItemsAfter(ctx, first[1].TreeSize, 2)
-	if err != nil {
-		t.Fatalf("ListSTHAnchorOutboxItemsAfter next: %v", err)
-	}
-	if len(next) != 1 || next[0].TreeSize != 3 {
-		t.Fatalf("next anchor page = %+v", next)
-	}
-}
-
-func testSTHAnchorEnqueueIsIdempotent(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	item := sthAnchorItem(1, "file", 100)
-	if err := store.EnqueueSTHAnchor(ctx, item); err != nil {
-		t.Fatalf("first EnqueueSTHAnchor: %v", err)
-	}
-	err := store.EnqueueSTHAnchor(ctx, item)
-	if err == nil {
-		t.Fatalf("second EnqueueSTHAnchor: want AlreadyExists, got nil")
-	}
-	if got := trusterr.CodeOf(err); got != trusterr.CodeAlreadyExists {
-		t.Fatalf("CodeOf(err) = %s, want %s", got, trusterr.CodeAlreadyExists)
-	}
-}
-
-func testSTHAnchorBatchEnqueueOptional(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	batcher, ok := store.(proofstore.STHAnchorBatchEnqueuer)
-	if !ok {
-		t.Skip("store does not implement STHAnchorBatchEnqueuer")
-	}
-	ctx := context.Background()
-	items := []model.STHAnchorOutboxItem{
-		sthAnchorItem(21, "file", 100),
-		sthAnchorItem(22, "file", 101),
-	}
-	if err := batcher.EnqueueSTHAnchors(ctx, items); err != nil {
-		t.Fatalf("EnqueueSTHAnchors: %v", err)
-	}
-	if err := batcher.EnqueueSTHAnchors(ctx, items); err != nil {
-		t.Fatalf("EnqueueSTHAnchors idempotent retry: %v", err)
-	}
-	got, err := store.ListPendingSTHAnchors(ctx, 1000, 10)
-	if err != nil {
-		t.Fatalf("ListPendingSTHAnchors: %v", err)
-	}
-	if len(got) != 2 || got[0].TreeSize != 21 || got[1].TreeSize != 22 {
-		t.Fatalf("pending anchors = %+v", got)
-	}
-}
-
-func testSTHAnchorListPagePaginates(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	for _, size := range []uint64{1, 2, 3} {
-		if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(size, "ots", int64(size))); err != nil {
-			t.Fatalf("EnqueueSTHAnchor %d: %v", size, err)
-		}
-	}
-	first, err := store.ListSTHAnchorsPage(ctx, model.AnchorListOptions{Limit: 2, Direction: model.RecordListDirectionDesc})
-	if err != nil {
-		t.Fatalf("ListSTHAnchorsPage first: %v", err)
-	}
-	if len(first) != 2 || first[0].TreeSize != 3 || first[1].TreeSize != 2 {
-		t.Fatalf("first anchor page = %+v", first)
-	}
-	next, err := store.ListSTHAnchorsPage(ctx, model.AnchorListOptions{
-		Limit:         2,
-		Direction:     model.RecordListDirectionDesc,
-		AfterTreeSize: first[1].TreeSize,
-	})
-	if err != nil {
-		t.Fatalf("ListSTHAnchorsPage next: %v", err)
-	}
-	if len(next) != 1 || next[0].TreeSize != 1 {
-		t.Fatalf("next anchor page = %+v", next)
-	}
-	ascending, err := store.ListSTHAnchorsPage(ctx, model.AnchorListOptions{Limit: 2, Direction: model.RecordListDirectionAsc})
-	if err != nil {
-		t.Fatalf("ListSTHAnchorsPage ascending: %v", err)
-	}
-	if len(ascending) != 2 || ascending[0].TreeSize != 1 || ascending[1].TreeSize != 2 {
-		t.Fatalf("ascending anchor page = %+v", ascending)
-	}
-	ascendingNext, err := store.ListSTHAnchorsPage(ctx, model.AnchorListOptions{Limit: 2, Direction: model.RecordListDirectionAsc, AfterTreeSize: ascending[1].TreeSize})
-	if err != nil {
-		t.Fatalf("ListSTHAnchorsPage ascending next: %v", err)
-	}
-	if len(ascendingNext) != 1 || ascendingNext[0].TreeSize != 3 {
-		t.Fatalf("ascending next anchor page = %+v", ascendingNext)
-	}
-}
-
-func testSTHAnchorListPendingRespectsBackoff(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	now := int64(1_000)
-	if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(1, "file", now-1)); err != nil {
-		t.Fatalf("EnqueueSTHAnchor ready: %v", err)
-	}
-	if err := store.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{
-		SchemaVersion:    model.SchemaSTHAnchorOutbox,
-		TreeSize:         2,
-		SinkName:         "file",
-		Status:           model.AnchorStatePending,
-		STH:              model.SignedTreeHead{TreeSize: 2, RootHash: []byte{2}},
-		EnqueuedAtUnixN:  now,
-		NextAttemptUnixN: now + 10_000,
-	}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor not-yet: %v", err)
-	}
-	pending, err := store.ListPendingSTHAnchors(ctx, now, 10)
-	if err != nil {
-		t.Fatalf("ListPendingSTHAnchors: %v", err)
-	}
-	if len(pending) != 1 || pending[0].TreeSize != 1 {
-		t.Fatalf("ListPendingSTHAnchors = %+v, want only tree_size=1", pending)
-	}
-}
-
-func testSTHAnchorListPendingIsCommitOrdered(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	for _, e := range []struct {
-		size uint64
-		ts   int64
-	}{{3, 100}, {1, 200}, {2, 300}} {
-		if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(e.size, "file", e.ts)); err != nil {
-			t.Fatalf("EnqueueSTHAnchor %d: %v", e.size, err)
-		}
-	}
-	pending, err := store.ListPendingSTHAnchors(ctx, 1_000, 10)
-	if err != nil {
-		t.Fatalf("ListPendingSTHAnchors: %v", err)
-	}
-	want := []uint64{3, 1, 2}
-	if len(pending) != len(want) {
-		t.Fatalf("ListPendingSTHAnchors len = %d, want %d", len(pending), len(want))
-	}
-	for i, size := range want {
-		if pending[i].TreeSize != size {
-			t.Fatalf("ListPendingSTHAnchors[%d] = %d, want %d", i, pending[i].TreeSize, size)
-		}
-	}
-}
-
-func testSTHAnchorListPublishedFilters(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	for _, e := range []struct {
-		size uint64
-		ts   int64
-	}{{1, 50}, {3, 300}, {2, 200}, {4, 400}} {
-		if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(e.size, "ots", e.ts)); err != nil {
-			t.Fatalf("EnqueueSTHAnchor %d: %v", e.size, err)
-		}
-	}
-	if err := store.MarkSTHAnchorPublished(ctx, sthAnchorResult(3, "ots", "z")); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished z: %v", err)
-	}
-	if err := store.MarkSTHAnchorPublished(ctx, sthAnchorResult(2, "ots", "a")); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished a: %v", err)
-	}
-	if err := store.MarkSTHAnchorFailed(ctx, 4, "permanent boom"); err != nil {
-		t.Fatalf("MarkSTHAnchorFailed: %v", err)
-	}
-	got, err := store.ListPublishedSTHAnchors(ctx, 100)
-	if err != nil {
-		t.Fatalf("ListPublishedSTHAnchors: %v", err)
-	}
-	want := []uint64{2, 3}
-	if len(got) != len(want) {
-		t.Fatalf("ListPublishedSTHAnchors = %+v", got)
-	}
-	for i, size := range want {
-		if got[i].TreeSize != size {
-			t.Fatalf("ListPublishedSTHAnchors[%d] = %d, want %d", i, got[i].TreeSize, size)
-		}
-		if got[i].Status != model.AnchorStatePublished {
-			t.Fatalf("ListPublishedSTHAnchors[%d] status = %s, want published", i, got[i].Status)
-		}
-	}
-
-	emptyStore, emptyCleanup := newStore(t)
-	defer emptyCleanup()
-	empty, err := emptyStore.ListPublishedSTHAnchors(ctx, 10)
-	if err != nil {
-		t.Fatalf("ListPublishedSTHAnchors on empty store: %v", err)
-	}
-	if len(empty) != 0 {
-		t.Fatalf("ListPublishedSTHAnchors on empty store = %+v, want []", empty)
-	}
-}
-
-func testSTHAnchorMarkPublished(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(7, "file", 50)); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
-	result := sthAnchorResult(7, "file", "anchor-42")
-	result.Proof = []byte("proof-blob")
-	result.PublishedAtUnixN = 9_999
-	if err := store.MarkSTHAnchorPublished(ctx, result); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
-	}
-	got, ok, err := store.GetSTHAnchorResult(ctx, 7)
-	if err != nil || !ok {
-		t.Fatalf("GetSTHAnchorResult ok=%v err=%v", ok, err)
-	}
-	if got.AnchorID != result.AnchorID || string(got.Proof) != "proof-blob" {
-		t.Fatalf("GetSTHAnchorResult() = %+v, want %+v", got, result)
-	}
-	item, ok, err := store.GetSTHAnchorOutboxItem(ctx, 7)
-	if err != nil || !ok {
-		t.Fatalf("GetSTHAnchorOutboxItem ok=%v err=%v", ok, err)
-	}
-	if item.Status != model.AnchorStatePublished {
-		t.Fatalf("item status = %q, want %q", item.Status, model.AnchorStatePublished)
-	}
-	pending, err := store.ListPendingSTHAnchors(ctx, 1_000_000_000_000, 10)
-	if len(pending) != 0 {
-		t.Fatalf("ListPendingSTHAnchors after publish = %+v, want empty", pending)
-	}
-}
-
 func testLatestSTHAnchorResultIsMonotonic(t *testing.T, newStore Factory) {
 	t.Parallel()
 	store, cleanup := newStore(t)
@@ -1439,16 +1232,19 @@ func testLatestSTHAnchorResultIsMonotonic(t *testing.T, newStore Factory) {
 	if !ok {
 		t.Skip("store does not implement LatestSTHAnchorResultReader")
 	}
+	writer, ok := store.(proofstore.STHAnchorResultWriter)
+	if !ok {
+		t.Fatalf("LatestSTHAnchorResultReader must also implement STHAnchorResultWriter")
+	}
 	ctx := context.Background()
 	if _, found, err := reader.LatestSTHAnchorResult(ctx); err != nil || found {
 		t.Fatalf("LatestSTHAnchorResult empty found=%v err=%v", found, err)
 	}
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	for _, treeSize := range []uint64{3, 2} {
-		if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(treeSize, "file", int64(treeSize))); err != nil {
-			t.Fatalf("EnqueueSTHAnchor(%d): %v", treeSize, err)
-		}
-		if err := store.MarkSTHAnchorPublished(ctx, sthAnchorResult(treeSize, "file", "anchor")); err != nil {
-			t.Fatalf("MarkSTHAnchorPublished(%d): %v", treeSize, err)
+		sth := scheduleSTH(key, treeSize, byte(treeSize))
+		if err := writer.PutSTHAnchorResult(ctx, scheduleResult(key, sth, fmt.Sprintf("anchor-%d", treeSize), int64(treeSize))); err != nil {
+			t.Fatalf("PutSTHAnchorResult(%d): %v", treeSize, err)
 		}
 	}
 	latest, found, err := reader.LatestSTHAnchorResult(ctx)
@@ -1457,6 +1253,70 @@ func testLatestSTHAnchorResultIsMonotonic(t *testing.T, newStore Factory) {
 	}
 	if latest.TreeSize != 3 {
 		t.Fatalf("LatestSTHAnchorResult tree_size=%d, want 3", latest.TreeSize)
+	}
+}
+
+func testSTHAnchorResultMissing(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	if _, found, err := store.GetSTHAnchorResult(context.Background(), 99); err != nil || found {
+		t.Fatalf("GetSTHAnchorResult missing found=%v err=%v", found, err)
+	}
+}
+
+func testSTHAnchorResultUpdatePreservesLatest(t *testing.T, newStore Factory) {
+	t.Parallel()
+	store, cleanup := newStore(t)
+	defer cleanup()
+	writer, ok := store.(proofstore.STHAnchorResultWriter)
+	if !ok {
+		t.Skip("store does not implement STHAnchorResultWriter")
+	}
+	updater, ok := store.(proofstore.STHAnchorResultUpdater)
+	if !ok {
+		t.Fatalf("STHAnchorResultWriter must also implement STHAnchorResultUpdater")
+	}
+	reader, ok := store.(proofstore.LatestSTHAnchorResultReader)
+	if !ok {
+		t.Fatalf("STHAnchorResultWriter must also implement LatestSTHAnchorResultReader")
+	}
+	keyed, ok := store.(proofstore.STHAnchorResultKeyedReader)
+	if !ok {
+		t.Fatalf("STHAnchorResultWriter must also implement STHAnchorResultKeyedReader")
+	}
+	ctx := context.Background()
+	key := model.STHAnchorScheduleKey{NodeID: "node-update", LogID: "log-update", SinkName: "ots"}
+	older := scheduleResult(key, scheduleSTH(key, 5, 0x51), "anchor-5", 500)
+	newer := scheduleResult(key, scheduleSTH(key, 7, 0x71), "anchor-7", 700)
+	if err := writer.PutSTHAnchorResult(ctx, older); err != nil {
+		t.Fatalf("PutSTHAnchorResult older: %v", err)
+	}
+	if err := writer.PutSTHAnchorResult(ctx, newer); err != nil {
+		t.Fatalf("PutSTHAnchorResult newer: %v", err)
+	}
+	original := older
+	older.Proof = []byte("upgraded-ots-proof")
+	if err := updater.UpdateSTHAnchorResult(ctx, original, older); err != nil {
+		t.Fatalf("UpdateSTHAnchorResult: %v", err)
+	}
+	got, found, err := keyed.GetSTHAnchorResultForKey(ctx, anchorschedule.ResultKey(older))
+	if err != nil || !found || !bytes.Equal(got.Proof, older.Proof) {
+		t.Fatalf("updated result=%+v found=%v err=%v", got, found, err)
+	}
+	latest, found, err := reader.LatestSTHAnchorResult(ctx)
+	if err != nil || !found || latest.TreeSize != newer.TreeSize || latest.AnchorID != newer.AnchorID {
+		t.Fatalf("latest after historical update=%+v found=%v err=%v", latest, found, err)
+	}
+	conflict := older
+	conflict.AnchorID = "different-anchor"
+	if err := updater.UpdateSTHAnchorResult(ctx, older, conflict); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("conflicting update error=%v, want data_loss", err)
+	}
+	stale := older
+	stale.Proof = []byte("stale-concurrent-proof")
+	if err := updater.UpdateSTHAnchorResult(ctx, original, stale); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("stale update error=%v, want failed_precondition", err)
 	}
 }
 
@@ -1472,6 +1332,10 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	if !ok {
 		t.Fatalf("STHAnchorScheduleStore must also implement STHAnchorResultLister")
 	}
+	resultPager, ok := store.(proofstore.STHAnchorResultPager)
+	if !ok {
+		t.Fatalf("STHAnchorScheduleStore must also implement STHAnchorResultPager")
+	}
 	resultWriter, ok := store.(proofstore.STHAnchorResultWriter)
 	if !ok {
 		t.Fatalf("STHAnchorScheduleStore must also implement STHAnchorResultWriter")
@@ -1479,6 +1343,10 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	keyedReader, ok := store.(proofstore.STHAnchorResultKeyedReader)
 	if !ok {
 		t.Fatalf("STHAnchorScheduleStore must also implement STHAnchorResultKeyedReader")
+	}
+	scheduleRestorer, ok := store.(proofstore.STHAnchorScheduleRestorer)
+	if !ok {
+		t.Fatalf("STHAnchorScheduleStore must also implement STHAnchorScheduleRestorer")
 	}
 	ctx := context.Background()
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
@@ -1529,12 +1397,12 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	if _, claimed, err := scheduler.ClaimSTHAnchorAttempt(ctx, key, 299, 350, "worker-2", "lease-too-soon"); err != nil || claimed {
 		t.Fatalf("ClaimSTHAnchorAttempt before retry claimed=%v err=%v", claimed, err)
 	}
-	attempt, claimed, err = scheduler.ClaimSTHAnchorAttempt(ctx, key, 300, 400, "worker-2", "lease-2")
+	attempt, claimed, err = scheduler.ClaimSTHAnchorAttempt(ctx, key, 350, 450, "worker-2", "lease-2")
 	if err != nil || !claimed || attempt.Attempts != 1 || attempt.Target.TreeSize != 3 {
 		t.Fatalf("ClaimSTHAnchorAttempt retry attempt=%+v claimed=%v err=%v", attempt, claimed, err)
 	}
 
-	result := scheduleResult(key, attempt.Target, "anchor-3", 310)
+	result := scheduleResult(key, attempt.Target, "anchor-3", 360)
 	if err := scheduler.CompleteSTHAnchorAttempt(ctx, key, attempt.Generation, "lease-2", result); err != nil {
 		t.Fatalf("CompleteSTHAnchorAttempt: %v", err)
 	}
@@ -1552,6 +1420,10 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	if err != nil || !found || storedResult.AnchorID != result.AnchorID {
 		t.Fatalf("GetSTHAnchorResult completed result=%+v found=%v err=%v", storedResult, found, err)
 	}
+	latestForKey, found, err := keyedReader.LatestSTHAnchorResultForKey(ctx, key)
+	if err != nil || !found || latestForKey.AnchorID != result.AnchorID {
+		t.Fatalf("LatestSTHAnchorResultForKey after empty sentinel result=%+v found=%v err=%v", latestForKey, found, err)
+	}
 	results, err := resultLister.ListSTHAnchorResultsAfter(ctx, model.STHAnchorResultKey{}, 10)
 	if err != nil || len(results) != 1 || results[0].TreeSize != 3 {
 		t.Fatalf("ListSTHAnchorResultsAfter results=%+v err=%v", results, err)
@@ -1561,7 +1433,7 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	if _, err := scheduler.UpsertSTHAnchorCandidate(ctx, conflict); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 		t.Fatalf("UpsertSTHAnchorCandidate conflicting root error=%v", err)
 	}
-	attempt, claimed, err = scheduler.ClaimSTHAnchorAttempt(ctx, key, 320, 400, "worker-3", "lease-3")
+	attempt, claimed, err = scheduler.ClaimSTHAnchorAttempt(ctx, key, 370, 470, "worker-3", "lease-3")
 	if err != nil || !claimed || attempt.Target.TreeSize != 5 {
 		t.Fatalf("ClaimSTHAnchorAttempt next window attempt=%+v claimed=%v err=%v", attempt, claimed, err)
 	}
@@ -1577,6 +1449,62 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	}
 	if terminal.InFlight == nil || !terminal.InFlight.TerminalFailure || terminal.InFlight.Target.TreeSize != 5 || terminal.Pending == nil || terminal.Pending.Target.TreeSize != 7 {
 		t.Fatalf("terminal bounded scheduler state = %+v", terminal)
+	}
+
+	// A sink-independent canonical root fence must reject a split view before
+	// either sink can claim and externally publish its schedule.
+	fenceA := model.STHAnchorScheduleKey{NodeID: "node-fence", LogID: "log-fence", SinkName: "fence-a"}
+	fenceB := model.STHAnchorScheduleKey{NodeID: "node-fence", LogID: "log-fence", SinkName: "fence-b"}
+	if _, err := scheduler.UpsertSTHAnchorCandidate(ctx, scheduleCandidate(fenceA, 29, 0x29, 600, 700)); err != nil {
+		t.Fatalf("UpsertSTHAnchorCandidate first cross-sink fence: %v", err)
+	}
+	if _, err := scheduler.UpsertSTHAnchorCandidate(ctx, scheduleCandidate(fenceB, 29, 0x99, 610, 710)); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("UpsertSTHAnchorCandidate pre-publication split view error=%v", err)
+	}
+
+	// Backup captures schedules before results. If the pending target succeeds
+	// while result enumeration is in progress, restore must reconcile it before
+	// any external re-publication.
+	backupKey := model.STHAnchorScheduleKey{NodeID: "node-backup", LogID: "log-backup", SinkName: "backup-sink"}
+	backupCandidate := scheduleCandidate(backupKey, 31, 0x31, 800, 800)
+	backupSchedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, backupCandidate, nil)
+	if err != nil {
+		t.Fatalf("MergeCandidate backup schedule: %v", err)
+	}
+	if err := scheduleRestorer.PutSTHAnchorSchedule(ctx, backupSchedule); err != nil {
+		t.Fatalf("PutSTHAnchorSchedule before result: %v", err)
+	}
+	if err := resultWriter.PutSTHAnchorResult(ctx, scheduleResult(backupKey, backupCandidate.STH, "anchor-backup-31", 810)); err != nil {
+		t.Fatalf("PutSTHAnchorResult after restored pending: %v", err)
+	}
+	if _, claimed, err := scheduler.ClaimSTHAnchorAttempt(ctx, backupKey, 900, 1000, "worker-backup", "lease-backup"); err != nil || claimed {
+		t.Fatalf("ClaimSTHAnchorAttempt restored completed pending claimed=%v err=%v", claimed, err)
+	}
+	reconciledBackup, found, err := scheduler.GetSTHAnchorSchedule(ctx, backupKey)
+	if err != nil || !found || reconciledBackup.Pending != nil || reconciledBackup.InFlight != nil {
+		t.Fatalf("reconciled restored backup schedule=%+v found=%v err=%v", reconciledBackup, found, err)
+	}
+
+	// A destination that already has the immutable result should reconcile the
+	// stale pending slot while restoring the schedule itself.
+	preexistingKey := model.STHAnchorScheduleKey{NodeID: "node-restore", LogID: "log-restore", SinkName: "restore-sink"}
+	preexistingCandidate := scheduleCandidate(preexistingKey, 37, 0x37, 900, 900)
+	if err := resultWriter.PutSTHAnchorResult(ctx, scheduleResult(preexistingKey, preexistingCandidate.STH, "anchor-restore-37", 910)); err != nil {
+		t.Fatalf("PutSTHAnchorResult before restored schedule: %v", err)
+	}
+	preexistingSchedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, preexistingCandidate, nil)
+	if err != nil {
+		t.Fatalf("MergeCandidate preexisting result schedule: %v", err)
+	}
+	if err := scheduleRestorer.PutSTHAnchorSchedule(ctx, preexistingSchedule); err != nil {
+		t.Fatalf("PutSTHAnchorSchedule after result: %v", err)
+	}
+	if err := scheduleRestorer.PutSTHAnchorSchedule(ctx, preexistingSchedule); err != nil {
+		t.Fatalf("PutSTHAnchorSchedule reconciled retry: %v", err)
+	}
+	reconciledRestore, found, err := scheduler.GetSTHAnchorSchedule(ctx, preexistingKey)
+	if err != nil || !found || reconciledRestore.Pending != nil || reconciledRestore.InFlight != nil {
+		t.Fatalf("reconciled schedule restore=%+v found=%v err=%v", reconciledRestore, found, err)
 	}
 
 	crashKey := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "crash-test"}
@@ -1638,6 +1566,53 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	}
 	if multiCount != 2 {
 		t.Fatalf("composite result pagination retained %d same-tree sinks, want 2", multiCount)
+	}
+
+	// URL-base64 physical keys do not preserve raw string order (C0 encodes to
+	// QzA while C@ encodes to Q0A). Exercise that inversion with single-item
+	// pages so every backend and the shared cursor comparator stay aligned.
+	orderA := model.STHAnchorScheduleKey{NodeID: "node-order", LogID: "log-order", SinkName: "C0"}
+	orderB := model.STHAnchorScheduleKey{NodeID: "node-order", LogID: "log-order", SinkName: "C@"}
+	orderSTH := scheduleSTH(orderA, 31, 0x31)
+	for _, tc := range []struct {
+		key      model.STHAnchorScheduleKey
+		anchorID string
+	}{{orderA, "anchor-order-c0"}, {orderB, "anchor-order-c-at"}} {
+		if err := resultWriter.PutSTHAnchorResult(ctx, scheduleResult(tc.key, orderSTH, tc.anchorID, 310)); err != nil {
+			t.Fatalf("PutSTHAnchorResult order inversion %q: %v", tc.key.SinkName, err)
+		}
+	}
+	orderSeen := make([]string, 0, 2)
+	cursor = model.STHAnchorResultKey{}
+	for {
+		page, err := resultLister.ListSTHAnchorResultsAfter(ctx, cursor, 1)
+		if err != nil {
+			t.Fatalf("ListSTHAnchorResultsAfter order inversion page: %v", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		cursor = anchorschedule.ResultKey(page[0])
+		if page[0].TreeSize == orderSTH.TreeSize && page[0].NodeID == orderA.NodeID && page[0].LogID == orderA.LogID {
+			orderSeen = append(orderSeen, page[0].SinkName)
+		}
+	}
+	if len(orderSeen) != 2 || orderSeen[0] != orderB.SinkName || orderSeen[1] != orderA.SinkName {
+		t.Fatalf("encoded result key order = %v, want [%q %q]", orderSeen, orderB.SinkName, orderA.SinkName)
+	}
+	descending, err := resultPager.ListSTHAnchorResultsPage(ctx, model.AnchorListOptions{
+		Limit: 1, Direction: model.RecordListDirectionDesc,
+		AfterResultKey: model.STHAnchorResultKey{TreeSize: orderSTH.TreeSize + 1, SinkName: "cursor"}, HasAfter: true,
+	})
+	if err != nil || len(descending) != 1 || descending[0].SinkName != orderA.SinkName {
+		t.Fatalf("descending result page=%+v err=%v, want %q", descending, err, orderA.SinkName)
+	}
+	descending, err = resultPager.ListSTHAnchorResultsPage(ctx, model.AnchorListOptions{
+		Limit: 1, Direction: model.RecordListDirectionDesc,
+		AfterResultKey: anchorschedule.ResultKey(descending[0]), HasAfter: true,
+	})
+	if err != nil || len(descending) != 1 || descending[0].SinkName != orderB.SinkName {
+		t.Fatalf("descending composite cursor page=%+v err=%v, want %q", descending, err, orderB.SinkName)
 	}
 	otherLog := model.STHAnchorScheduleKey{NodeID: "node-2", LogID: "log-2", SinkName: "multi-a"}
 	otherSTH := scheduleSTH(otherLog, 23, 0x99)
@@ -1789,115 +1764,6 @@ func scheduleResult(key model.STHAnchorScheduleKey, sth model.SignedTreeHead, an
 		Proof:            []byte("anchor-proof"),
 		PublishedAtUnixN: publishedAt,
 	}
-}
-
-func testSTHAnchorMarkFailed(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(9, "file", 10)); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
-	if err := store.MarkSTHAnchorFailed(ctx, 9, "schema rejected"); err != nil {
-		t.Fatalf("MarkSTHAnchorFailed: %v", err)
-	}
-	item, _, err := store.GetSTHAnchorOutboxItem(ctx, 9)
-	if err != nil {
-		t.Fatalf("GetSTHAnchorOutboxItem: %v", err)
-	}
-	if item.Status != model.AnchorStateFailed || item.LastErrorMessage != "schema rejected" {
-		t.Fatalf("item = %+v, want failed+schema rejected", item)
-	}
-	pending, err := store.ListPendingSTHAnchors(ctx, 1_000_000, 10)
-	if err != nil {
-		t.Fatalf("ListPendingSTHAnchors: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("ListPendingSTHAnchors after failed = %+v, want empty", pending)
-	}
-}
-
-func testSTHAnchorRescheduleKeepsPending(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	if err := store.EnqueueSTHAnchor(ctx, sthAnchorItem(11, "file", 100)); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
-	if err := store.RescheduleSTHAnchor(ctx, 11, 2, 5_000, "sink 5xx"); err != nil {
-		t.Fatalf("RescheduleSTHAnchor: %v", err)
-	}
-	item, _, err := store.GetSTHAnchorOutboxItem(ctx, 11)
-	if err != nil {
-		t.Fatalf("GetSTHAnchorOutboxItem: %v", err)
-	}
-	if item.Status != model.AnchorStatePending || item.Attempts != 2 || item.NextAttemptUnixN != 5_000 || item.LastErrorMessage != "sink 5xx" {
-		t.Fatalf("item = %+v", item)
-	}
-
-	pending, err := store.ListPendingSTHAnchors(ctx, 4_000, 10)
-	if err != nil {
-		t.Fatalf("ListPendingSTHAnchors pre-backoff: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("ListPendingSTHAnchors pre-backoff = %+v, want empty", pending)
-	}
-	pending, err = store.ListPendingSTHAnchors(ctx, 10_000, 10)
-	if err != nil {
-		t.Fatalf("ListPendingSTHAnchors post-backoff: %v", err)
-	}
-	if len(pending) != 1 || pending[0].TreeSize != 11 {
-		t.Fatalf("ListPendingSTHAnchors post-backoff = %+v", pending)
-	}
-}
-
-func testSTHAnchorMissing(t *testing.T, newStore Factory) {
-	t.Parallel()
-	store, cleanup := newStore(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	_, ok, err := store.GetSTHAnchorOutboxItem(ctx, 99)
-	if err != nil {
-		t.Fatalf("GetSTHAnchorOutboxItem: %v", err)
-	}
-	if ok {
-		t.Fatalf("GetSTHAnchorOutboxItem ok = true, want false for missing item")
-	}
-	_, ok, err = store.GetSTHAnchorResult(ctx, 99)
-	if err != nil {
-		t.Fatalf("GetSTHAnchorResult: %v", err)
-	}
-	if ok {
-		t.Fatalf("GetSTHAnchorResult ok = true, want false for missing item")
-	}
-	if err := store.RescheduleSTHAnchor(ctx, 99, 1, 0, "x"); err == nil {
-		t.Fatalf("RescheduleSTHAnchor: want NotFound, got nil")
-	} else if trusterr.CodeOf(err) != trusterr.CodeNotFound {
-		t.Fatalf("CodeOf(err) = %s, want NotFound", trusterr.CodeOf(err))
-	}
-}
-
-func sthAnchorItem(treeSize uint64, sink string, enqueuedAt int64) model.STHAnchorOutboxItem {
-	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: sink}
-	return model.STHAnchorOutboxItem{
-		SchemaVersion:   model.SchemaSTHAnchorOutbox,
-		TreeSize:        treeSize,
-		SinkName:        sink,
-		Status:          model.AnchorStatePending,
-		STH:             scheduleSTH(key, treeSize, byte(treeSize)),
-		EnqueuedAtUnixN: enqueuedAt,
-	}
-}
-
-func sthAnchorResult(treeSize uint64, sink, anchorID string) model.STHAnchorResult {
-	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: sink}
-	sth := scheduleSTH(key, treeSize, byte(treeSize))
-	return scheduleResult(key, sth, anchorID, int64(treeSize))
 }
 
 func idForWorker(worker, seq int) string {

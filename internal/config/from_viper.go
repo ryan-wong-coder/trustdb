@@ -11,9 +11,14 @@ import (
 // mapping previously done in cmd/trustdb/root.go so validation and admin
 // config reload can share one code path.
 func FromViper(v *viper.Viper) Config {
+	defaults := Default()
+	anchorMaxDelay := strings.TrimSpace(v.GetString("anchor.max_delay"))
+	if anchorMaxDelay == "" {
+		anchorMaxDelay = defaults.Anchor.MaxDelay
+	}
 	anchorPollInterval := strings.TrimSpace(v.GetString("anchor.poll_interval"))
 	if anchorPollInterval == "" {
-		anchorPollInterval = Default().Anchor.PollInterval
+		anchorPollInterval = defaults.Anchor.PollInterval
 	}
 	return Config{
 		RunProfile: v.GetString("run_profile"),
@@ -61,9 +66,8 @@ func FromViper(v *viper.Viper) Config {
 		},
 		Anchor: Anchor{
 			Scope:        v.GetString("anchor.scope"),
-			MaxDelay:     v.GetString("anchor.max_delay"),
+			MaxDelay:     anchorMaxDelay,
 			PollInterval: anchorPollInterval,
-			Workers:      v.GetInt("anchor.workers"),
 			Sink:         v.GetString("anchor.sink"),
 			Path:         v.GetString("anchor.path"),
 		},

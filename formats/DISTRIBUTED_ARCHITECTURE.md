@@ -14,13 +14,14 @@ TrustDB 单机路径：`ingest` → WAL → `batch` → proofstore（file/Pebble
 
 - TiKV **不是**旁路元数据目录或仅索引服务，而是可选的 **proofstore 后端**，需实现与 file/Pebble 相同的 `proofstore.Store` 契约（含 `CommitGlobalLogAppend`、`BatchArtifactWriter` 等）。
 - 配置通过 `metastore: tikv` 与 PD 地址等参数选择（见 `internal/config` 与 `internal/proofstore/factory.go`）。TiKV 后端必须连接原生 TiKV proofstore，不能退化为本地临时缓存。
-- TiKV 物理 key 必须带 TrustDB 应用级 namespace 前缀：`trustdb/proofstore/v1/ns/<base64url(namespace)>/`。默认 namespace 为 `default`；共享同一 proofstore 的多计算节点必须显式使用同一 namespace，独立租户或独立 log 必须使用不同 namespace。
+- TiKV 物理 key 必须带 TrustDB 应用级 namespace 前缀：`trustdb/proofstore/v1/ns/<base64url(namespace)>/`。默认 namespace 为 `default`；一个 namespace 只属于一个逻辑 `(node_id, log_id)` Global Log。active-passive 替换节点仅在复用相同逻辑身份时复用 namespace；独立租户或独立 log 必须使用不同 namespace。
+- 每个 TiKV namespace 必须包含 `meta/storage-schema = trustdb-proofstore-v4`。仅空 namespace 可初始化该标记；旧版本、缺少标记但已有数据的 namespace 均 fail closed，不自动迁移或双读旧 anchor queue。
 - 值编码与 Pebble/file 一致：确定性 CBOR + 与 Pebble 相同的 bundle 信封语义，便于备份与迁移。
 
 ### 2. 存算分离
 
 - **计算节点**：运行 TrustDB 进程（HTTP/gRPC、ingest、batch、签名、WAL 等）；默认仍使用**每节点本地 WAL**。
-- **存储层**：多计算节点可连接**同一 TiKV 集群**共享 proofstore 数据；吞吐通过多节点 + 客户端侧负载均衡扩展。
+- **存储层**：多计算节点可连接**同一 TiKV 集群**，但独立 Global Log 使用不同 namespace。当前仅支持同一逻辑身份的 active-passive namespace 接管；跨 namespace 的吞吐扩展与客户端侧负载均衡互不影响。
 - **不引入**服务端公共节点注册表、latest STH 目录、record 路由目录或集群查询聚合 API。
 
 ### 3. 来源标识（node_id / log_id）
@@ -40,7 +41,7 @@ TrustDB 单机路径：`ingest` → WAL → `batch` → proofstore（file/Pebble
 
 ## 并发与同一 log_id
 
-- **默认**：每个计算节点使用独立 `log_id`；多节点并发写同一 TiKV 时通过 key 前缀（含 `log_id`）隔离。
+- **默认**：每个独立 Global Log 使用独立 namespace；Global Log 的 leaf/state/STH key 不在 namespace 内再次按 `log_id` 分区。替换节点必须继续使用原 `(node_id, log_id)`，才能安全重放已持久化 outbox 与原始签名 STH。
 - **同一 `log_id` 多写者 active-active**：必须先有 TiKV lease / fencing / CAS 等显式设计，不在首版范围。
 
 ## 非目标

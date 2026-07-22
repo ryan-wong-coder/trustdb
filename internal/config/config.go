@@ -73,7 +73,6 @@ anchor:
   scope: "global"
   max_delay: "5m"
   poll_interval: "2s"
-  workers: 4
 
 history:
   tile_size: 256
@@ -201,7 +200,6 @@ type Anchor struct {
 	Scope        string `mapstructure:"scope" json:"scope"`
 	MaxDelay     string `mapstructure:"max_delay" json:"max_delay"`
 	PollInterval string `mapstructure:"poll_interval" json:"poll_interval"`
-	Workers      int    `mapstructure:"workers" json:"workers"`
 	Sink         string `mapstructure:"sink" json:"sink"`
 	Path         string `mapstructure:"path" json:"path"`
 }
@@ -300,7 +298,6 @@ func Default() Config {
 			Scope:        "global",
 			MaxDelay:     "5m",
 			PollInterval: "2s",
-			Workers:      4,
 			Sink:         "",
 			Path:         "",
 		},
@@ -444,9 +441,6 @@ func (c Config) Validate() error {
 	}
 	if err := validatePositiveDuration("anchor.poll_interval", c.Anchor.PollInterval); err != nil {
 		return err
-	}
-	if c.Anchor.Workers <= 0 {
-		return fmt.Errorf("anchor.workers must be greater than 0")
 	}
 	if c.History.TileSize == 0 {
 		return fmt.Errorf("history.tile_size must be greater than 0")

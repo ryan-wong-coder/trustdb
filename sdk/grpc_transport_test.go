@@ -23,7 +23,7 @@ import (
 func TestGRPCTransportOperationalEndpoints(t *testing.T) {
 	t.Parallel()
 
-	client := newBufconnClient(t, grpcapi.NewServer(nil, grpcTestBatch{}, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newBufconnClient(t, grpcapi.NewServer(nil, grpcTestBatch{}, nil, grpcTestAnchors{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("trustdb_ingest_total 1\n"))
 	})))
 
@@ -57,6 +57,20 @@ func TestGRPCTransportOperationalEndpoints(t *testing.T) {
 	}
 	if latest.BatchID != "batch-latest" {
 		t.Fatalf("latest = %+v", latest)
+	}
+	anchors, err := client.ListAnchors(context.Background(), ListPageOptions{Limit: 5, Direction: RecordListDirectionDesc})
+	if err != nil {
+		t.Fatalf("ListAnchors: %v", err)
+	}
+	if len(anchors.Anchors) != 1 || anchors.Anchors[0].Status != model.AnchorStatePublished || anchors.Anchors[0].Result == nil || anchors.Anchors[0].Result.AnchorID != "anchor-4" {
+		t.Fatalf("anchors = %+v", anchors)
+	}
+	anchorStatus, err := client.GetAnchor(context.Background(), 4)
+	if err != nil {
+		t.Fatalf("GetAnchor: %v", err)
+	}
+	if anchorStatus.Status != model.AnchorStatePublished || anchorStatus.Result == nil || anchorStatus.Result.AnchorID != "anchor-4" {
+		t.Fatalf("anchor status = %+v", anchorStatus)
 	}
 	bundle, err := client.GetProofBundle(context.Background(), "tr1record")
 	if err != nil {
@@ -207,6 +221,8 @@ func newBufconnClient(t *testing.T, srv grpcapi.TrustDBServiceServer) *Client {
 
 type grpcTestBatch struct{}
 
+type grpcTestAnchors struct{}
+
 type grpcTerminatingStreamServer struct {
 	*grpcapi.Server
 }
@@ -269,4 +285,15 @@ func (grpcTestBatch) BatchTreeLeaves(context.Context, model.BatchTreeLeafListOpt
 
 func (grpcTestBatch) BatchTreeNodes(context.Context, model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
 	return []model.BatchTreeNode{{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-1", Level: 0, StartIndex: 0, Width: 1}}, nil
+}
+
+func (grpcTestAnchors) AnchorResult(_ context.Context, treeSize uint64) (model.STHAnchorResult, bool, error) {
+	if treeSize != 4 {
+		return model.STHAnchorResult{}, false, nil
+	}
+	return model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, SinkName: "ots", AnchorID: "anchor-4"}, true, nil
+}
+
+func (grpcTestAnchors) Anchors(context.Context, model.AnchorListOptions) ([]model.STHAnchorResult, error) {
+	return []model.STHAnchorResult{{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, SinkName: "ots", AnchorID: "anchor-4"}}, nil
 }

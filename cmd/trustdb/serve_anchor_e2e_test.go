@@ -33,8 +33,9 @@ import (
 
 // TestServeAnchorEndToEnd drives the full L1→L5 pipeline against a
 // file-backed anchor sink so every boundary is exercised with real
-// IO: claim accepted → batch committed → outbox enqueued → worker
-// publishes → JSONL appended → HTTP exposes the anchor result.
+// IO: claim accepted → batch committed → outbox enqueued → final STH
+// coalesced → worker publishes → JSONL appended → HTTP exposes the
+// immutable anchor result.
 //
 // Using a FileSink lets the assertions inspect on-disk artefacts
 // directly (number of JSONL lines, anchor_id determinism) in addition
@@ -67,6 +68,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 
 	engine := app.LocalEngine{
 		ServerID:         "server-anchor-e2e",
+		LogID:            "server-anchor-e2e",
 		ServerKeyID:      "server-key",
 		ClientPublicKey:  clientPub,
 		ServerPrivateKey: serverPriv,
@@ -82,9 +84,13 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileSink: %v", err)
 	}
+	anchorKey := model.STHAnchorScheduleKey{
+		NodeID: engine.ServerID, LogID: engine.ServerID, SinkName: sink.Name(),
+	}
 	anchorSvc, err := anchor.NewService(anchor.Config{
 		Sink:    sink,
 		Store:   proofStore,
+		Key:     anchorKey,
 		Metrics: metrics,
 		// Tight poll interval so tests don't wait for defaults.
 		PollInterval: 20 * time.Millisecond,
@@ -92,12 +98,12 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	anchorSvc.Start(context.Background())
 	defer anchorSvc.Stop()
 
 	rt := &runtimeConfig{logger: silentLogger()}
 	globalSvc, err := globallog.New(globallog.Options{
 		Store:      proofStore,
+		NodeID:     engine.ServerID,
 		LogID:      engine.ServerID,
 		KeyID:      engine.ServerKeyID,
 		PrivateKey: serverPriv,
@@ -108,9 +114,10 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	globalOutbox := globallog.NewOutboxWorker(globallog.OutboxConfig{
 		Store:          proofStore,
 		Global:         globalSvc,
+		AnchorKey:      &anchorKey,
+		AnchorMaxDelay: 20 * time.Millisecond,
+		OnAnchorReady:  anchorSvc.Trigger,
 		PollInterval:   20 * time.Millisecond,
-		AnchorOutbox:   true,
-		OnAnchorsReady: anchorSvc.Trigger,
 	})
 	globalOutbox.Start(context.Background())
 	defer globalOutbox.Stop()
@@ -179,18 +186,24 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	}
 
 	// Wait for every record to reach L3 so we know every batch is
-	// committed. After that the anchor outbox will only drain — the
-	// L3 → L5 hand-off is local.
+	// committed, then wait until the global-log worker has merged the
+	// final STH into the one durable pending window. The anchor worker is
+	// deliberately still stopped, making this a deterministic coalescing
+	// assertion independent of scheduler timing.
 	for _, rid := range recordIDs {
 		waitForHTTPProof(t, server.URL, rid)
 	}
-
-	// With MaxRecords=1 we get exactly totalClaims committed
-	// batches, deterministic regardless of scheduler pressure. The
-	// anchor worker must publish all of them.
 	waitForMetric(t, func() bool {
-		return testutil.ToFloat64(metrics.AnchorPublished.WithLabelValues(anchor.FileSinkName)) >= float64(totalClaims)
-	}, fmt.Sprintf("anchor_published_total >= %d", totalClaims))
+		schedule, ok, err := proofStore.GetSTHAnchorSchedule(context.Background(), anchorKey)
+		return err == nil && ok && schedule.Pending != nil && schedule.Pending.Target.TreeSize == totalClaims
+	}, "coalesced anchor target reaches final STH")
+	anchorSvc.Start(context.Background())
+
+	// One fixed window containing all committed STHs must produce one
+	// external publication for the highest tree size.
+	waitForMetric(t, func() bool {
+		return testutil.ToFloat64(metrics.AnchorPublished.WithLabelValues(anchor.FileSinkName)) >= 1
+	}, "anchor_published_total >= 1")
 
 	manifests, err := proofStore.ListManifests(context.Background())
 	if err != nil {
@@ -206,65 +219,60 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 		t.Fatalf("committed manifests = %d, want %d", committed, totalClaims)
 	}
 
-	// File sink wrote exactly one JSONL line per published batch.
+	// File sink wrote exactly one JSONL line for the coalesced window.
 	lines := readJSONL(t, anchorPath)
-	if len(lines) != totalClaims {
-		t.Fatalf("anchors.jsonl lines = %d, want %d (got %+v)", len(lines), totalClaims, lines)
+	if len(lines) != 1 {
+		t.Fatalf("anchors.jsonl lines = %d, want 1 (got %+v)", len(lines), lines)
 	}
 	if !strings.HasPrefix(lines[0].AnchorID, "file-") {
 		t.Fatalf("anchor id missing file- prefix: %q", lines[0].AnchorID)
 	}
+	if lines[0].TreeSize != totalClaims {
+		t.Fatalf("anchored tree size = %d, want %d", lines[0].TreeSize, totalClaims)
+	}
 
-	// HTTP surface exposes the anchor result for each batch.
-	for _, m := range manifests {
-		if m.State != model.BatchStateCommitted {
-			continue
-		}
-		leaf, ok, err := proofStore.GetGlobalLeafByBatchID(context.Background(), m.BatchID)
-		if err != nil || !ok {
-			t.Fatalf("GetGlobalLeafByBatchID(%s) ok=%v err=%v", m.BatchID, ok, err)
-		}
-		treeSize := leaf.LeafIndex + 1
-		resp, err := http.Get(fmt.Sprintf("%s/v1/anchors/sth/%d", server.URL, treeSize))
-		if err != nil {
-			t.Fatalf("GET /v1/anchors/sth/%d: %v", treeSize, err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			body, _ := readBody(resp)
-			resp.Body.Close()
-			t.Fatalf("GET /v1/anchors/sth/%d status = %d body=%s", treeSize, resp.StatusCode, body)
-		}
-		var payload struct {
-			TreeSize   uint64 `json:"tree_size"`
-			Status     string `json:"status"`
-			ProofLevel string `json:"proof_level"`
-			Result     *struct {
-				AnchorID string `json:"anchor_id"`
-				SinkName string `json:"sink_name"`
-			} `json:"result"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-			resp.Body.Close()
-			t.Fatalf("decode anchor response: %v", err)
-		}
+	// HTTP surface exposes the exact immutable result for the coalesced
+	// final STH.
+	treeSize := uint64(totalClaims)
+	resp, err := http.Get(fmt.Sprintf("%s/v1/anchors/sth/%d", server.URL, treeSize))
+	if err != nil {
+		t.Fatalf("GET /v1/anchors/sth/%d: %v", treeSize, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := readBody(resp)
 		resp.Body.Close()
-		if payload.Status != model.AnchorStatePublished {
-			t.Fatalf("/v1/anchors/sth/%d status = %q, want published", treeSize, payload.Status)
-		}
-		if payload.TreeSize != treeSize {
-			t.Fatalf("tree_size = %d, want %d", payload.TreeSize, treeSize)
-		}
-		if payload.ProofLevel != "L5" {
-			t.Fatalf("proof_level = %q, want L5", payload.ProofLevel)
-		}
-		if payload.Result == nil || payload.Result.SinkName != anchor.FileSinkName {
-			t.Fatalf("result = %+v", payload.Result)
-		}
+		t.Fatalf("GET /v1/anchors/sth/%d status = %d body=%s", treeSize, resp.StatusCode, body)
+	}
+	var payload struct {
+		TreeSize   uint64 `json:"tree_size"`
+		Status     string `json:"status"`
+		ProofLevel string `json:"proof_level"`
+		Result     *struct {
+			AnchorID string `json:"anchor_id"`
+			SinkName string `json:"sink_name"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode anchor response: %v", err)
+	}
+	resp.Body.Close()
+	if payload.Status != model.AnchorStatePublished {
+		t.Fatalf("/v1/anchors/sth/%d status = %q, want published", treeSize, payload.Status)
+	}
+	if payload.TreeSize != treeSize {
+		t.Fatalf("tree_size = %d, want %d", payload.TreeSize, treeSize)
+	}
+	if payload.ProofLevel != "L5" {
+		t.Fatalf("proof_level = %q, want L5", payload.ProofLevel)
+	}
+	if payload.Result == nil || payload.Result.SinkName != anchor.FileSinkName {
+		t.Fatalf("result = %+v", payload.Result)
 	}
 
 	// An unknown STH tree size is 404 so clients can differentiate
 	// "anchor not found" from "transport error".
-	resp, err := http.Get(server.URL + "/v1/anchors/sth/999999")
+	resp, err = http.Get(server.URL + "/v1/anchors/sth/999999")
 	if err != nil {
 		t.Fatalf("GET unknown anchor: %v", err)
 	}
@@ -277,7 +285,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 // TestBackfillGlobalLog simulates an operator startup where a committed batch
 // root exists in the proofstore but has no durable global-log append event.
 // Startup backfill must enqueue the event exactly once; the outbox worker owns
-// the later append + STH anchor enqueue.
+// the later append + durable STH anchor candidate merge.
 func TestBackfillGlobalLog(t *testing.T) {
 	proofStore := proofstore.LocalStore{Root: t.TempDir()}
 	ctx := context.Background()
@@ -286,6 +294,8 @@ func TestBackfillGlobalLog(t *testing.T) {
 	root := model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "startup-batch",
+		NodeID:        "test-node",
+		LogID:         "test-global",
 		TreeSize:      3,
 		BatchRoot:     rootHash,
 		ClosedAtUnixN: 1,
@@ -300,6 +310,7 @@ func TestBackfillGlobalLog(t *testing.T) {
 	}
 	globalSvc, err := globallog.New(globallog.Options{
 		Store:      proofStore,
+		NodeID:     "test-node",
 		LogID:      "test-global",
 		KeyID:      "test-key",
 		PrivateKey: serverPriv,
@@ -307,9 +318,13 @@ func TestBackfillGlobalLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("globallog.New: %v", err)
 	}
+	anchorKey := model.STHAnchorScheduleKey{
+		NodeID: "test-node", LogID: "test-global", SinkName: anchor.NoopSinkName,
+	}
 	svc, err := anchor.NewService(anchor.Config{
 		Sink:  anchor.NewNoopSink(),
 		Store: proofStore,
+		Key:   anchorKey,
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -341,17 +356,18 @@ func TestBackfillGlobalLog(t *testing.T) {
 	worker := globallog.NewOutboxWorker(globallog.OutboxConfig{
 		Store:          proofStore,
 		Global:         globalSvc,
+		AnchorKey:      &anchorKey,
+		AnchorMaxDelay: time.Minute,
+		OnAnchorReady:  svc.Trigger,
 		PollInterval:   10 * time.Millisecond,
-		AnchorOutbox:   true,
-		OnAnchorsReady: svc.Trigger,
 	})
 	worker.Start(ctx)
 	defer worker.Stop()
 	worker.Trigger()
 	waitForMetric(t, func() bool {
-		item, ok, err := proofStore.GetSTHAnchorOutboxItem(ctx, 1)
-		return err == nil && ok && item.Status == model.AnchorStatePending
-	}, "sth anchor outbox pending")
+		schedule, ok, err := proofStore.GetSTHAnchorSchedule(ctx, anchorKey)
+		return err == nil && ok && schedule.Pending != nil && schedule.Pending.Target.TreeSize == 1
+	}, "sth anchor schedule pending")
 }
 
 // readJSONL parses a file of one-JSON-object-per-line into its

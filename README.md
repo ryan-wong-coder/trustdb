@@ -67,7 +67,12 @@ For exchange and desktop verification, `.sproof` is the recommended single-file 
 
 ## Architecture
 
-TrustDB runs as a single-node service by default. With the TiKV proofstore backend, multiple compute nodes can share the same durable proofstore while preserving `node_id` and `log_id` metadata for source identity.
+TrustDB runs as a single-node service by default. Multiple compute nodes may use
+the same TiKV cluster, but one proofstore namespace belongs to one logical
+`(node_id, log_id)` Global Log stream. An active-passive replacement may reuse
+that namespace only when it keeps the same logical identity; independent logs
+must use different namespaces. Same-namespace active-active writers are not
+supported yet.
 
 Core paths:
 
@@ -75,10 +80,15 @@ Core paths:
 - Ingest path: the server validates signatures and key state, appends acceptance to WAL, and returns an accepted receipt.
 - Batch path: accepted records are grouped into Merkle batches and stored as proof bundles plus indexes.
 - Global log path: committed batch roots are appended into the global transparency log, producing persisted STHs and global proofs.
-- Anchor path: STH/global roots are queued and published by the configured anchor worker.
+- Anchor path: STH/global roots are coalesced into one durable Pending target and one immutable InFlight attempt per log and sink, then published by the configured anchor worker.
 - Storage path: proof data is stored in file, Pebble, or TiKV proofstores.
 - Backup path: proofstore data can be exported to `.tdbackup`, verified, and restored with resumable restore state; portable backups exclude node-local WAL checkpoints.
 - Observability path: `/metrics` exposes ingest, batch, global log, anchor, WAL, backup, and storage metrics.
+
+File, Pebble, and each TiKV namespace use proofstore storage schema v4. Opening
+an older or unversioned non-empty store fails explicitly; TrustDB does not
+silently migrate or dual-read obsolete anchor queue layouts. Rebuild the store
+or restore a current logical backup before starting this version.
 
 `wal.fsync_mode=strict` waits for each accepted record's WAL file fsync before returning. `group` bounds the asynchronous dirty window by `wal.group_commit_interval`; `batch` defers accepted-record data fsync until rotation or close. Writer startup and the namespace barriers used for WAL directory creation, file publication, rotation, and pruning are independent of that append policy. On Windows, TrustDB fails closed when the underlying filesystem rejects its best-available directory flush. Choose `strict` when the receipt contract requires a per-record fsync; end-to-end crash durability still depends on the filesystem and storage guarantees.
 
@@ -180,7 +190,7 @@ Implemented HTTP endpoints:
 | `GET /v1/sth/{tree_size}` | Fetch a specific STH. |
 | `GET /v1/global-log/inclusion/{batch_id}` | Fetch global-log inclusion proof for a batch. |
 | `GET /v1/global-log/consistency?from=&to=` | Fetch global-log consistency proof. |
-| `GET /v1/anchors/sth/{tree_size}` | Fetch STH anchor status or result. |
+| `GET /v1/anchors/sth/{tree_size}` | Fetch an immutable published STH anchor result. |
 | `GET /metrics` | Prometheus metrics. |
 
 The optional gRPC listener is enabled with `--grpc-listen` or `server.grpc_listen`. It uses TrustDB's deterministic CBOR payload model so HTTP and gRPC transports share proof semantics.

@@ -127,9 +127,12 @@ func TestRetryAndCompleteRequireLeaseAndExactTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schedule, attempt, claimed, err = Claim(schedule, 300, 400, "worker-2", "lease-2")
+	schedule, attempt, claimed, err = Claim(schedule, 350, 450, "worker-2", "lease-2")
 	if err != nil || !claimed {
 		t.Fatalf("retry Claim claimed=%v err=%v", claimed, err)
+	}
+	if attempt.NextAttemptUnixN != 350 {
+		t.Fatalf("retry deadline = %d, want actual late claim time 350", attempt.NextAttemptUnixN)
 	}
 	badSTH := testSTH(2, 9)
 	bad := model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, RootHash: badSTH.RootHash, NodeID: "node-1", LogID: "log-1", SinkName: "file", AnchorID: "bad", STH: badSTH, PublishedAtUnixN: 101}
@@ -175,6 +178,21 @@ func TestValidateCandidateAgainstExactResultRejectsHistoricalSplitView(t *testin
 	conflict := candidate(13, 0x99, 200, 300)
 	if err := ValidateCandidateAgainstExactResult(conflict, result); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 		t.Fatalf("ValidateCandidateAgainstExactResult error=%v, want data loss", err)
+	}
+}
+
+func TestCompareResultKeysMatchesEncodedPhysicalOrder(t *testing.T) {
+	t.Parallel()
+	left := model.STHAnchorResultKey{TreeSize: 7, NodeID: "node-1", LogID: "log-1", SinkName: "C0"}
+	right := model.STHAnchorResultKey{TreeSize: 7, NodeID: "node-1", LogID: "log-1", SinkName: "C@"}
+
+	// Raw strings have C0 before C@, while their URL-base64 encodings are QzA
+	// and Q0A. Ordered stores therefore place C@ first.
+	if got := CompareResultKeys(left, right); got <= 0 {
+		t.Fatalf("CompareResultKeys(C0, C@) = %d, want encoded physical order C@ < C0", got)
+	}
+	if got := CompareResultKeys(right, left); got >= 0 {
+		t.Fatalf("CompareResultKeys(C@, C0) = %d, want encoded physical order C@ < C0", got)
 	}
 }
 
@@ -295,5 +313,46 @@ func TestSameResultBindingIncludesExternalAnchorIdentity(t *testing.T) {
 	right.PublishedAtUnixN = 200
 	if !SameResultBinding(left, right) {
 		t.Fatal("proof enrichment changed immutable result binding")
+	}
+}
+
+func TestEmptyLatestReferenceIsScopedToOneStream(t *testing.T) {
+	t.Parallel()
+	key := testKey()
+	ref := EmptyLatestReference(&key)
+	if !ValidEmptyLatestReference(ref) || !EmptyLatestReferenceMatches(ref, &key) {
+		t.Fatalf("empty latest reference does not match its stream: %+v", ref)
+	}
+	other := key
+	other.SinkName = "ots"
+	if EmptyLatestReferenceMatches(ref, &other) || EmptyLatestReferenceMatches(ref, nil) {
+		t.Fatalf("stream-scoped empty reference matched another scope: %+v", ref)
+	}
+	aggregate := EmptyLatestReference(nil)
+	if !EmptyLatestReferenceMatches(aggregate, nil) || EmptyLatestReferenceMatches(aggregate, &key) {
+		t.Fatalf("aggregate empty reference has the wrong scope: %+v", aggregate)
+	}
+}
+
+func TestSelectPublicationTargetsCanonicalizesNonMonotonicRetries(t *testing.T) {
+	t.Parallel()
+	one := testSTH(1, 0x11)
+	two := testSTH(2, 0x22)
+	three := testSTH(3, 0x33)
+	windowStart, highest, err := SelectPublicationTargets([]model.SignedTreeHead{three, one, two}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if windowStart.TreeSize != 2 || highest.TreeSize != 3 {
+		t.Fatalf("window_start=%d highest=%d, want 2/3", windowStart.TreeSize, highest.TreeSize)
+	}
+	windowStart, highest, err = SelectPublicationTargets([]model.SignedTreeHead{two, one}, 2)
+	if err != nil || windowStart.TreeSize != 2 || highest.TreeSize != 2 {
+		t.Fatalf("fully covered selection start=%d highest=%d err=%v", windowStart.TreeSize, highest.TreeSize, err)
+	}
+	conflict := two
+	conflict.RootHash = bytes.Repeat([]byte{0xff}, len(two.RootHash))
+	if _, _, err := SelectPublicationTargets([]model.SignedTreeHead{two, conflict}, 0); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("conflicting equal-size STH error=%v, want data loss", err)
 	}
 }

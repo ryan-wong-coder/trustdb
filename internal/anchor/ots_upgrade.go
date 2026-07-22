@@ -10,9 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
+
+const maxOtsUpgradePersistAttempts = 16
 
 // OtsUpgradeOptions configures the OTS proof-upgrade HTTP client.
 // Zero values are replaced with sensible defaults so the common
@@ -226,7 +230,7 @@ func upgradeOneCalendar(
 // and re-marshals the (possibly mutated) envelope back. It returns
 // the new proof bytes and the summary; the caller is responsible for
 // persisting the new STHAnchorResult (typically via
-// proofstore.MarkSTHAnchorPublished).
+// proofstore.STHAnchorResultUpdater).
 //
 // ErrPermanent-style failures are NOT returned here because a
 // partial upgrade (some calendars upgraded, some still pending) is
@@ -256,4 +260,114 @@ func UpgradeAnchorResult(ctx context.Context, ar model.STHAnchorResult, opts Ots
 	}
 	ar.Proof = newBytes
 	return ar, summary, nil
+}
+
+// PersistOtsAnchorResultUpgrade conditionally publishes an enriched OTS proof.
+// If another upgrader wins the compare-and-swap, its calendar attestations are
+// merged with candidate and the combined proof is retried without regressing
+// any already-upgraded calendar.
+func PersistOtsAnchorResultUpgrade(
+	ctx context.Context,
+	reader proofstore.STHAnchorResultKeyedReader,
+	updater proofstore.STHAnchorResultUpdater,
+	expected model.STHAnchorResult,
+	candidate model.STHAnchorResult,
+) (model.STHAnchorResult, bool, error) {
+	if reader == nil || updater == nil {
+		return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeInvalidArgument, "ots upgrade: result reader and updater are required")
+	}
+	if !anchorschedule.SameResultBinding(expected, candidate) {
+		return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeDataLoss, "ots upgrade: candidate changes immutable anchor binding")
+	}
+	if bytes.Equal(expected.Proof, candidate.Proof) {
+		return expected, false, nil
+	}
+
+	for attempt := 0; attempt < maxOtsUpgradePersistAttempts; attempt++ {
+		if err := updater.UpdateSTHAnchorResult(ctx, expected, candidate); err == nil {
+			return candidate, true, nil
+		} else if trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+			return model.STHAnchorResult{}, false, err
+		}
+
+		current, found, err := reader.GetSTHAnchorResultForKey(ctx, anchorschedule.ResultKey(expected))
+		if err != nil {
+			return model.STHAnchorResult{}, false, err
+		}
+		if !found {
+			return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeNotFound, "ots upgrade: anchor result disappeared during concurrent update")
+		}
+		merged, changed, err := mergeOtsAnchorResultUpgrade(current, candidate)
+		if err != nil {
+			return model.STHAnchorResult{}, false, err
+		}
+		if !changed {
+			return current, false, nil
+		}
+		expected = current
+		candidate = merged
+	}
+	return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeFailedPrecondition, "ots upgrade: concurrent result updates did not converge")
+}
+
+func mergeOtsAnchorResultUpgrade(current, candidate model.STHAnchorResult) (model.STHAnchorResult, bool, error) {
+	if !anchorschedule.SameResultBinding(current, candidate) || current.SinkName != OtsSinkName {
+		return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeDataLoss, "ots upgrade: concurrent result changes immutable binding")
+	}
+	var currentProof, candidateProof OtsAnchorProof
+	if err := json.Unmarshal(current.Proof, &currentProof); err != nil {
+		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "ots upgrade: decode current proof", err)
+	}
+	if err := json.Unmarshal(candidate.Proof, &candidateProof); err != nil {
+		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "ots upgrade: decode candidate proof", err)
+	}
+	if currentProof.SchemaVersion != SchemaOtsAnchorProof ||
+		candidateProof.SchemaVersion != SchemaOtsAnchorProof ||
+		currentProof.TreeSize != current.TreeSize ||
+		candidateProof.TreeSize != candidate.TreeSize ||
+		currentProof.HashAlg != candidateProof.HashAlg ||
+		currentProof.HashAlg != "sha256" ||
+		!bytes.Equal(currentProof.Digest, current.RootHash) ||
+		!bytes.Equal(candidateProof.Digest, candidate.RootHash) ||
+		currentProof.SubmittedAtN != candidateProof.SubmittedAtN ||
+		len(currentProof.Calendars) != len(candidateProof.Calendars) {
+		return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeDataLoss, "ots upgrade: concurrent proof envelopes are inconsistent")
+	}
+
+	changed := false
+	for i := range currentProof.Calendars {
+		stored := &currentProof.Calendars[i]
+		incoming := candidateProof.Calendars[i]
+		if stored.URL != incoming.URL ||
+			stored.Accepted != incoming.Accepted ||
+			stored.StatusCode != incoming.StatusCode ||
+			stored.Error != incoming.Error ||
+			stored.ElapsedMillis != incoming.ElapsedMillis {
+			return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeDataLoss, "ots upgrade: concurrent calendar envelopes are inconsistent")
+		}
+		if !incoming.Upgraded {
+			continue
+		}
+		if !incoming.Accepted || len(incoming.RawTimestamp) == 0 {
+			return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeDataLoss, "ots upgrade: invalid upgraded calendar proof")
+		}
+		if stored.Upgraded {
+			if !bytes.Equal(stored.RawTimestamp, incoming.RawTimestamp) {
+				return model.STHAnchorResult{}, false, trusterr.New(trusterr.CodeDataLoss, "ots upgrade: conflicting upgraded calendar proof")
+			}
+			continue
+		}
+		stored.RawTimestamp = bytes.Clone(incoming.RawTimestamp)
+		stored.Upgraded = true
+		changed = true
+	}
+	if !changed {
+		return current, false, nil
+	}
+	proofBytes, err := json.Marshal(currentProof)
+	if err != nil {
+		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeInternal, "ots upgrade: encode merged proof", err)
+	}
+	current.Proof = proofBytes
+	return current, true, nil
 }

@@ -2,7 +2,7 @@
 
 Shipped YAML files are **starting points** only: adjust paths, keys, `server.listen`, anchor calendars, and TiKV endpoints for your environment.
 
-`anchor.poll_interval` controls the durable anchor outbox recovery scan. Triggered work normally starts immediately; the poll remains the crash/race recovery path. Benchmark profiles use `250ms`, while the default remains `2s` to limit idle store reads.
+`anchor.poll_interval` controls the O(1) durable scheduler recovery lookup. Triggered work normally starts immediately; polling resumes pending or in-flight work after missed triggers and restarts. Benchmark profiles use `250ms`, while the default remains `2s` to limit idle store reads.
 
 | File | `run_profile` | Purpose |
 | --- | --- | --- |
@@ -19,8 +19,9 @@ Shipped YAML files are **starting points** only: adjust paths, keys, `server.lis
 | `benchmark-large-payload.yaml` | `benchmark` | Dedicated 16 KiB and 64 KiB payload profile. |
 
 `benchmark*.yaml` files use separate data directories. Do not point them at an
-existing proofstore: the Pebble proofstore now requires storage schema v3 and
-intentionally refuses legacy key layouts instead of deleting or migrating them.
+existing proofstore: file, Pebble, and each TiKV namespace now require storage
+schema v4 and intentionally refuse legacy or unversioned layouts instead of
+deleting or migrating them.
 
 ## `run_profile`
 

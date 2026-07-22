@@ -1,8 +1,13 @@
 package proofstore
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	pebblestore "github.com/ryan-wong-coder/trustdb/internal/proofstore/pebble"
 	tikvstore "github.com/ryan-wong-coder/trustdb/internal/proofstore/tikv"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
@@ -15,6 +20,9 @@ const (
 	BackendFile   Backend = "file"
 	BackendPebble Backend = "pebble"
 	BackendTiKV   Backend = "tikv"
+
+	localStorageSchemaFile = ".trustdb-proofstore-schema"
+	localStorageSchemaV4   = "trustdb-proofstore-v4"
 )
 
 // Config picks the backend and its on-disk location. Path is treated as
@@ -44,6 +52,9 @@ func Open(cfg Config) (Store, error) {
 	}
 	switch Backend(strings.ToLower(string(cfg.Kind))) {
 	case "", BackendFile:
+		if err := ensureLocalStorageSchema(cfg.Path); err != nil {
+			return nil, err
+		}
 		return &LocalStore{Root: cfg.Path}, nil
 	case BackendPebble:
 		return pebblestore.OpenWithOptions(cfg.Path, pebblestore.Options{
@@ -71,6 +82,40 @@ func Open(cfg Config) (Store, error) {
 	default:
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown proofstore backend: "+string(cfg.Kind))
 	}
+}
+
+func ensureLocalStorageSchema(root string) error {
+	markerPath := filepath.Join(root, localStorageSchemaFile)
+	data, err := readStoredFileLimit(markerPath, 1024)
+	if err == nil {
+		var schema string
+		if err := cborx.UnmarshalLimit(data, &schema, 1024); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "decode file proofstore schema", err)
+		}
+		if schema != localStorageSchemaV4 {
+			return trusterr.New(trusterr.CodeFailedPrecondition, fmt.Sprintf("unsupported file proofstore schema %q; expected %q; clear or rebuild the proofstore", schema, localStorageSchemaV4))
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "read file proofstore schema", err)
+	}
+
+	entries, err := os.ReadDir(root)
+	switch {
+	case err == nil:
+		if len(entries) != 0 {
+			return trusterr.New(trusterr.CodeFailedPrecondition, "unversioned file proofstore detected; clear or rebuild the proofstore")
+		}
+	case errors.Is(err, os.ErrNotExist):
+		// writeCBORAtomic creates and durably publishes the missing directory.
+	default:
+		return trusterr.Wrap(trusterr.CodeDataLoss, "inspect file proofstore contents", err)
+	}
+	if err := writeCBORAtomic(markerPath, localStorageSchemaV4); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "initialize file proofstore schema", err)
+	}
+	return nil
 }
 
 func hasTiKVPDAddress(cfg Config) bool {

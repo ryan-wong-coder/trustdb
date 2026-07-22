@@ -292,10 +292,9 @@ func displayNameFromStorageURI(idx model.RecordIndex) string {
 }
 
 type anchorEnvelope struct {
-	TreeSize uint64                     `json:"tree_size"`
-	Status   string                     `json:"status"`
-	Result   *model.STHAnchorResult     `json:"result,omitempty"`
-	Outbox   *model.STHAnchorOutboxItem `json:"outbox,omitempty"`
+	TreeSize uint64                 `json:"tree_size"`
+	Status   string                 `json:"status"`
+	Result   *model.STHAnchorResult `json:"result,omitempty"`
 }
 
 func (c *serverClient) getGlobalProof(ctx context.Context, batchID string) (model.GlobalLogProof, error) {

@@ -17,6 +17,7 @@ import (
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	"github.com/ryan-wong-coder/trustdb/internal/claim"
 	"github.com/ryan-wong-coder/trustdb/internal/idempotency"
@@ -48,6 +49,76 @@ func TestOpenWithOptionsRequiresPDEndpoints(t *testing.T) {
 	}
 }
 
+func TestEnsureStorageSchemaInitializesAndReopensCurrentNamespace(t *testing.T) {
+	db, _ := newMockTiKVDB(t, "storage-schema-current/")
+	if err := ensureStorageSchema(db); err != nil {
+		t.Fatalf("ensureStorageSchema(empty) error = %v", err)
+	}
+	value, closer, err := db.Get([]byte(storageSchemaKey))
+	if err != nil {
+		t.Fatalf("read storage schema: %v", err)
+	}
+	defer closer.Close()
+	if string(value) != storageSchemaV4 {
+		t.Fatalf("storage schema = %q, want %q", value, storageSchemaV4)
+	}
+	if err := ensureStorageSchema(db); err != nil {
+		t.Fatalf("ensureStorageSchema(current) error = %v", err)
+	}
+}
+
+func TestEnsureStorageSchemaRejectsLegacyVersion(t *testing.T) {
+	db, _ := newMockTiKVDB(t, "storage-schema-legacy/")
+	if err := db.Set([]byte(storageSchemaKey), []byte("trustdb-proofstore-v3"), syncWrite); err != nil {
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	if err := ensureStorageSchema(db); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("ensureStorageSchema(v3) code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
+	}
+}
+
+func TestEnsureStorageSchemaRejectsUnversionedLegacyQueue(t *testing.T) {
+	db, _ := newMockTiKVDB(t, "storage-schema-unversioned/")
+	if err := db.Set([]byte("anchor/sth-outbox/00000000000000000001"), []byte("legacy"), syncWrite); err != nil {
+		t.Fatalf("seed legacy queue item: %v", err)
+	}
+	if err := ensureStorageSchema(db); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("ensureStorageSchema(unversioned) code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
+	}
+}
+
+func TestEnsureStorageSchemaIgnoresOtherNamespaces(t *testing.T) {
+	db, _ := newMockTiKVDB(t, "storage-schema-target/")
+	other := &tikvDB{client: db.client, namespace: []byte("storage-schema-other/")}
+	if err := other.Set([]byte("anchor/sth-outbox/00000000000000000001"), []byte("legacy"), syncWrite); err != nil {
+		t.Fatalf("seed other namespace: %v", err)
+	}
+	if err := ensureStorageSchema(db); err != nil {
+		t.Fatalf("ensureStorageSchema(target) error = %v", err)
+	}
+}
+
+func TestEnsureStorageSchemaAcceptsConcurrentInitialization(t *testing.T) {
+	db, client := newMockTiKVDB(t, "storage-schema-concurrent/")
+	var once sync.Once
+	var hookErr error
+	client.getHook = func() {
+		once.Do(func() {
+			if err := db.Set([]byte(storageSchemaKey), []byte(storageSchemaV4), syncWrite); err != nil {
+				hookErr = err
+				return
+			}
+			hookErr = db.Set([]byte(idempotencyReadyKey), []byte(idempotencyReadyV1), syncWrite)
+		})
+	}
+	if err := ensureStorageSchema(db); err != nil {
+		t.Fatalf("ensureStorageSchema(concurrent) error = %v", err)
+	}
+	if hookErr != nil {
+		t.Fatalf("concurrent initializer: %v", hookErr)
+	}
+}
+
 func TestGetBundleMissUsesOnePointRead(t *testing.T) {
 	db, countingClient := newMockTiKVDB(t, "bundle-miss/")
 	store := &Store{db: db}
@@ -57,6 +128,189 @@ func TestGetBundleMissUsesOnePointRead(t *testing.T) {
 	}
 	if requests := countingClient.getRequests.Load(); requests != 1 {
 		t.Fatalf("GetBundle point-get requests = %d, want 1", requests)
+	}
+}
+
+func TestTiKVLatestAnchorCachedReferenceValidatesResultEnvelope(t *testing.T) {
+	db, _ := newMockTiKVDB(t, "latest-anchor-validation/")
+	store := &Store{db: db}
+	ctx := context.Background()
+	result := model.STHAnchorResult{
+		SchemaVersion: model.SchemaSTHAnchorResult,
+		NodeID:        "node-1",
+		LogID:         "log-1",
+		TreeSize:      7,
+		SinkName:      "file",
+		AnchorID:      "anchor-7",
+		RootHash:      bytes.Repeat([]byte{0x77}, 32),
+		STH: model.SignedTreeHead{
+			SchemaVersion:  model.SchemaSignedTreeHead,
+			TreeAlg:        model.DefaultMerkleTreeAlg,
+			TreeSize:       7,
+			RootHash:       bytes.Repeat([]byte{0x77}, 32),
+			TimestampUnixN: 700,
+			NodeID:         "node-1",
+			LogID:          "log-1",
+			Signature: model.Signature{
+				Alg:       model.DefaultSignatureAlg,
+				KeyID:     "server-key",
+				Signature: bytes.Repeat([]byte{0x77}, 64),
+			},
+		},
+		PublishedAtUnixN: 701,
+	}
+	if err := store.PutSTHAnchorResult(ctx, result); err != nil {
+		t.Fatalf("PutSTHAnchorResult: %v", err)
+	}
+
+	// Keep the key, root and anchor ID intact so the cached reference still
+	// matches, but corrupt an STH field that the reference does not duplicate.
+	corrupt := result
+	corrupt.STH.TimestampUnixN = 0
+	encoded, err := cborx.Marshal(corrupt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Set(anchorResultKey(anchorschedule.ResultKey(result)), encoded, syncWrite); err != nil {
+		t.Fatalf("overwrite corrupt anchor result: %v", err)
+	}
+
+	if _, _, err := store.LatestSTHAnchorResult(ctx); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("LatestSTHAnchorResult error=%v, want data loss", err)
+	}
+	key := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
+	if _, _, err := store.LatestSTHAnchorResultForKey(ctx, key); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("LatestSTHAnchorResultForKey error=%v, want data loss", err)
+	}
+}
+
+func TestTiKVGlobalPublicationChunksL4Promotions(t *testing.T) {
+	db, countingClient := newMockTiKVDB(t, "global-publication-chunks/")
+	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	ctx := context.Background()
+	const recordCount = batchArtifactChunkSize*2 + 17
+	const batchID = "batch-global-publication-chunks"
+
+	seed := db.NewBatch()
+	defer seed.Close()
+	for index := range recordCount {
+		idx := model.RecordIndex{
+			SchemaVersion:   model.SchemaRecordIndex,
+			RecordID:        fmt.Sprintf("tr1-global-publication-%04d", index),
+			ReceivedAtUnixN: int64(index + 1),
+			BatchID:         batchID,
+			ProofLevel:      "L3",
+		}
+		if err := store.stageRecordIndexSet(seed, idx); err != nil {
+			t.Fatalf("stageRecordIndexSet(%d): %v", index, err)
+		}
+	}
+	if err := seed.Commit(syncWrite); err != nil {
+		t.Fatalf("seed record indexes: %v", err)
+	}
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox,
+		BatchID:       batchID,
+		BatchRoot: model.BatchRoot{
+			SchemaVersion: model.SchemaBatchRoot,
+			BatchID:       batchID,
+			BatchRoot:     bytes.Repeat([]byte{0x31}, 32),
+			TreeSize:      recordCount,
+		},
+		Status: model.AnchorStatePending,
+	}); err != nil {
+		t.Fatalf("EnqueueGlobalLog: %v", err)
+	}
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
+	sth := tikvPublicationSTH(key, 1, 0x41)
+	candidate := model.STHAnchorCandidate{Key: key, STH: sth, ObservedAtUnixN: 100, DueAtUnixN: 200}
+
+	countingClient.resetWriteRequests()
+	if err := store.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, []string{batchID}, []model.SignedTreeHead{sth}, candidate); err != nil {
+		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchorCandidate: %v", err)
+	}
+	transactions := countingClient.prewriteTransactions.Load()
+	totalMutations := countingClient.prewriteMutations.Load()
+	maxMutations := countingClient.prewriteMaxMutations.Load()
+	if transactions < 5 {
+		t.Fatalf("prewrite transactions = %d, want at least prepare + 3 promotion chunks + publish", transactions)
+	}
+	if totalMutations == 0 || maxMutations == 0 || maxMutations >= totalMutations {
+		t.Fatalf("prewrite mutations total=%d max_per_request=%d, want bounded multi-transaction writes", totalMutations, maxMutations)
+	}
+	for _, index := range []int{0, batchArtifactChunkSize, recordCount - 1} {
+		recordID := fmt.Sprintf("tr1-global-publication-%04d", index)
+		got, found, err := store.GetRecordIndex(ctx, recordID)
+		if err != nil || !found || model.RecordIndexProofLevel(got) != "L4" {
+			t.Fatalf("GetRecordIndex(%s)=%+v found=%v err=%v", recordID, got, found, err)
+		}
+	}
+	item, found, err := store.GetGlobalLogOutboxItem(ctx, batchID)
+	if err != nil || !found || item.Status != model.AnchorStatePublished {
+		t.Fatalf("global outbox item=%+v found=%v err=%v", item, found, err)
+	}
+	schedule, found, err := store.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || schedule.Pending == nil || schedule.Pending.Target.TreeSize != sth.TreeSize {
+		t.Fatalf("anchor schedule=%+v found=%v err=%v", schedule, found, err)
+	}
+}
+
+func TestTiKVGlobalPublicationPersistsIntentBeforeL4ProjectionFailure(t *testing.T) {
+	db, _ := newMockTiKVDB(t, "global-publication-intent-first/")
+	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	ctx := context.Background()
+	const batchID = "batch-global-publication-intent-first"
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox,
+		BatchID:       batchID,
+		BatchRoot: model.BatchRoot{
+			SchemaVersion: model.SchemaBatchRoot,
+			BatchID:       batchID,
+			BatchRoot:     bytes.Repeat([]byte{0x32}, 32),
+			TreeSize:      1,
+		},
+		Status: model.AnchorStatePending,
+	}); err != nil {
+		t.Fatalf("EnqueueGlobalLog: %v", err)
+	}
+	danglingID := "tr1-dangling-global-publication"
+	danglingKey := appendRecordIndexEncodedPrefix(nil, prefixRecordByBatch, batchID, 1, danglingID)
+	danglingValue := append(append([]byte(nil), recordIndexRefPrefix...), danglingID...)
+	if err := db.Set(danglingKey, danglingValue, syncWrite); err != nil {
+		t.Fatalf("seed dangling batch index: %v", err)
+	}
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
+	sth := tikvPublicationSTH(key, 1, 0x42)
+	candidate := model.STHAnchorCandidate{Key: key, STH: sth, ObservedAtUnixN: 100, DueAtUnixN: 200}
+
+	err := store.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, []string{batchID}, []model.SignedTreeHead{sth}, candidate)
+	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchorCandidate error=%v, want data loss", err)
+	}
+	schedule, found, getErr := store.GetSTHAnchorSchedule(ctx, key)
+	if getErr != nil || !found || schedule.Pending == nil || schedule.Pending.Target.TreeSize != sth.TreeSize {
+		t.Fatalf("durable anchor intent=%+v found=%v err=%v", schedule, found, getErr)
+	}
+	item, found, getErr := store.GetGlobalLogOutboxItem(ctx, batchID)
+	if getErr != nil || !found || item.Status != model.AnchorStatePending {
+		t.Fatalf("outbox after failed projection=%+v found=%v err=%v", item, found, getErr)
+	}
+}
+
+func tikvPublicationSTH(key model.STHAnchorScheduleKey, treeSize uint64, fill byte) model.SignedTreeHead {
+	return model.SignedTreeHead{
+		SchemaVersion:  model.SchemaSignedTreeHead,
+		TreeAlg:        model.DefaultMerkleTreeAlg,
+		TreeSize:       treeSize,
+		RootHash:       bytes.Repeat([]byte{fill}, 32),
+		TimestampUnixN: int64(treeSize) + 100,
+		NodeID:         key.NodeID,
+		LogID:          key.LogID,
+		Signature: model.Signature{
+			Alg:       model.DefaultSignatureAlg,
+			KeyID:     "server-key",
+			Signature: bytes.Repeat([]byte{fill}, 64),
+		},
 	}
 }
 
@@ -795,12 +1049,14 @@ type countingTiKVClient struct {
 	batchGetMaxKeys      atomic.Int64
 	prewriteRequests     atomic.Int64
 	prewriteMutations    atomic.Int64
+	prewriteMaxMutations atomic.Int64
 	prewriteTransactions atomic.Int64
 	prewriteVersions     sync.Map
 	scanVersion          atomic.Uint64
 	batchGetVersion      atomic.Uint64
 	readVersionDrift     atomic.Bool
 	batchGetHook         func()
+	getHook              func()
 }
 
 func (client *countingTiKVClient) SendRequest(ctx context.Context, address string, request *tikvrpc.Request, timeout time.Duration) (*tikvrpc.Response, error) {
@@ -810,6 +1066,9 @@ func (client *countingTiKVClient) SendRequest(ctx context.Context, address strin
 		client.scanVersion.Store(request.Scan().Version)
 	case tikvrpc.CmdGet:
 		client.getRequests.Add(1)
+		if client.getHook != nil {
+			client.getHook()
+		}
 	case tikvrpc.CmdBatchGet:
 		client.batchGetRequests.Add(1)
 		keyCount := int64(len(request.BatchGet().Keys))
@@ -832,7 +1091,13 @@ func (client *countingTiKVClient) SendRequest(ctx context.Context, address strin
 		}
 	case tikvrpc.CmdPrewrite:
 		client.prewriteRequests.Add(1)
-		client.prewriteMutations.Add(int64(len(request.Prewrite().Mutations)))
+		mutationCount := int64(len(request.Prewrite().Mutations))
+		client.prewriteMutations.Add(mutationCount)
+		for current := client.prewriteMaxMutations.Load(); mutationCount > current; current = client.prewriteMaxMutations.Load() {
+			if client.prewriteMaxMutations.CompareAndSwap(current, mutationCount) {
+				break
+			}
+		}
 		if _, loaded := client.prewriteVersions.LoadOrStore(request.Prewrite().StartVersion, struct{}{}); !loaded {
 			client.prewriteTransactions.Add(1)
 		}
@@ -843,6 +1108,7 @@ func (client *countingTiKVClient) SendRequest(ctx context.Context, address strin
 func (client *countingTiKVClient) resetWriteRequests() {
 	client.prewriteRequests.Store(0)
 	client.prewriteMutations.Store(0)
+	client.prewriteMaxMutations.Store(0)
 	client.prewriteTransactions.Store(0)
 	client.prewriteVersions.Range(func(key, _ any) bool {
 		client.prewriteVersions.Delete(key)

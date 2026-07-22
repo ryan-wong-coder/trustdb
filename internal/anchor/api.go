@@ -3,15 +3,15 @@ package anchor
 import (
 	"context"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
-// API exposes the two anchor reads the HTTP layer needs. It is a thin
+// API exposes immutable anchor results to transport layers. It is a thin
 // wrapper around a proofstore.Store so tests and CLI code can use an
-// in-memory store without pulling in the full Service. The wrapper
-// also makes the intent explicit in serve_cmd wiring: the worker
-// writes the outbox, the API only reads it.
+// in-memory store without pulling in the full Service.
 type API struct {
 	Store proofstore.Store
 }
@@ -23,10 +23,28 @@ func (a *API) AnchorResult(ctx context.Context, treeSize uint64) (model.STHAncho
 	return a.Store.GetSTHAnchorResult(ctx, treeSize)
 }
 
-func (a *API) AnchorStatus(ctx context.Context, treeSize uint64) (model.STHAnchorOutboxItem, bool, error) {
-	return a.Store.GetSTHAnchorOutboxItem(ctx, treeSize)
-}
-
-func (a *API) Anchors(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error) {
-	return a.Store.ListSTHAnchorsPage(ctx, opts)
+func (a *API) Anchors(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorResult, error) {
+	pager, ok := a.Store.(proofstore.STHAnchorResultPager)
+	if !ok {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "proofstore does not support immutable anchor result pagination")
+	}
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	if opts.Limit > 1000 {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000")
+	}
+	switch opts.Direction {
+	case "":
+		opts.Direction = model.RecordListDirectionDesc
+	case model.RecordListDirectionAsc, model.RecordListDirectionDesc:
+	default:
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "direction must be asc or desc")
+	}
+	if opts.HasAfter {
+		if err := anchorschedule.ValidateResultKey(opts.AfterResultKey); err != nil {
+			return nil, err
+		}
+	}
+	return pager.ListSTHAnchorResultsPage(ctx, opts)
 }

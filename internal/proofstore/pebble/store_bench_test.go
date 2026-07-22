@@ -133,27 +133,16 @@ func BenchmarkPebbleEmptyOutboxPoll128(b *testing.B) {
 			}
 		}
 	})
-	b.Run("pending-anchor", func(b *testing.B) {
+	b.Run("empty-anchor-schedule", func(b *testing.B) {
+		key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 		b.ReportAllocs()
 		for b.Loop() {
-			items, err := store.ListPendingSTHAnchors(ctx, 1, 128)
+			_, found, err := store.GetSTHAnchorSchedule(ctx, key)
 			if err != nil {
 				b.Fatal(err)
 			}
-			if items == nil || len(items) != 0 {
-				b.Fatalf("items = %#v, want non-nil empty slice", items)
-			}
-		}
-	})
-	b.Run("published-anchor", func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			items, err := store.ListPublishedSTHAnchors(ctx, 128)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if items == nil || len(items) != 0 {
-				b.Fatalf("items = %#v, want non-nil empty slice", items)
+			if found {
+				b.Fatal("unexpected anchor schedule")
 			}
 		}
 	})

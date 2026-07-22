@@ -298,21 +298,27 @@ func TestReopenLeavesInterruptedImportResumable(t *testing.T) {
 	assertProjectionDecision(t, store, decision)
 }
 
-func TestPebbleV2SchemaIsRejectedWithoutCompatibilityMigration(t *testing.T) {
+func TestLegacyPebbleSchemasAreRejectedWithoutCompatibilityMigration(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "proofs")
-	db, err := pdb.Open(path, &pdb.Options{})
-	if err != nil {
-		t.Fatalf("pdb.Open() error = %v", err)
-	}
-	if err := db.Set([]byte(storageSchemaKey), []byte("trustdb-proofstore-v2"), pdb.Sync); err != nil {
-		t.Fatalf("seed v2 schema: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close seeded db: %v", err)
-	}
-	if _, err := Open(path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("Open(v2) code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
+	for _, schema := range []string{"trustdb-proofstore-v2", "trustdb-proofstore-v3"} {
+		schema := schema
+		t.Run(schema, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "proofs")
+			db, err := pdb.Open(path, &pdb.Options{})
+			if err != nil {
+				t.Fatalf("pdb.Open() error = %v", err)
+			}
+			if err := db.Set([]byte(storageSchemaKey), []byte(schema), pdb.Sync); err != nil {
+				t.Fatalf("seed %s schema: %v", schema, err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close seeded db: %v", err)
+			}
+			if _, err := Open(path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+				t.Fatalf("Open(%s) code=%s err=%v, want failed_precondition", schema, trusterr.CodeOf(err), err)
+			}
+		})
 	}
 }
 

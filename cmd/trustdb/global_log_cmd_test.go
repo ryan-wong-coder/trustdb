@@ -13,7 +13,10 @@ import (
 
 func seedGlobalLogForCLI(t *testing.T, proofDir string) {
 	t.Helper()
-	store := &proofstore.LocalStore{Root: proofDir}
+	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: proofDir})
+	if err != nil {
+		t.Fatalf("open file proofstore: %v", err)
+	}
 	ctx := context.Background()
 	leafHash := bytes.Repeat([]byte{0x42}, 32)
 	leaf := model.GlobalLogLeaf{
