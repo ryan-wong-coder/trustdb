@@ -1,0 +1,56 @@
+name: Dependabot security auto-merge
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    name: Queue verified security updates
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.repository == 'wowtrust/trustdb'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Read verified Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@d7267f607e9d3fb96fc2fbe83e0af444713e90b7
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Queue safe security update for squash merge
+        if: >-
+          steps.metadata.outputs.dependency-group == 'security-patches' &&
+          steps.metadata.outputs.maintainer-changes == 'false' &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"
+
+      - name: Explain why automatic merge was not queued
+        if: >-
+          steps.metadata.outputs.dependency-group != 'security-patches' ||
+          steps.metadata.outputs.maintainer-changes != 'false' ||
+          (steps.metadata.outputs.update-type != 'version-update:semver-patch' &&
+           steps.metadata.outputs.update-type != 'version-update:semver-minor')
+        env:
+          DEPENDENCY_GROUP: ${{ steps.metadata.outputs.dependency-group }}
+          MAINTAINER_CHANGES: ${{ steps.metadata.outputs.maintainer-changes }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          echo "Automatic merge is limited to untouched Dependabot security-patches groups."
+          echo "dependency_group=$DEPENDENCY_GROUP"
+          echo "maintainer_changes=$MAINTAINER_CHANGES"
+          echo "update_type=$UPDATE_TYPE"
