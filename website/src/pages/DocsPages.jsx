@@ -12,7 +12,7 @@ const docs = [
   ["CLI", "/docs/cli", "密钥、声明、验证、备份和诊断命令。"],
   ["Go SDK", "/docs/sdk", "在应用内签名、提交、导出与离线验证。"],
   ["桌面客户端", "/docs/desktop", "身份初始化、存证、记录管理与证明导出。"],
-  ["安装桌面客户端", "/docs/desktop-install", "在 macOS 与 Windows 安装自签名测试版。"],
+  ["安装桌面客户端", "/docs/desktop-install", "在 macOS 与 Windows 安装自签名桌面客户端。"],
   ["从源码构建", "/docs/source-build", "构建服务器、CLI 和桌面客户端。"],
 ];
 
@@ -220,7 +220,7 @@ export function SdkDocsPage({ route }) {
   return (
     <DocsShell route={route}>
       <ArticleTitle index="05" title="Go SDK" lead="在应用代码里构建签名声明、提交、查询证明、导出 .sproof 并本地验证。" updated="2026.07.22" />
-      <section className="doc-section"><h2>安装</h2><p>TrustDB 主分支已迁移到 WowTrust 组织并使用新的 Go module 路径。下一个新路径版本标签发布前，请固定迁移后的 canonical pseudo-version，避免分支查询缓存和浮动版本。</p><CodeBlock>go get github.com/wowtrust/trustdb@v1.0.0-beta.1.0.20260722051404-c91313f7f40e</CodeBlock><Note tone="warn" title="版本状态">v1.0.0-beta.1 发布于迁移前，仍保留旧 module identity。评估项目应固定 go.mod 解析出的 pseudo-version；新路径标签发布后再固定到该标签。</Note></section>
+      <section className="doc-section"><h2>安装</h2><p>TrustDB v1.0.0 使用 WowTrust 组织下的正式 Go module 路径。生产项目应固定具体版本，保证依赖解析与构建可复现。</p><CodeBlock>go get github.com/wowtrust/trustdb@v1.0.0</CodeBlock><Note title="稳定版本">v1.0.0 是新 module 路径下的首个正式标签，可直接写入 go.mod；无需继续使用迁移期 pseudo-version。</Note></section>
       <section className="doc-section"><h2>创建客户端</h2><CodeBlock label="go">client, err := sdk.NewClient("http://127.0.0.1:8080"){"\n"}if err != nil {'{'} log.Fatal(err) {'}'}{"\n"}defer client.Close(){"\n\n"}if err := client.Health(ctx); err != nil {'{'}{"\n"}    log.Fatal(err){"\n"}{'}'}</CodeBlock><p>默认 HTTP 超时为 15 秒；高并发可通过 <code>NewHTTPClientForConcurrency</code> 与 <code>WithHTTPClient</code> 调整连接池。</p></section>
       <section className="doc-section"><h2>签名并提交文件</h2><CodeBlock label="go">result, err := client.SubmitFile(ctx, file, sdk.Identity{'{'}{"\n"}    TenantID: "tenant", ClientID: "desktop-1", KeyID: "ed25519-1",{"\n"}    PrivateKey: privateKey,{"\n"}{'}'}, sdk.FileClaimOptions{'{'}{"\n"}    EventType: "file.snapshot",{"\n"}    IdempotencyKey: "business-event-42",{"\n"}{'}'}){"\n"}fmt.Println(result.RecordID, result.ProofLevel)</CodeBlock><p>也可用 <code>BuildSignedFileClaim</code>、<code>BuildSignedJSONLogClaim</code> 先构建，再通过 HTTP / gRPC transport 提交；批量与 bounded stream 接口用于受控并发。</p></section>
       <section className="doc-section"><h2>导出单文件证明</h2><CodeBlock label="go">proof, err := client.ExportSingleProof(ctx, recordID){"\n"}{sdkCopy.exportComment}{"\n"}err = client.WriteSingleProofFile(ctx, recordID, "record.sproof")</CodeBlock><div className="localized-doc-copy" data-i18n-ignore><p>{sdkCopy.exportDescription}</p><Note title={sdkCopy.trustTitle}>{sdkCopy.trustDescription}</Note></div></section>
@@ -235,7 +235,7 @@ export function DesktopDocsPage({ route }) {
     <DocsShell route={route}>
       <ArticleTitle index="06" title="桌面客户端" lead="Wails + Vue 原生桌面应用：本地身份、文件存证、记录索引、证明导出与离线验证。" />
       <section className="doc-section"><h2>当前能力</h2><div className="capability-grid"><div><Wrench /><strong>身份初始化</strong><p>配置 server URL、tenant、client、key ID 与本地 Ed25519 私钥。</p></div><div><HardDrives /><strong>文件存证</strong><p>本地哈希与签名，提交后保留本地 Pebble 索引。</p></div><div><Package /><strong>证明管理</strong><p>刷新等级，主推 .sproof，亦可导出分离的 L3/L4/L5 材料。</p></div><div><Desktop /><strong>离线验证</strong><p>把原文件与证明拖入客户端，不依赖服务端重新判断有效性。</p></div></div></section>
-      <section className="doc-section"><h2>下载与安装</h2><p>选择与处理器相符的安装包。公开测试版采用自签名证书，首次启动时系统会要求你确认。</p><div className="doc-download-links"><InlineLink href="/downloads">选择桌面客户端</InlineLink><InlineLink href="/docs/desktop-install">查看自签名安装步骤</InlineLink></div></section>
+      <section className="doc-section"><h2>下载与安装</h2><p>选择与处理器相符的安装包。当前桌面客户端采用自签名证书，首次启动时系统会要求你确认。</p><div className="doc-download-links"><InlineLink href="/downloads">选择桌面客户端</InlineLink><InlineLink href="/docs/desktop-install">查看自签名安装步骤</InlineLink></div></section>
       <section className="doc-section"><h2>推荐工作流</h2><ol><li>首次启动建立本地身份并确认服务器健康。</li><li>选择文件，确认内容哈希与元数据后提交。</li><li>记录页等待 L3 / L4 / L5 材料按服务器处理进度升级。</li><li>导出 <code>.sproof</code> 与原文件一起交付验证方。</li><li>验证方导入原文件与证明，查看重新计算后的等级与锚定结果。</li></ol></section>
       <div className="doc-next"><span>下一篇</span><Link href="/docs/desktop-install">安装桌面客户端 <ArrowRight /></Link></div>
     </DocsShell>
@@ -262,8 +262,8 @@ export function DesktopInstallPage({ route }) {
 export function SourceBuildPage({ route }) {
   return (
     <DocsShell route={route}>
-      <ArticleTitle index="08" title="从源码构建" lead="服务器、CLI 与桌面客户端的构建环境和命令。" updated="2026.07.22" version="适用于 v1.0.0-beta.1 源码标签" />
-      <section className="doc-section"><h2>服务器与 CLI</h2><p>需要 Git 与 Go 1.26.5 或更高的兼容版本。固定源码标签，先测试，再生成单个 <code>trustdb</code> 二进制文件。</p><CodeBlock>git clone --branch v1.0.0-beta.1 --depth 1 https://github.com/wowtrust/trustdb.git{"\n"}cd trustdb{"\n"}go test ./...{"\n"}go build -trimpath -o ./bin/trustdb ./cmd/trustdb{"\n"}./bin/trustdb version</CodeBlock></section>
+      <ArticleTitle index="08" title="从源码构建" lead="服务器、CLI 与桌面客户端的构建环境和命令。" updated="2026.07.22" version="适用于 v1.0.0 源码标签" />
+      <section className="doc-section"><h2>服务器与 CLI</h2><p>需要 Git 与 Go 1.26.5 或更高的兼容版本。固定源码标签，先测试，再生成单个 <code>trustdb</code> 二进制文件。</p><CodeBlock>git clone --branch v1.0.0 --depth 1 https://github.com/wowtrust/trustdb.git{"\n"}cd trustdb{"\n"}go test ./...{"\n"}go build -trimpath -o ./bin/trustdb ./cmd/trustdb{"\n"}./bin/trustdb version</CodeBlock></section>
       <section className="doc-section"><h2>桌面客户端</h2><p>桌面端还需要 Node.js 24、平台原生编译工具和 Wails 2.12.0。先安装当前系统的 Wails 依赖，再构建前端与原生壳。</p><CodeBlock>go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0{"\n"}cd clients/desktop/frontend{"\n"}npm ci{"\n"}npm run build{"\n"}cd ..{"\n"}wails doctor{"\n"}wails build</CodeBlock><InlineLink href="https://wails.io/docs/gettingstarted/installation/">Wails 平台依赖</InlineLink></section>
       <section className="doc-section"><h2>开发运行</h2><p>从 <code>clients/desktop</code> 运行 <code>wails dev</code> 才能使用签名、文件选择和本地数据库等原生能力。只启动 Vite 适合检查界面，不等同于完整客户端。</p><CodeBlock>cd clients/desktop{"\n"}go test ./...{"\n"}wails dev</CodeBlock><InlineLink href="/downloads">下载预编译版本</InlineLink></section>
       <div className="doc-next"><span>继续阅读</span><Link href="/sproof">.sproof v1 格式 <ArrowRight /></Link></div>

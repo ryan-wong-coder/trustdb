@@ -4,6 +4,7 @@ import { binaryDownloads, checksumsAsset, desktopDownloads, release } from "../l
 import { Link } from "../router";
 
 const milestones = [
+  ["2026.07.22", "v1.0.0", "首个正式版：新 Go module 路径、持久化 STH 合并锚定、完整离线证据、存储 schema v4 与逻辑备份。", "Stable"],
   ["2026.07.20", "v1.0.0-beta.1", "第二个公开测试版：官网、桌面客户端与 Admin Web 支持六种语言，官网按语言展示真实客户端画面，并补齐页签图标。", "Beta.1"],
   ["2026.07.20", "v1.0.0-beta", "首个公开测试版：跨平台服务器与 CLI、四种桌面客户端、自签名安装包、SHA-256 校验和多架构 Docker 镜像。", "Beta"],
   ["2026.07.19", "UI modernization", "官网、Admin Web 与桌面客户端的视觉系统现代化，补齐多页面信息架构与响应式交互。", "In progress"],
@@ -16,10 +17,10 @@ const milestones = [
 export function ChangelogPage() {
   return (
     <>
-      <PageHero eyebrow="Development log" title={<>TrustDB<br />版本记录。</>} lead="按版本记录功能变化、兼容性要求、已知问题和下载信息。" meta="开发日志 · 更新于 2026.07.20">
-        <div className="page-hero__actions"><Link className="button button--solid" href="/downloads">下载 1.0.0-beta.1 <ArrowRight /></Link><a className="button button--ghost" href="https://github.com/wowtrust/trustdb/commits/main" target="_blank" rel="noreferrer">全部提交</a></div>
+      <PageHero eyebrow="Development log" title={<>TrustDB<br />版本记录。</>} lead="按版本记录功能变化、兼容性要求、已知问题和下载信息。" meta="开发日志 · 更新于 2026.07.22">
+        <div className="page-hero__actions"><Link className="button button--solid" href="/downloads">下载 1.0.0 <ArrowRight /></Link><a className="button button--ghost" href="https://github.com/wowtrust/trustdb/commits/main" target="_blank" rel="noreferrer">全部提交</a></div>
       </PageHero>
-      <section className="release-state section-shell" data-reveal><WarningCircle /><div><p>Release status</p><h2>1.0.0-beta.1 已进入公开测试</h2><span>桌面客户端采用自签名证书，系统仍会提示未知开发者；请从 GitHub Release 下载并核对 SHA-256。</span></div><Link href="/downloads">查看全部产物 <ArrowRight /></Link></section>
+      <section className="release-state section-shell" data-reveal><WarningCircle /><div><p>Release status</p><h2>1.0.0 正式版已发布</h2><span>服务端、CLI、SDK 与证据格式进入首个稳定版本；桌面客户端仍采用自签名证书，请从 GitHub Release 下载并核对 SHA-256。</span></div><Link href="/downloads">查看全部产物 <ArrowRight /></Link></section>
       <section className="timeline section-shell">
         <div className="timeline__heading" data-reveal><p>Development milestones</p><h2>版本变更</h2></div>
         <div className="timeline__list">{milestones.map(([date, title, description, ref], index) => <article key={`${date}-${title}`} data-reveal><span>{String(index + 1).padStart(2, "0")}</span><time>{date}</time><div><h3>{title}</h3><p>{description}</p></div><b>{ref}</b></article>)}</div>
@@ -47,12 +48,12 @@ const releaseGroups = [
 export function DownloadsPage() {
   return (
     <>
-      <PageHero eyebrow="Downloads" title={<>{release.version}，<br />开放下载。</>} lead="桌面客户端、服务器、CLI 和 Docker 镜像使用同一份版本与提交。按系统直接下载；安装前可用 SHA256SUMS 核对文件。" meta={`公开测试版 · ${release.published}`}>
+      <PageHero eyebrow="Downloads" title={<>{release.version}，<br />开放下载。</>} lead="桌面客户端、服务器、CLI 和 Docker 镜像使用同一份版本与提交。按系统直接下载；安装前可用 SHA256SUMS 核对文件。" meta={`正式版 · ${release.published}`}>
         <div className="page-hero__actions"><a className="button button--solid" href={checksumsAsset.url}><DownloadSimple /> 下载 SHA256SUMS</a><a className="button button--ghost" href={release.dockerUrl} target="_blank" rel="noreferrer">Docker Hub</a></div>
       </PageHero>
       <section className="empty-release section-shell">
         <div className="empty-release__mark" data-reveal><DownloadSimple /></div>
-        <div className="empty-release__copy" data-reveal><p>Public beta</p><h2>按系统选择。</h2><span>GitHub Release 提供全部安装包、服务端与 CLI 归档以及统一校验文件。Docker Hub 同步提供 amd64 与 arm64 镜像。</span></div>
+        <div className="empty-release__copy" data-reveal><p>Stable release</p><h2>按系统选择。</h2><span>GitHub Release 提供全部安装包、服务端与 CLI 归档以及统一校验文件。Docker Hub 同步提供 amd64 与 arm64 镜像。</span></div>
         <a className="empty-release__watch" href={release.pageUrl} target="_blank" rel="noreferrer"><GithubLogo weight="fill" /> 打开 GitHub Release <ArrowRight /></a>
       </section>
       <section className="asset-plan" id="release-assets">
@@ -87,7 +88,7 @@ export function DownloadsPage() {
       <section className="source-build section-shell">
         <div data-reveal><p>Build from source</p><h2>源码构建</h2></div>
         <div className="source-build__steps" data-reveal><p><span>01</span><strong>服务器与 CLI</strong><code>Go 1.26.5</code></p><p><span>02</span><strong>桌面客户端</strong><code>Wails 2.12.0 · Node.js 24</code></p><p><span>03</span><strong>测试</strong><code>go test ./...</code></p></div>
-        <div className="source-build__note"><Check /><span>公开测试版尚未取得 Apple 或 Microsoft 商业签名。请用 SHA256SUMS 核对下载文件；随包提供的证书和指纹可用于核对本次发布所用的签名证书。</span></div>
+        <div className="source-build__note"><Check /><span>正式版桌面安装包仍采用自签名证书，尚未取得 Apple 或 Microsoft 商业签名。请用 SHA256SUMS 核对下载文件；随包提供的证书和指纹可用于核对本次发布所用的签名证书。</span></div>
         <div className="source-build__links"><InlineLink href="/docs/quick-start">快速开始</InlineLink><InlineLink href="/docs/desktop-install">安装桌面客户端</InlineLink><InlineLink href="/docs/source-build">从源码构建</InlineLink><InlineLink href="/changelog">开发日志</InlineLink></div>
       </section>
     </>

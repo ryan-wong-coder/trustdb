@@ -9,7 +9,7 @@ on:
       version:
         description: "Version without the leading v"
         required: true
-        default: "1.0.0-beta.1"
+        default: "1.0.0"
 
 permissions:
   contents: write
@@ -30,6 +30,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       numeric_version: ${{ steps.meta.outputs.numeric_version }}
       build_date: ${{ steps.meta.outputs.build_date }}
+      channel: ${{ steps.meta.outputs.channel }}
 
     steps:
       - name: Checkout
@@ -51,11 +52,17 @@ jobs:
             exit 1
           fi
           numeric_version="${version%%-*}"
+          if [[ "$version" == *-* ]]; then
+            channel="beta"
+          else
+            channel="latest"
+          fi
           build_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           {
             echo "version=$version"
             echo "numeric_version=$numeric_version"
             echo "build_date=$build_date"
+            echo "channel=$channel"
           } >> "$GITHUB_OUTPUT"
 
   admin-web:
@@ -317,7 +324,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ vars.DOCKERHUB_USERNAME }}/trustdb:${{ needs.prepare.outputs.version }}
-            ${{ vars.DOCKERHUB_USERNAME }}/trustdb:beta
+            ${{ vars.DOCKERHUB_USERNAME }}/trustdb:${{ needs.prepare.outputs.channel }}
           labels: |
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
