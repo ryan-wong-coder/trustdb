@@ -35,6 +35,8 @@ This guide is bilingual. The Chinese section is authoritative for day-to-day pro
 
 分支名使用小写 kebab-case，保持短而具体。
 
+`dependabot/` 是 GitHub Dependabot App 专用的自动化命名空间，不用于人工分支。仓库分支规则必须仅对该 App 放行此命名空间，不能向普通用户开放规则绕过。
+
 ### Issue 标准
 
 Issue 标题使用以下格式之一：
@@ -195,6 +197,8 @@ Branch names must use one of these type prefixes:
 | `revert/` | Reverting merged changes |
 
 Use lowercase kebab-case, for example `fix/restore-checkpoint-validation`.
+
+`dependabot/` is an automated namespace reserved for the GitHub Dependabot App, not a prefix for human-authored branches. Repository branch rules must permit that namespace only for the App without granting rule bypasses to regular users.
 
 ### Issues
 
