@@ -294,11 +294,11 @@ func TestMarkGlobalLogPublishedBatchBatchesDefaultOutboxReads(t *testing.T) {
 	if gets := reads.getRequests.Load(); gets != 0 {
 		t.Fatalf("point-get requests = %d, want 0", gets)
 	}
-	if requests := reads.batchGetRequests.Load(); requests != 1 {
-		t.Fatalf("outbox batch-get requests = %d, want 1", requests)
+	if requests := reads.batchGetRequests.Load(); requests != 2 {
+		t.Fatalf("outbox batch-get requests = %d, want 2 validation/publication snapshots", requests)
 	}
-	if keys := reads.batchGetKeys.Load(); keys != int64(len(batchIDs)) {
-		t.Fatalf("outbox batch-get keys = %d, want %d", keys, len(batchIDs))
+	if keys := reads.batchGetKeys.Load(); keys != int64(2*len(batchIDs)) {
+		t.Fatalf("outbox batch-get keys = %d, want %d", keys, 2*len(batchIDs))
 	}
 	for _, index := range []int{0, len(batchIDs) - 1} {
 		item, found, err := store.GetGlobalLogOutboxItem(context.Background(), batchIDs[index])
@@ -342,8 +342,8 @@ func TestMarkGlobalLogPublishedBatchPreservesDuplicateLastWrite(t *testing.T) {
 	if gets := reads.getRequests.Load(); gets != 0 {
 		t.Fatalf("point-get requests = %d, want 0", gets)
 	}
-	if keys := reads.batchGetKeys.Load(); keys != 1 {
-		t.Fatalf("batch-get keys = %d, want 1 unique outbox key", keys)
+	if keys := reads.batchGetKeys.Load(); keys != 2 {
+		t.Fatalf("batch-get keys = %d, want 2 validation/publication reads of one unique outbox key", keys)
 	}
 	item, found, err := store.GetGlobalLogOutboxItem(context.Background(), batchIDs[0])
 	if err != nil || !found {

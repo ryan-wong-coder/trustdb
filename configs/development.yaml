@@ -64,7 +64,6 @@ global_log:
 anchor:
   scope: "global"
   max_delay: "5m"
-  workers: 4
   sink: "noop"
   path: ".trustdb-dev/anchors/sth-anchors.jsonl"
   ots:

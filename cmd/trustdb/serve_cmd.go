@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -53,8 +54,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	var proofstoreTiKVPDText, proofstoreTiKVKeyspace, proofstoreTiKVNamespace string
 	var batchProofMode, proofstoreArtifactSyncMode, proofstoreRecordIndexMode string
 	var proofstoreIndexStorageTokens bool
-	var anchorSinkKind, anchorPath, anchorPollIntervalText string
-	var anchorWorkers int
+	var anchorSinkKind, anchorPath, anchorMaxDelayText, anchorPollIntervalText string
 	var anchorOtsCalendars []string
 	var anchorOtsMinAccepted int
 	var anchorOtsTimeoutText string
@@ -107,11 +107,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				anchorOtsMinAccepted = rt.viper.GetInt("anchor.ots.min_accepted")
 			}
 			anchorOtsTimeoutText = stringOrLiteral(cmd, "anchor-ots-timeout", anchorOtsTimeoutText, rt.viper.GetString("anchor.ots.timeout"))
-			if cmd.Flags().Changed("anchor-workers") {
-				anchorWorkers, _ = cmd.Flags().GetInt("anchor-workers")
-			} else {
-				anchorWorkers = rt.cfg.Anchor.Workers
-			}
+			anchorMaxDelayText = stringOrLiteral(cmd, "anchor-max-delay", anchorMaxDelayText, rt.cfg.Anchor.MaxDelay)
 			anchorPollIntervalText = stringOrLiteral(cmd, "anchor-poll-interval", anchorPollIntervalText, rt.cfg.Anchor.PollInterval)
 			// OTS upgrader: default enabled (true) so flipping
 			// --anchor-sink=ots gives operators automatic
@@ -222,6 +218,10 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			anchorMaxDelay, err := parsePositiveDurationFlag("anchor-max-delay", anchorMaxDelayText)
+			if err != nil {
+				return err
+			}
 			if batchMaterializerWorkers <= 0 {
 				return usageError("batch-materializer-workers must be greater than 0")
 			}
@@ -230,9 +230,6 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			}
 			if batchProofWorkers < 0 {
 				return usageError("batch-proof-workers must be zero or greater")
-			}
-			if anchorWorkers <= 0 {
-				return usageError("anchor-workers must be greater than 0")
 			}
 			serverPriv, err := readPrivateKey(serverKeyPath)
 			if err != nil {
@@ -475,7 +472,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if !globalLogEnabled {
 				anchorSinkKind = "off"
 			}
-			anchorSvc, anchorAPI, anchorShutdown, err := buildAnchorService(rt, proofStore, metrics, anchorSinkKind, anchorPath, proofDir, anchorWorkers, anchorPollInterval, otsSinkParams{
+			anchorSvc, anchorAPI, anchorShutdown, err := buildAnchorService(rt, proofStore, metrics, nodeID, logID, anchorSinkKind, anchorPath, proofDir, anchorPollInterval, otsSinkParams{
 				Calendars:   anchorOtsCalendars,
 				MinAccepted: anchorOtsMinAccepted,
 				TimeoutText: anchorOtsTimeoutText,
@@ -491,10 +488,8 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 					return trusterr.New(trusterr.CodeFailedPrecondition, "proofstore does not support recoverable L5 coverage projection")
 				}
 				coverageProjector, err = l5projector.New(l5projector.Config{
-					Store: coverageStore,
-					Key: model.STHAnchorScheduleKey{
-						NodeID: nodeID, LogID: logID, SinkName: anchorSvc.SinkName(),
-					},
+					Store:        coverageStore,
+					Key:          anchorSvc.ScheduleKey(),
 					PollInterval: anchorPollInterval,
 					Logger:       rt.logger,
 				})
@@ -507,8 +502,13 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			var globalOutbox *globallog.OutboxWorker
 			if globalLogEnabled {
 				anchorSinkName := ""
+				var anchorKey *model.STHAnchorScheduleKey
+				var onAnchorReady func()
 				if anchorSvc != nil {
 					anchorSinkName = anchorSvc.SinkName()
+					key := anchorSvc.ScheduleKey()
+					anchorKey = &key
+					onAnchorReady = anchorSvc.Trigger
 				}
 				globalSvc, err = globallog.New(globallog.Options{
 					Store:          proofStore,
@@ -522,16 +522,13 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 					return trusterr.Wrap(trusterr.CodeInternal, "build global log service", err)
 				}
 				globalOutbox = globallog.NewOutboxWorker(globallog.OutboxConfig{
-					Store:        proofStore,
-					Global:       globalSvc,
-					Metrics:      metrics,
-					AnchorOutbox: anchorSvc != nil,
-					OnAnchorsReady: func() {
-						if anchorSvc != nil {
-							anchorSvc.Trigger()
-						}
-					},
-					Logger: rt.logger,
+					Store:          proofStore,
+					Global:         globalSvc,
+					AnchorKey:      anchorKey,
+					AnchorMaxDelay: anchorMaxDelay,
+					OnAnchorReady:  onAnchorReady,
+					Metrics:        metrics,
+					Logger:         rt.logger,
 				})
 				defer globalOutbox.Stop()
 				batchOpts.OnBatchCommitted = newGlobalLogEnqueueHook(rt, proofStore, globalOutbox)
@@ -718,14 +715,14 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().BoolVar(&proofstoreIndexStorageTokens, "proofstore-index-storage-tokens", true, "write StorageURI/FileName token secondary indexes in the proofstore; disable for high-write ingest profiles")
 	cmd.Flags().StringVar(&anchorSinkKind, "anchor-sink", "", "external anchor sink: off (default; no L5 proofs), file, noop, or ots (OpenTimestamps)")
 	cmd.Flags().StringVar(&anchorPath, "anchor-path", "", "file anchor sink output path (JSONL). Defaults to <proof-dir>/anchors.jsonl when --anchor-sink=file and this flag is empty")
-	cmd.Flags().IntVar(&anchorWorkers, "anchor-workers", 0, "bounded concurrent anchor publish worker count")
+	cmd.Flags().StringVar(&anchorMaxDelayText, "anchor-max-delay", "", "fixed coalescing window before publishing the latest pending STH")
 	cmd.Flags().StringVar(&anchorPollIntervalText, "anchor-poll-interval", "", "interval for recovering durable pending anchor jobs")
 	cmd.Flags().StringSliceVar(&anchorOtsCalendars, "anchor-ots-calendars", nil, "comma-separated OpenTimestamps calendar URLs. When empty a built-in public pool is used (only honored when --anchor-sink=ots)")
 	cmd.Flags().IntVar(&anchorOtsMinAccepted, "anchor-ots-min-accepted", 0, "minimum number of OTS calendars that must accept a submission for success (0 = require majority)")
 	cmd.Flags().StringVar(&anchorOtsTimeoutText, "anchor-ots-timeout", "", "per-calendar request timeout for the OpenTimestamps sink (default 20s)")
 	cmd.Flags().BoolVar(&anchorOtsUpgradeEnabled, "anchor-ots-upgrade-enabled", true, "run a background worker that upgrades pending OTS proofs to Bitcoin-attested ones (default true; only meaningful with --anchor-sink=ots)")
 	cmd.Flags().StringVar(&anchorOtsUpgradeIntervalText, "anchor-ots-upgrade-interval", "", "interval between OTS upgrade sweeps (default 1h; values <5m are usually wasteful against the public calendar pool)")
-	cmd.Flags().IntVar(&anchorOtsUpgradeBatchSize, "anchor-ots-upgrade-batch-size", 0, "max number of OTS STHAnchorResults processed per upgrade sweep (default 64)")
+	cmd.Flags().IntVar(&anchorOtsUpgradeBatchSize, "anchor-ots-upgrade-batch-size", 0, fmt.Sprintf("max number of OTS STHAnchorResults processed per upgrade sweep (default 64, max %d)", anchor.MaxOtsUpgradeBatchSize))
 	cmd.Flags().StringVar(&anchorOtsUpgradeTimeoutText, "anchor-ots-upgrade-timeout", "", "per-calendar GET timeout for the OTS upgrader (default 30s)")
 	cmd.Flags().IntVar(&anchorOtsUpgradeWorkers, "anchor-ots-upgrade-workers", 0, "bounded concurrent OTS proof upgrade worker count")
 	return cmd
@@ -798,7 +795,7 @@ type otsSinkParams struct {
 // shutdown closure is always non-nil so `defer anchorShutdown()` is
 // safe even when anchoring is off. Legal sink kinds: "" / "off" (L5
 // disabled), "file", "noop".
-func buildAnchorService(rt *runtimeConfig, store proofstore.Store, metrics *observability.Metrics, sinkKind, anchorPath, proofDir string, workers int, pollInterval time.Duration, ots otsSinkParams) (*anchor.Service, httpapi.AnchorService, func(), error) {
+func buildAnchorService(rt *runtimeConfig, store proofstore.Store, metrics *observability.Metrics, nodeID, logID, sinkKind, anchorPath, proofDir string, pollInterval time.Duration, ots otsSinkParams) (*anchor.Service, httpapi.AnchorService, func(), error) {
 	kind := strings.ToLower(strings.TrimSpace(sinkKind))
 	switch kind {
 	case "", "off", "disabled", "none":
@@ -839,9 +836,9 @@ func buildAnchorService(rt *runtimeConfig, store proofstore.Store, metrics *obse
 	svc, err := anchor.NewService(anchor.Config{
 		Sink:         sink,
 		Store:        store,
+		Key:          model.STHAnchorScheduleKey{NodeID: nodeID, LogID: logID, SinkName: sink.Name()},
 		Metrics:      metrics,
 		Logger:       rt.logger,
-		Workers:      workers,
 		PollInterval: pollInterval,
 	})
 	if err != nil {
@@ -922,6 +919,9 @@ func buildOtsUpgrader(rt *runtimeConfig, store proofstore.Store, metrics *observ
 	if p.BatchSize < 0 {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "--anchor-ots-upgrade-batch-size must be >= 0")
 	}
+	if p.BatchSize > anchor.MaxOtsUpgradeBatchSize {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, fmt.Sprintf("--anchor-ots-upgrade-batch-size must be <= %d", anchor.MaxOtsUpgradeBatchSize))
+	}
 	if p.Workers < 0 {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "--anchor-ots-upgrade-workers must be >= 0")
 	}
@@ -961,6 +961,10 @@ func buildOtsUpgrader(rt *runtimeConfig, store proofstore.Store, metrics *observ
 // separate worker so batch commit never waits on transparency-log IO.
 func newGlobalLogEnqueueHook(rt *runtimeConfig, store proofstore.Store, worker *globallog.OutboxWorker) func(context.Context, model.BatchRoot) {
 	return func(ctx context.Context, root model.BatchRoot) {
+		if err := validateGlobalLogOutboxRoot(root); err != nil {
+			rt.logger.Error().Err(err).Str("batch_id", root.BatchID).Msg("global log outbox enqueue rejected")
+			return
+		}
 		item := model.GlobalLogOutboxItem{
 			SchemaVersion: model.SchemaGlobalLogOutbox,
 			BatchID:       root.BatchID,
@@ -994,6 +998,9 @@ func backfillGlobalLogOutbox(ctx context.Context, store proofstore.Store) (int, 
 		}
 		for _, root := range roots {
 			cursor = root.ClosedAtUnixN
+			if err := validateGlobalLogOutboxRoot(root); err != nil {
+				return enqueued, err
+			}
 			if _, ok, err := store.GetGlobalLeafByBatchID(ctx, root.BatchID); err != nil {
 				return enqueued, err
 			} else if ok {
@@ -1019,6 +1026,13 @@ func backfillGlobalLogOutbox(ctx context.Context, store proofstore.Store) (int, 
 			enqueued++
 		}
 	}
+}
+
+func validateGlobalLogOutboxRoot(root model.BatchRoot) error {
+	if strings.TrimSpace(root.NodeID) == "" || strings.TrimSpace(root.LogID) == "" {
+		return trusterr.New(trusterr.CodeDataLoss, "global log batch root is missing node_id or log_id")
+	}
+	return nil
 }
 
 // restoreBatchSeq seeds the batch worker's in-memory seq counter

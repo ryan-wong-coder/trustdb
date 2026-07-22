@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
+	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 	"github.com/spf13/cobra"
@@ -21,22 +23,26 @@ func newMetastoreCommand(rt *runtimeConfig) *cobra.Command {
 
 // migrateReport is the JSON document emitted by `trustdb metastore migrate`
 // so operators and wrapper scripts can sanity-check a migration run in
-// CI. Skipped counts non-overwrite conflicts and partial entries that cannot
-// be safely re-materialized without their prerequisite outbox item.
+// CI. Skipped counts entries retained at the destination when overwrite is
+// disabled.
 type migrateReport struct {
-	From           string `json:"from"`
-	To             string `json:"to"`
-	Manifests      int    `json:"manifests"`
-	Bundles        int    `json:"bundles"`
-	Roots          int    `json:"roots"`
-	GlobalLeaves   int    `json:"global_leaves"`
-	GlobalNodes    int    `json:"global_nodes"`
-	GlobalState    bool   `json:"global_state"`
-	STHs           int    `json:"sths"`
-	GlobalTiles    int    `json:"global_tiles"`
-	AnchorOutboxes int    `json:"anchor_outboxes"`
-	AnchorResults  int    `json:"anchor_results"`
-	Skipped        int    `json:"skipped"`
+	From            string `json:"from"`
+	To              string `json:"to"`
+	Manifests       int    `json:"manifests"`
+	Bundles         int    `json:"bundles"`
+	Roots           int    `json:"roots"`
+	GlobalLeaves    int    `json:"global_leaves"`
+	GlobalNodes     int    `json:"global_nodes"`
+	GlobalState     bool   `json:"global_state"`
+	STHs            int    `json:"sths"`
+	GlobalTiles     int    `json:"global_tiles"`
+	AnchorResults   int    `json:"anchor_results"`
+	AnchorSchedules int    `json:"anchor_schedules"`
+	Skipped         int    `json:"skipped"`
+}
+
+type sthAnchorScheduleLister interface {
+	ListSTHAnchorSchedules(context.Context) ([]model.STHAnchorSchedule, error)
 }
 
 func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
@@ -69,6 +75,30 @@ func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
 				return trusterr.Wrap(trusterr.CodeInternal, "open destination proofstore", err)
 			}
 			defer func() { _ = dst.Close() }()
+
+			resultLister, ok := src.(proofstore.STHAnchorResultLister)
+			if !ok {
+				return trusterr.New(trusterr.CodeFailedPrecondition, "source proofstore cannot enumerate STH anchor results")
+			}
+			resultWriter, ok := dst.(proofstore.STHAnchorResultWriter)
+			if !ok {
+				return trusterr.New(trusterr.CodeFailedPrecondition, "destination proofstore cannot write STH anchor results")
+			}
+			scheduleLister, ok := src.(sthAnchorScheduleLister)
+			if !ok {
+				return trusterr.New(trusterr.CodeFailedPrecondition, "source proofstore cannot enumerate STH anchor schedules")
+			}
+			scheduleRestorer, ok := dst.(proofstore.STHAnchorScheduleRestorer)
+			if !ok {
+				return trusterr.New(trusterr.CodeFailedPrecondition, "destination proofstore cannot restore STH anchor schedules")
+			}
+			var scheduleReplacer proofstore.STHAnchorScheduleReplacer
+			if overwrite {
+				scheduleReplacer, ok = dst.(proofstore.STHAnchorScheduleReplacer)
+				if !ok {
+					return trusterr.New(trusterr.CodeFailedPrecondition, "destination proofstore cannot overwrite STH anchor schedules")
+				}
+			}
 
 			report := migrateReport{From: fromPath, To: toPath}
 
@@ -267,65 +297,69 @@ func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
 				}
 			}
 
-			afterAnchorTreeSize := uint64(0)
+			// Snapshot mutable scheduler state before copying immutable results.
+			// Restore clears only process-local lease ownership.
+			schedules, err := scheduleLister.ListSTHAnchorSchedules(ctx)
+			if err != nil {
+				return err
+			}
+			anchorschedule.Sort(schedules)
+
+			resultReader, _ := dst.(proofstore.STHAnchorResultKeyedReader)
+			afterAnchorResult := model.STHAnchorResultKey{}
 			for {
-				items, err := src.ListSTHAnchorOutboxItemsAfter(ctx, afterAnchorTreeSize, metastoreScanPageSize)
+				results, err := resultLister.ListSTHAnchorResultsAfter(ctx, afterAnchorResult, metastoreScanPageSize)
 				if err != nil {
 					return err
 				}
-				if len(items) == 0 {
+				if len(results) == 0 {
 					break
 				}
-				for _, item := range items {
-					outboxExists := false
-					if !overwrite {
-						if _, ok, err := dst.GetSTHAnchorOutboxItem(ctx, item.TreeSize); err != nil {
+				for _, result := range results {
+					resultKey := anchorschedule.ResultKey(result)
+					if anchorschedule.CompareResultKeys(resultKey, afterAnchorResult) <= 0 {
+						return trusterr.New(trusterr.CodeDataLoss, "STH anchor result listing did not advance")
+					}
+					if !overwrite && resultReader != nil {
+						if _, found, err := resultReader.GetSTHAnchorResultForKey(ctx, resultKey); err != nil {
 							return err
-						} else if ok {
+						} else if found {
 							report.Skipped++
-							outboxExists = true
-						}
-					}
-					if !outboxExists {
-						if err := dst.EnqueueSTHAnchor(ctx, item); err != nil {
-							if trusterr.CodeOf(err) != trusterr.CodeAlreadyExists {
-								return err
-							}
-							outboxExists = true
-							report.Skipped++
-						} else {
-							outboxExists = true
-							report.AnchorOutboxes++
-						}
-					}
-					afterAnchorTreeSize = item.TreeSize
-
-					result, ok, err := src.GetSTHAnchorResult(ctx, item.TreeSize)
-					if err != nil {
-						return err
-					}
-					if !ok {
-						continue
-					}
-					if !overwrite {
-						if _, ok, err := dst.GetSTHAnchorResult(ctx, result.TreeSize); err != nil {
-							return err
-						} else if ok {
-							report.Skipped++
+							afterAnchorResult = resultKey
 							continue
 						}
 					}
-					if _, ok, err := dst.GetSTHAnchorOutboxItem(ctx, result.TreeSize); err != nil {
-						return err
-					} else if !ok {
-						report.Skipped++
-						continue
-					}
-					if err := dst.MarkSTHAnchorPublished(ctx, result); err != nil {
+					if err := resultWriter.PutSTHAnchorResult(ctx, result); err != nil {
 						return err
 					}
 					report.AnchorResults++
+					afterAnchorResult = resultKey
 				}
+			}
+
+			scheduleReader, _ := dst.(proofstore.STHAnchorScheduleStore)
+			for _, schedule := range schedules {
+				schedule, err = anchorschedule.ClearLeaseForRestore(schedule)
+				if err != nil {
+					return trusterr.Wrap(trusterr.CodeDataLoss, "migrate invalid STH anchor schedule", err)
+				}
+				if !overwrite && scheduleReader != nil {
+					if _, found, err := scheduleReader.GetSTHAnchorSchedule(ctx, schedule.Key); err != nil {
+						return err
+					} else if found {
+						report.Skipped++
+						continue
+					}
+				}
+				if overwrite {
+					err = scheduleReplacer.ReplaceSTHAnchorSchedule(ctx, schedule)
+				} else {
+					err = scheduleRestorer.PutSTHAnchorSchedule(ctx, schedule)
+				}
+				if err != nil {
+					return err
+				}
+				report.AnchorSchedules++
 			}
 
 			if manager, ok := dst.(proofstore.IdempotencyProjectionManager); ok {

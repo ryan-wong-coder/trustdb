@@ -173,6 +173,40 @@ func TestHTTPClientListRecordIndexesSendsLevelFilter(t *testing.T) {
 	}
 }
 
+func TestHTTPClientGetAnchorMapsImmutableResult(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/anchors/sth/7" {
+			t.Fatalf("path = %s, want /v1/anchors/sth/7", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tree_size":   7,
+			"status":      model.AnchorStatePublished,
+			"proof_level": "L5",
+			"result": &model.STHAnchorResult{
+				SchemaVersion: model.SchemaSTHAnchorResult,
+				TreeSize:      7,
+				SinkName:      "ots",
+				AnchorID:      "anchor-7",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := newServerClient(serverTransportHTTP, srv.URL)
+	if err != nil {
+		t.Fatalf("newServerClient: %v", err)
+	}
+	got, err := client.getAnchor(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("getAnchor: %v", err)
+	}
+	if got.TreeSize != 7 || got.Status != model.AnchorStatePublished || got.Result == nil || got.Result.AnchorID != "anchor-7" {
+		t.Fatalf("anchor = %+v", got)
+	}
+}
+
 func TestNormalizeGRPCTargetStripsHTTPStyleURL(t *testing.T) {
 	t.Parallel()
 

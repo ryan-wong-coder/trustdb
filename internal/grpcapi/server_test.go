@@ -3,8 +3,10 @@ package grpcapi
 import (
 	"context"
 	"encoding/base64"
+	"sort"
 	"testing"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"google.golang.org/grpc/codes"
@@ -30,6 +32,45 @@ func TestGetGlobalEvidence(t *testing.T) {
 	}
 	if got.Evidence.GlobalProof.TreeSize != 7 {
 		t.Fatalf("GetGlobalEvidence=%+v", got)
+	}
+}
+
+func TestAnchorEndpointsExposePublishedResultsOnly(t *testing.T) {
+	t.Parallel()
+
+	anchors := resultAnchorService{results: []model.STHAnchorResult{
+		{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, SinkName: "ots", AnchorID: "anchor-4"},
+		{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, SinkName: "file", AnchorID: "anchor-4-file"},
+		{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, SinkName: "ots", AnchorID: "anchor-2"},
+	}}
+	server := NewServer(nil, nil, nil, anchors, nil)
+
+	got, err := server.GetAnchor(context.Background(), &GetAnchorRequest{TreeSize: 4})
+	if err != nil {
+		t.Fatalf("GetAnchor: %v", err)
+	}
+	if got.TreeSize != 4 || got.Status != model.AnchorStatePublished || got.ProofLevel != "L5" || got.Result == nil || got.Result.AnchorID != "anchor-4" {
+		t.Fatalf("GetAnchor = %+v", got)
+	}
+
+	page, err := server.ListAnchors(context.Background(), &ListAnchorsRequest{Limit: 1, Direction: model.RecordListDirectionDesc})
+	if err != nil {
+		t.Fatalf("ListAnchors: %v", err)
+	}
+	if len(page.Anchors) != 1 || page.Anchors[0].Result == nil || page.Anchors[0].Result.AnchorID != "anchor-4" || page.Anchors[0].Status != model.AnchorStatePublished || page.NextCursor == "" {
+		t.Fatalf("ListAnchors = %+v", page)
+	}
+	secondPage, err := server.ListAnchors(context.Background(), &ListAnchorsRequest{Limit: 1, Direction: model.RecordListDirectionDesc, Cursor: page.NextCursor})
+	if err != nil {
+		t.Fatalf("ListAnchors second page: %v", err)
+	}
+	if len(secondPage.Anchors) != 1 || secondPage.Anchors[0].Result == nil || secondPage.Anchors[0].Result.AnchorID != "anchor-4-file" {
+		t.Fatalf("ListAnchors second page skipped same-tree sink: %+v", secondPage)
+	}
+
+	_, err = server.GetAnchor(context.Background(), &GetAnchorRequest{TreeSize: 3})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("GetAnchor unpublished status = %v, want %v err=%v", status.Code(err), codes.NotFound, err)
 	}
 }
 
@@ -64,9 +105,52 @@ func TestDecodeCursorsRejectTrailingJSONData(t *testing.T) {
 	if _, err := decodeUint64Cursor(uint64Raw); err == nil {
 		t.Fatal("decodeUint64Cursor() error = nil, want trailing JSON rejection")
 	}
+
+	anchorRaw := base64.RawURLEncoding.EncodeToString([]byte(`{"t":1,"s":"file"}{}`))
+	if _, err := decodeAnchorCursor(anchorRaw); err == nil {
+		t.Fatal("decodeAnchorCursor() error = nil, want trailing JSON rejection")
+	}
 }
 
 type typedNilGlobalService struct{}
+
+type resultAnchorService struct {
+	results []model.STHAnchorResult
+}
+
+func (s resultAnchorService) AnchorResult(_ context.Context, treeSize uint64) (model.STHAnchorResult, bool, error) {
+	for _, result := range s.results {
+		if result.TreeSize == treeSize {
+			return result, true, nil
+		}
+	}
+	return model.STHAnchorResult{}, false, nil
+}
+
+func (s resultAnchorService) Anchors(_ context.Context, opts model.AnchorListOptions) ([]model.STHAnchorResult, error) {
+	ordered := append([]model.STHAnchorResult(nil), s.results...)
+	sort.Slice(ordered, func(i, j int) bool {
+		cmp := anchorschedule.CompareResultKeys(anchorschedule.ResultKey(ordered[i]), anchorschedule.ResultKey(ordered[j]))
+		if opts.Direction == model.RecordListDirectionAsc {
+			return cmp < 0
+		}
+		return cmp > 0
+	})
+	results := make([]model.STHAnchorResult, 0, min(opts.Limit, len(ordered)))
+	for _, result := range ordered {
+		if opts.HasAfter {
+			cmp := anchorschedule.CompareResultKeys(anchorschedule.ResultKey(result), opts.AfterResultKey)
+			if opts.Direction == model.RecordListDirectionAsc && cmp <= 0 || opts.Direction != model.RecordListDirectionAsc && cmp >= 0 {
+				continue
+			}
+		}
+		results = append(results, result)
+		if len(results) == opts.Limit {
+			break
+		}
+	}
+	return results, nil
+}
 
 func (*typedNilGlobalService) LatestSTH(context.Context) (model.SignedTreeHead, bool, error) {
 	panic("typed nil global service should be normalized before use")

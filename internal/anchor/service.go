@@ -2,81 +2,63 @@ package anchor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 )
 
-// Default tuning. These are exported via Config so operators can
-// override any one without copying the whole struct.
 const (
 	defaultPollInterval   = 2 * time.Second
-	defaultBatchSize      = 64
-	defaultWorkers        = 4
 	defaultPerCallTimeout = 30 * time.Second
-	defaultInitialBackoff = 1 * time.Second
+	defaultLeaseDuration  = 75 * time.Second
+	defaultInitialBackoff = time.Second
 	defaultMaxBackoff     = 5 * time.Minute
+	minimumLeaseMargin    = time.Second
 )
 
-// Config collects every knob Service respects. The zero value is not
-// valid — Sink and Store must be set — but every other field has a
-// sane default applied in NewService.
+// Config describes one constant-space anchor scheduler worker. The durable
+// schedule key is explicit so a tick never scans historical STHs or results.
 type Config struct {
 	Sink  Sink
 	Store proofstore.Store
+	Key   model.STHAnchorScheduleKey
 
-	// Metrics is optional; when nil the service runs without
-	// observability which keeps tests from pulling in the full
-	// Prometheus registry.
 	Metrics *observability.Metrics
 	Logger  zerolog.Logger
 
-	// PollInterval is the wall-clock gap between outbox sweeps.
-	// Trigger() shortcuts this for commit-time wakeups.
-	PollInterval time.Duration
-	// BatchSize caps how many items a single sweep processes so a
-	// large backlog cannot starve other goroutines on the shared
-	// store handle.
-	BatchSize int
-	// Workers bounds concurrent Sink.Publish calls for independent STHs.
-	Workers int
-	// PerCallTimeout bounds any single Sink.Publish call. Most
-	// sinks return in <1s; the default is deliberately generous to
-	// tolerate external notaries that rate-limit heavily.
+	PollInterval   time.Duration
 	PerCallTimeout time.Duration
-	// InitialBackoff and MaxBackoff drive exponential retry delay
-	// on transient sink failures: delay = min(MaxBackoff,
-	// InitialBackoff * 2^attempts).
+	LeaseDuration  time.Duration
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
-	// MaxAttempts, when > 0, caps the retry budget: after this
-	// many transient failures the item transitions to Failed. When
-	// 0 (the default) the worker retries forever which is usually
-	// what you want — a permanently broken sink will declare
-	// ErrPermanent itself.
-	MaxAttempts int
-	// Clock is injected only by tests; production uses time.Now.
-	Clock func() time.Time
+	MaxAttempts    int
+
+	Clock         func() time.Time
+	NewLeaseToken func() string
 }
 
 func (c *Config) applyDefaults() {
 	if c.PollInterval <= 0 {
 		c.PollInterval = defaultPollInterval
 	}
-	if c.BatchSize <= 0 {
-		c.BatchSize = defaultBatchSize
-	}
-	if c.Workers <= 0 {
-		c.Workers = defaultWorkers
-	}
 	if c.PerCallTimeout <= 0 {
 		c.PerCallTimeout = defaultPerCallTimeout
+	}
+	minimumLease := minimumSafeLeaseDuration(c.PerCallTimeout)
+	if c.LeaseDuration < minimumLease {
+		c.LeaseDuration = max(defaultLeaseDuration, minimumLease)
 	}
 	if c.InitialBackoff <= 0 {
 		c.InitialBackoff = defaultInitialBackoff
@@ -87,30 +69,34 @@ func (c *Config) applyDefaults() {
 	if c.Clock == nil {
 		c.Clock = time.Now
 	}
+	if c.NewLeaseToken == nil {
+		c.NewLeaseToken = newLeaseToken
+	}
 }
 
-// Service drives the anchor outbox: polls pending items, calls the
-// configured Sink, and updates the outbox with success/retry/fail.
-// Callers own the lifecycle — Start launches a background goroutine
-// and Stop cleanly drains it.
+func minimumSafeLeaseDuration(perCallTimeout time.Duration) time.Duration {
+	margin := max(minimumLeaseMargin, perCallTimeout/10)
+	const maxDuration = time.Duration(1<<63 - 1)
+	if perCallTimeout > (maxDuration-margin)/2 {
+		return maxDuration
+	}
+	return 2*perCallTimeout + margin
+}
+
+// Service claims and publishes at most one immutable InFlight target for one
+// stream and sink. Pending targets are coalesced by the proofstore writer.
 type Service struct {
-	cfg Config
+	cfg      Config
+	schedule proofstore.STHAnchorScheduleStore
+	owner    string
 
-	// Single-buffer trigger channel: a concurrent Trigger() never
-	// blocks and never enqueues more than one extra sweep, so we
-	// cannot leak goroutines even under a thundering herd of
-	// commits.
 	trigger chan struct{}
-
 	mu      sync.Mutex
 	running bool
 	stop    chan struct{}
 	done    chan struct{}
 }
 
-// NewService builds a Service with defaults applied. Sink and Store
-// are required; a nil for either returns an error so the caller
-// cannot accidentally start a worker that would panic on first tick.
 func NewService(cfg Config) (*Service, error) {
 	if cfg.Sink == nil {
 		return nil, errors.New("anchor service: sink is required")
@@ -118,10 +104,25 @@ func NewService(cfg Config) (*Service, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("anchor service: store is required")
 	}
+	if cfg.Key.SinkName == "" {
+		cfg.Key.SinkName = cfg.Sink.Name()
+	}
+	if err := anchorschedule.ValidateKey(cfg.Key); err != nil {
+		return nil, fmt.Errorf("anchor service: %w", err)
+	}
+	if cfg.Key.SinkName != cfg.Sink.Name() {
+		return nil, errors.New("anchor service: schedule key sink does not match configured sink")
+	}
+	schedule, ok := cfg.Store.(proofstore.STHAnchorScheduleStore)
+	if !ok {
+		return nil, errors.New("anchor service: store does not support durable scheduling")
+	}
 	cfg.applyDefaults()
 	return &Service{
-		cfg:     cfg,
-		trigger: make(chan struct{}, 1),
+		cfg:      cfg,
+		schedule: schedule,
+		owner:    "anchor-worker-" + cfg.NewLeaseToken(),
+		trigger:  make(chan struct{}, 1),
 	}, nil
 }
 
@@ -132,49 +133,47 @@ func (s *Service) SinkName() string {
 	return s.cfg.Sink.Name()
 }
 
-// Start launches the worker goroutine. It is safe to call Start
-// multiple times but only the first call takes effect; subsequent
-// calls are no-ops so crash-recovery wiring that starts the worker
-// from two places cannot double-launch.
+func (s *Service) ScheduleKey() model.STHAnchorScheduleKey {
+	if s == nil {
+		return model.STHAnchorScheduleKey{}
+	}
+	return s.cfg.Key
+}
+
 func (s *Service) Start(ctx context.Context) {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
 		return
 	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
 	s.running = true
-	s.stop = make(chan struct{})
-	s.done = make(chan struct{})
+	s.stop = stop
+	s.done = done
 	s.mu.Unlock()
-
-	go s.run(ctx)
+	go s.run(ctx, stop, done)
 }
 
-// Stop signals the worker to exit and blocks until the current tick
-// completes. A ctx cancellation on the Start ctx will also stop the
-// worker — Stop is the graceful complement used during normal
-// shutdown.
+// Stop does not flush Pending. It only waits for the current bounded tick, so
+// the persisted fixed deadline remains authoritative across clean restarts.
 func (s *Service) Stop() {
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
 		return
 	}
-	close(s.stop)
+	if s.stop != nil {
+		close(s.stop)
+		s.stop = nil
+	}
 	done := s.done
-	s.running = false
 	s.mu.Unlock()
 	if done != nil {
 		<-done
 	}
 }
 
-// Trigger wakes the worker immediately instead of waiting for the
-// next tick. It is non-blocking: a second call while the first
-// pending wakeup has not been consumed is dropped (the buffered
-// channel has capacity 1), because consecutive triggers cannot add
-// information — the worker will pick up everything in the next
-// sweep regardless.
 func (s *Service) Trigger() {
 	select {
 	case s.trigger <- struct{}{}:
@@ -182,11 +181,8 @@ func (s *Service) Trigger() {
 	}
 }
 
-func (s *Service) run(ctx context.Context) {
-	defer close(s.done)
-	// Fast first sweep so commits that happened before Start (e.g.
-	// during crash recovery) get picked up immediately instead of
-	// waiting up to PollInterval.
+func (s *Service) run(ctx context.Context, stop, done chan struct{}) {
+	defer s.finishRun(done)
 	s.tick(ctx)
 	timer := time.NewTimer(s.cfg.PollInterval)
 	defer timer.Stop()
@@ -194,14 +190,12 @@ func (s *Service) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.stop:
+		case <-stop:
 			return
 		case <-timer.C:
 			s.tick(ctx)
 			timer.Reset(s.cfg.PollInterval)
 		case <-s.trigger:
-			// Stop+drain the timer so the forthcoming Reset
-			// doesn't race with an already-fired tick.
 			if !timer.Stop() {
 				select {
 				case <-timer.C:
@@ -214,75 +208,102 @@ func (s *Service) run(ctx context.Context) {
 	}
 }
 
-// tick runs a single sweep. Errors are logged but never propagate;
-// the worker must keep running so transient store issues do not
-// silently stop anchoring.
+func (s *Service) finishRun(done chan struct{}) {
+	s.mu.Lock()
+	if s.done == done {
+		s.running = false
+		s.stop = nil
+		s.done = nil
+	}
+	s.mu.Unlock()
+	close(done)
+}
+
+// tick performs one O(1) schedule lookup and at most one external publish.
 func (s *Service) tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	now := s.cfg.Clock().UTC().UnixNano()
-	items, err := s.cfg.Store.ListPendingSTHAnchors(ctx, now, s.cfg.BatchSize)
+	state, found, err := s.schedule.GetSTHAnchorSchedule(ctx, s.cfg.Key)
 	if err != nil {
-		s.cfg.Logger.Warn().Err(err).Msg("anchor: list pending failed")
+		s.cfg.Logger.Warn().Err(err).Msg("anchor: read schedule failed")
 		return
 	}
 	if s.cfg.Metrics != nil {
-		s.cfg.Metrics.AnchorPending.Set(float64(len(items)))
+		s.cfg.Metrics.AnchorPending.Set(boolFloat(found && state.Pending != nil))
 	}
-	workers := min(s.cfg.Workers, len(items))
-	if workers == 0 {
+	if !found {
 		return
 	}
-	jobs := make(chan model.STHAnchorOutboxItem)
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range jobs {
-				if s.cfg.Metrics != nil {
-					s.cfg.Metrics.AnchorInFlight.Inc()
-				}
-				s.processOne(ctx, item)
-				if s.cfg.Metrics != nil {
-					s.cfg.Metrics.AnchorInFlight.Dec()
-				}
-			}
-		}()
+	now := s.cfg.Clock().UTC()
+	token := s.cfg.NewLeaseToken()
+	attempt, claimed, err := s.schedule.ClaimSTHAnchorAttempt(
+		ctx,
+		s.cfg.Key,
+		now.UnixNano(),
+		now.Add(s.cfg.LeaseDuration).UnixNano(),
+		s.owner,
+		token,
+	)
+	if err != nil {
+		s.cfg.Logger.Warn().Err(err).Msg("anchor: claim attempt failed")
+		return
 	}
-	for _, item := range items {
-		select {
-		case jobs <- item:
-		case <-ctx.Done():
-			close(jobs)
-			wg.Wait()
-			return
-		}
+	if !claimed {
+		return
 	}
-	close(jobs)
-	wg.Wait()
+	s.processOne(ctx, attempt)
+	s.refreshPendingMetric(ctx)
 }
 
-// processOne publishes a single outbox item and persists the
-// resulting state. The method is extracted so tests can drive the
-// loop step-by-step via tickOnce.
-func (s *Service) processOne(ctx context.Context, item model.STHAnchorOutboxItem) {
-	callCtx, cancel := context.WithTimeout(ctx, s.cfg.PerCallTimeout)
+func (s *Service) refreshPendingMetric(ctx context.Context) {
+	if s.cfg.Metrics == nil {
+		return
+	}
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.PerCallTimeout)
 	defer cancel()
-	start := time.Now()
-	result, err := s.cfg.Sink.Publish(callCtx, item.STH)
-	latency := time.Since(start).Seconds()
+	state, found, err := s.schedule.GetSTHAnchorSchedule(refreshCtx, s.cfg.Key)
+	if err != nil {
+		s.cfg.Logger.Warn().Err(err).Msg("anchor: refresh pending metric failed")
+		return
+	}
+	s.cfg.Metrics.AnchorPending.Set(boolFloat(found && state.Pending != nil))
+}
+
+func (s *Service) processOne(ctx context.Context, attempt model.STHAnchorAttempt) {
 	if s.cfg.Metrics != nil {
-		s.cfg.Metrics.AnchorLatency.Observe(latency)
+		s.cfg.Metrics.AnchorInFlight.Inc()
+		defer s.cfg.Metrics.AnchorInFlight.Dec()
+	}
+	callCtx, cancel := context.WithTimeout(ctx, s.cfg.PerCallTimeout)
+	start := time.Now()
+	result, publishErr := s.cfg.Sink.Publish(callCtx, attempt.Target)
+	cancel()
+	if s.cfg.Metrics != nil {
+		s.cfg.Metrics.AnchorLatency.Observe(time.Since(start).Seconds())
 	}
 
-	switch {
-	case err == nil:
-		result.SinkName = s.cfg.Sink.Name()
-		result.TreeSize = item.TreeSize
-		if err := s.cfg.Store.MarkSTHAnchorPublished(ctx, result); err != nil {
-			s.cfg.Logger.Error().Err(err).Uint64("tree_size", item.TreeSize).Msg("anchor: mark published failed")
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.PerCallTimeout)
+	defer persistCancel()
+	nextAttempts := attempt.Attempts + 1
+
+	if publishErr == nil {
+		boundResult, bindErr := anchorschedule.BindAttemptResult(s.cfg.Key, attempt, result, s.cfg.Clock().UTC().UnixNano())
+		if bindErr != nil {
+			invalidResultErr := fmt.Errorf("invalid successful sink result: %w", bindErr)
+			message := boundedProviderError(invalidResultErr)
+			if err := s.schedule.FailSTHAnchorAttempt(persistCtx, s.cfg.Key, attempt.Generation, attempt.LeaseToken, nextAttempts, message); err != nil {
+				s.cfg.Logger.Error().Err(err).Uint64("tree_size", attempt.Target.TreeSize).Msg("anchor: persist invalid result failure failed")
+			}
+			if s.cfg.Metrics != nil {
+				s.cfg.Metrics.AnchorAttempts.WithLabelValues(s.cfg.Sink.Name(), "invalid_result").Inc()
+			}
+			s.cfg.Logger.Error().Err(invalidResultErr).Uint64("tree_size", attempt.Target.TreeSize).Int("attempts", nextAttempts).Msg("anchor: sink returned an invalid successful result")
+			return
+		}
+		result = boundResult
+		if err := s.schedule.CompleteSTHAnchorAttempt(persistCtx, s.cfg.Key, attempt.Generation, attempt.LeaseToken, result); err != nil {
+			s.cfg.Logger.Error().Err(err).Uint64("tree_size", attempt.Target.TreeSize).Msg("anchor: persist completion failed")
 			if s.cfg.Metrics != nil {
 				s.cfg.Metrics.AnchorAttempts.WithLabelValues(s.cfg.Sink.Name(), "store_error").Inc()
 			}
@@ -293,65 +314,84 @@ func (s *Service) processOne(ctx context.Context, item model.STHAnchorOutboxItem
 			s.cfg.Metrics.AnchorPublished.WithLabelValues(s.cfg.Sink.Name()).Inc()
 		}
 		s.cfg.Logger.Info().
-			Uint64("tree_size", item.TreeSize).
+			Uint64("tree_size", attempt.Target.TreeSize).
+			Uint64("generation", attempt.Generation).
 			Str("sink", s.cfg.Sink.Name()).
 			Str("anchor_id", result.AnchorID).
 			Msg("anchor: published")
-
-	case errors.Is(err, ErrPermanent):
-		if err := s.cfg.Store.MarkSTHAnchorFailed(ctx, item.TreeSize, err.Error()); err != nil {
-			s.cfg.Logger.Error().Err(err).Uint64("tree_size", item.TreeSize).Msg("anchor: mark failed error")
-		}
-		if s.cfg.Metrics != nil {
-			s.cfg.Metrics.AnchorAttempts.WithLabelValues(s.cfg.Sink.Name(), "permanent").Inc()
-		}
-		s.cfg.Logger.Error().Err(err).Uint64("tree_size", item.TreeSize).Msg("anchor: permanent failure")
-
-	default:
-		nextAttempts := item.Attempts + 1
-		// Treat MaxAttempts == 0 as "unlimited". Exceeding the
-		// budget promotes a transient failure to Failed so the
-		// item stops consuming worker time forever.
-		if s.cfg.MaxAttempts > 0 && nextAttempts >= s.cfg.MaxAttempts {
-			if mfErr := s.cfg.Store.MarkSTHAnchorFailed(ctx, item.TreeSize, err.Error()); mfErr != nil {
-				s.cfg.Logger.Error().Err(mfErr).Uint64("tree_size", item.TreeSize).Msg("anchor: mark failed after max attempts")
-			}
-			if s.cfg.Metrics != nil {
-				s.cfg.Metrics.AnchorAttempts.WithLabelValues(s.cfg.Sink.Name(), "exhausted").Inc()
-			}
-			s.cfg.Logger.Warn().Err(err).Uint64("tree_size", item.TreeSize).Int("attempts", nextAttempts).Msg("anchor: retry budget exhausted")
-			return
-		}
-		backoff := computeBackoff(s.cfg.InitialBackoff, s.cfg.MaxBackoff, nextAttempts)
-		nextAttempt := s.cfg.Clock().Add(backoff).UTC().UnixNano()
-		if rErr := s.cfg.Store.RescheduleSTHAnchor(ctx, item.TreeSize, nextAttempts, nextAttempt, err.Error()); rErr != nil {
-			s.cfg.Logger.Error().Err(rErr).Uint64("tree_size", item.TreeSize).Msg("anchor: reschedule failed")
-		}
-		if s.cfg.Metrics != nil {
-			s.cfg.Metrics.AnchorAttempts.WithLabelValues(s.cfg.Sink.Name(), "transient").Inc()
-		}
-		s.cfg.Logger.Warn().Err(err).Uint64("tree_size", item.TreeSize).Int("attempts", nextAttempts).Dur("backoff", backoff).Msg("anchor: transient failure")
+		return
 	}
+
+	message := boundedProviderError(publishErr)
+	if errors.Is(publishErr, ErrPermanent) || s.cfg.MaxAttempts > 0 && nextAttempts >= s.cfg.MaxAttempts {
+		if err := s.schedule.FailSTHAnchorAttempt(persistCtx, s.cfg.Key, attempt.Generation, attempt.LeaseToken, nextAttempts, message); err != nil {
+			s.cfg.Logger.Error().Err(err).Uint64("tree_size", attempt.Target.TreeSize).Msg("anchor: persist terminal failure failed")
+		}
+		outcome := "permanent"
+		if !errors.Is(publishErr, ErrPermanent) {
+			outcome = "exhausted"
+		}
+		if s.cfg.Metrics != nil {
+			s.cfg.Metrics.AnchorAttempts.WithLabelValues(s.cfg.Sink.Name(), outcome).Inc()
+		}
+		s.cfg.Logger.Error().Err(publishErr).Uint64("tree_size", attempt.Target.TreeSize).Int("attempts", nextAttempts).Msg("anchor: terminal failure")
+		return
+	}
+
+	backoff := computeBackoff(s.cfg.InitialBackoff, s.cfg.MaxBackoff, nextAttempts)
+	nextAttempt := s.cfg.Clock().Add(backoff).UTC().UnixNano()
+	if err := s.schedule.RescheduleSTHAnchorAttempt(persistCtx, s.cfg.Key, attempt.Generation, attempt.LeaseToken, nextAttempts, nextAttempt, message); err != nil {
+		s.cfg.Logger.Error().Err(err).Uint64("tree_size", attempt.Target.TreeSize).Msg("anchor: persist retry failed")
+	}
+	if s.cfg.Metrics != nil {
+		s.cfg.Metrics.AnchorAttempts.WithLabelValues(s.cfg.Sink.Name(), "transient").Inc()
+	}
+	s.cfg.Logger.Warn().Err(publishErr).Uint64("tree_size", attempt.Target.TreeSize).Int("attempts", nextAttempts).Dur("backoff", backoff).Msg("anchor: transient failure")
 }
 
-// computeBackoff returns min(MaxBackoff, Initial * 2^(attempts-1)).
-// attempts is the attempt about to be retried (already incremented
-// past the failure that triggered this backoff).
-func computeBackoff(initial, max time.Duration, attempts int) time.Duration {
+func boundedProviderError(err error) string {
+	message := err.Error()
+	if strings.TrimSpace(message) == "" {
+		message = "anchor provider returned an unspecified error"
+	}
+	if len(message) <= anchorschedule.MaxLastErrorBytes {
+		return message
+	}
+	message = message[:anchorschedule.MaxLastErrorBytes]
+	for !utf8.ValidString(message) {
+		message = message[:len(message)-1]
+	}
+	return message
+}
+
+func newLeaseToken() string {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err == nil {
+		return hex.EncodeToString(token[:])
+	}
+	return fmt.Sprintf("%x", time.Now().UTC().UnixNano())
+}
+
+func boolFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func computeBackoff(initial, maxDelay time.Duration, attempts int) time.Duration {
 	if attempts <= 1 {
 		return initial
 	}
 	delay := initial
-	// Bit-shift guards against overflow by stopping once we exceed
-	// the cap; 2^30 already dwarfs any reasonable ceiling.
-	for i := 1; i < attempts && delay < max; i++ {
-		if delay > max/2 {
-			return max
+	for i := 1; i < attempts && delay < maxDelay; i++ {
+		if delay > maxDelay/2 {
+			return maxDelay
 		}
 		delay *= 2
 	}
-	if delay > max {
-		return max
+	if delay > maxDelay {
+		return maxDelay
 	}
 	return delay
 }

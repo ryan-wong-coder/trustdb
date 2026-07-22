@@ -89,16 +89,8 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	if _, err := globalSvc.CompactHistory(ctx, 1); err != nil {
 		t.Fatalf("CompactHistory: %v", err)
 	}
-	if err := src.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{
-		SchemaVersion: model.SchemaSTHAnchorOutbox,
-		TreeSize:      sth.TreeSize,
-		Status:        model.AnchorStatePending,
-		SinkName:      "noop",
-		STH:           sth,
-	}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
-	if err := src.MarkSTHAnchorPublished(ctx, model.STHAnchorResult{
+	resultWriter := any(src).(proofstore.STHAnchorResultWriter)
+	if err := resultWriter.PutSTHAnchorResult(ctx, model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           sth.NodeID,
 		LogID:            sth.LogID,
@@ -109,7 +101,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 		STH:              sth,
 		PublishedAtUnixN: 11,
 	}); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
+		t.Fatalf("PutSTHAnchorResult: %v", err)
 	}
 	if err := src.PutCheckpoint(ctx, model.WALCheckpoint{
 		SchemaVersion:   model.SchemaWALCheckpoint,
@@ -125,7 +117,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	if report.SchemaVersion != SchemaManifest || report.BackupID == "" || len(report.Entries) == 0 {
-		t.Fatalf("missing v3 manifest metadata: %+v", report)
+		t.Fatalf("missing v4 manifest metadata: %+v", report)
 	}
 	if report.Bundles != 1 || report.Roots != 1 || report.GlobalLeaves != 1 || report.GlobalNodes == 0 || !report.GlobalState || report.STHs != 1 || report.GlobalOutboxes != 1 || report.AnchorResults != 1 {
 		t.Fatalf("unexpected create report: %+v", report)
@@ -248,7 +240,7 @@ func TestBackupRoundTripPreservesAnchorScheduleAndIndependentResult(t *testing.T
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if report.AnchorOutboxes != 0 || report.AnchorResults != 2 || report.AnchorSchedules != 1 {
+	if report.AnchorResults != 2 || report.AnchorSchedules != 1 {
 		t.Fatalf("backup report = %+v", report)
 	}
 
@@ -265,7 +257,7 @@ func TestBackupRoundTripPreservesAnchorScheduleAndIndependentResult(t *testing.T
 	if err != nil || !found {
 		t.Fatalf("GetSTHAnchorSchedule found=%v err=%v", found, err)
 	}
-	if schedule.InFlight == nil || schedule.InFlight.Target.TreeSize != 3 || schedule.InFlight.Attempts != 2 || schedule.InFlight.NextAttemptUnixN != 300 {
+	if schedule.InFlight == nil || schedule.InFlight.Target.TreeSize != 3 || schedule.InFlight.Attempts != 2 || schedule.InFlight.NextAttemptUnixN != 300 || schedule.InFlight.LastAttemptUnixN != 300 || schedule.InFlight.LastErrorMessage != "temporary outage" {
 		t.Fatalf("restored in-flight = %+v", schedule.InFlight)
 	}
 	if schedule.InFlight.LeaseOwner != "" || schedule.InFlight.LeaseToken != "" || schedule.InFlight.LeaseUntilUnixN != 0 {
@@ -296,46 +288,51 @@ func TestBackupRoundTripPreservesAnchorScheduleAndIndependentResult(t *testing.T
 
 func TestRestoreRejectsLegacySchemaBeforeApplyingEntries(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "legacy.tdbackup")
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	tw := tar.NewWriter(f)
-	legacy := Manifest{
-		SchemaVersion: "trustdb.backup.v2",
-		BackupID:      "legacy-backup",
-		CreatedAt:     time.Unix(1, 0).UTC().Format(time.RFC3339Nano),
-		Compression:   "none",
-	}
-	var ordinal int64
-	root := model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: "must-not-restore", BatchRoot: repeatByte(0x42, 32), TreeSize: 1, ClosedAtUnixN: 1}
-	if err := writeCBORTracked(tw, &legacy, &ordinal, "roots/must-not-restore.tdroot", "batch_root", root); err != nil {
-		t.Fatalf("write root: %v", err)
-	}
-	if err := writeJSONTracked(tw, &legacy, &ordinal, "manifest.json", "manifest", legacy); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	if err := writeJSONTracked(tw, &legacy, &ordinal, "summary.json", "summary", legacy); err != nil {
-		t.Fatalf("write summary: %v", err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("tar Close: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("file Close: %v", err)
-	}
+	for _, schema := range []string{"trustdb.backup.v2", "trustdb.backup.v3"} {
+		schema := schema
+		t.Run(schema, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "legacy.tdbackup")
+			f, err := os.Create(path)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			tw := tar.NewWriter(f)
+			legacy := Manifest{
+				SchemaVersion: schema,
+				BackupID:      "legacy-backup",
+				CreatedAt:     time.Unix(1, 0).UTC().Format(time.RFC3339Nano),
+				Compression:   "none",
+			}
+			var ordinal int64
+			root := model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: "must-not-restore", BatchRoot: repeatByte(0x42, 32), TreeSize: 1, ClosedAtUnixN: 1}
+			if err := writeCBORTracked(tw, &legacy, &ordinal, "roots/must-not-restore.tdroot", "batch_root", root); err != nil {
+				t.Fatalf("write root: %v", err)
+			}
+			if err := writeJSONTracked(tw, &legacy, &ordinal, "manifest.json", "manifest", legacy); err != nil {
+				t.Fatalf("write manifest: %v", err)
+			}
+			if err := writeJSONTracked(tw, &legacy, &ordinal, "summary.json", "summary", legacy); err != nil {
+				t.Fatalf("write summary: %v", err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatalf("tar Close: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatalf("file Close: %v", err)
+			}
 
-	if _, err := Verify(ctx, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("Verify legacy error=%v", err)
-	}
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
-	if _, err := Restore(ctx, dst, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("Restore legacy error=%v", err)
-	}
-	if _, err := dst.LatestRoot(ctx); trusterr.CodeOf(err) != trusterr.CodeNotFound {
-		t.Fatalf("LatestRoot after rejected restore error=%v", err)
+			if _, err := Verify(ctx, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), schema) {
+				t.Fatalf("Verify %s error=%v", schema, err)
+			}
+			dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+			if _, err := Restore(ctx, dst, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), schema) {
+				t.Fatalf("Restore %s error=%v", schema, err)
+			}
+			if _, err := dst.LatestRoot(ctx); trusterr.CodeOf(err) != trusterr.CodeNotFound {
+				t.Fatalf("LatestRoot after rejected restore error=%v", err)
+			}
+		})
 	}
 }
 
@@ -480,54 +477,6 @@ func TestBackupRoundTripPreservesGlobalOutboxStatuses(t *testing.T) {
 	pending, err := dst.ListPendingGlobalLog(ctx, 100, 10)
 	if err != nil || len(pending) != 1 || pending[0].BatchID != "batch-pending" {
 		t.Fatalf("restored pending = %+v err=%v", pending, err)
-	}
-}
-
-func TestBackupRoundTripPreservesSTHAnchorStatuses(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
-	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
-	sth1 := backupScheduleSTH(key, 1, 0x11)
-	sth2 := backupScheduleSTH(key, 2, 0x22)
-	sth3 := backupScheduleSTH(key, 3, 0x33)
-	if err := src.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 1, SinkName: key.SinkName, STH: sth1, Status: model.AnchorStatePending, EnqueuedAtUnixN: 1}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor pending: %v", err)
-	}
-	if err := src.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 2, SinkName: key.SinkName, STH: sth2, Status: model.AnchorStatePending, EnqueuedAtUnixN: 2}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor published: %v", err)
-	}
-	if err := src.MarkSTHAnchorPublished(ctx, backupScheduleResult(key, sth2, "anchor-2", 3)); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
-	}
-	if err := src.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 3, SinkName: key.SinkName, STH: sth3, Status: model.AnchorStatePending, EnqueuedAtUnixN: 4}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor failed: %v", err)
-	}
-	if err := src.MarkSTHAnchorFailed(ctx, 3, "permanent"); err != nil {
-		t.Fatalf("MarkSTHAnchorFailed: %v", err)
-	}
-
-	path := filepath.Join(t.TempDir(), "anchor-outboxes.tdbackup")
-	report, err := Create(ctx, src, path, Options{Compression: "none"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if report.AnchorOutboxes != 3 || report.AnchorResults != 1 {
-		t.Fatalf("backup report = %+v", report)
-	}
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
-	if _, err := Restore(ctx, dst, path); err != nil {
-		t.Fatalf("Restore: %v", err)
-	}
-	wantStatuses := map[uint64]string{1: model.AnchorStatePending, 2: model.AnchorStatePublished, 3: model.AnchorStateFailed}
-	for treeSize, wantStatus := range wantStatuses {
-		got, ok, err := dst.GetSTHAnchorOutboxItem(ctx, treeSize)
-		if err != nil || !ok || got.Status != wantStatus {
-			t.Fatalf("restored anchor %d = %+v ok=%v err=%v", treeSize, got, ok, err)
-		}
-	}
-	if result, ok, err := dst.GetSTHAnchorResult(ctx, 2); err != nil || !ok || result.AnchorID != "anchor-2" {
-		t.Fatalf("restored anchor result = %+v ok=%v err=%v", result, ok, err)
 	}
 }
 
@@ -727,7 +676,7 @@ func TestVerifyRejectsEntryHashMismatch(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	tw := tar.NewWriter(f)
-	data := []byte(`{"schema_version":"trustdb.backup.v2"}` + "\n")
+	data := []byte(fmt.Sprintf("{\"schema_version\":%q}\n", SchemaManifest))
 	if err := tw.WriteHeader(&tar.Header{
 		Name: "summary.json",
 		Mode: 0o600,
@@ -763,7 +712,8 @@ func TestVerifyRejectsTrailingJSONData(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	tw := tar.NewWriter(f)
-	data := []byte(`{"schema_version":"trustdb.backup.v2"}{"schema_version":"trustdb.backup.v2"}`)
+	manifestJSON := fmt.Sprintf("{\"schema_version\":%q}", SchemaManifest)
+	data := []byte(manifestJSON + manifestJSON)
 	sum := sha256.Sum256(data)
 	if err := tw.WriteHeader(&tar.Header{
 		Name: "summary.json",

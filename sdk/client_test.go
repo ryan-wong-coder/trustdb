@@ -265,11 +265,19 @@ func TestClientOperationalEndpoints(t *testing.T) {
 		case "/v1/anchors/sth":
 			writeJSONForTest(t, w, http.StatusOK, anchorsEnvelope{
 				Anchors: []anchorEnvelope{{
-					TreeSize: 4,
-					Status:   "published",
-					Result:   &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"},
+					TreeSize:   4,
+					Status:     model.AnchorStatePublished,
+					ProofLevel: ProofLevelL5,
+					Result:     &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"},
 				}},
 				Limit: 5, Direction: "desc", NextCursor: "anchor-next",
+			})
+		case "/v1/anchors/sth/4":
+			writeJSONForTest(t, w, http.StatusOK, anchorEnvelope{
+				TreeSize:   4,
+				Status:     model.AnchorStatePublished,
+				ProofLevel: ProofLevelL5,
+				Result:     &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"},
 			})
 		case "/v1/roots/latest":
 			writeJSONForTest(t, w, http.StatusOK, BatchRoot{
@@ -332,8 +340,15 @@ func TestClientOperationalEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAnchors: %v", err)
 	}
-	if len(anchors.Anchors) != 1 || anchors.NextCursor != "anchor-next" || anchors.Anchors[0].TreeSize != 4 {
+	if len(anchors.Anchors) != 1 || anchors.NextCursor != "anchor-next" || anchors.Anchors[0].TreeSize != 4 || anchors.Anchors[0].Status != model.AnchorStatePublished || anchors.Anchors[0].Result == nil || anchors.Anchors[0].Result.AnchorID != "anchor-4" {
 		t.Fatalf("anchors = %+v", anchors)
+	}
+	anchorStatus, err := client.GetAnchor(context.Background(), 4)
+	if err != nil {
+		t.Fatalf("GetAnchor: %v", err)
+	}
+	if anchorStatus.TreeSize != 4 || anchorStatus.Status != model.AnchorStatePublished || anchorStatus.Result == nil || anchorStatus.Result.AnchorID != "anchor-4" {
+		t.Fatalf("anchor status = %+v", anchorStatus)
 	}
 	metrics, err := client.MetricsRaw(context.Background())
 	if err != nil {
@@ -341,6 +356,60 @@ func TestClientOperationalEndpoints(t *testing.T) {
 	}
 	if !strings.Contains(metrics, "trustdb_ingest_total") {
 		t.Fatalf("metrics = %q", metrics)
+	}
+}
+
+func TestHTTPTransportRejectsLegacyAnchorQueueEnvelope(t *testing.T) {
+	t.Parallel()
+	result := &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"}
+	legacy := map[string]any{
+		"tree_size":   4,
+		"status":      model.AnchorStatePublished,
+		"proof_level": ProofLevelL5,
+		"result":      result,
+		"outbox":      map[string]any{"tree_size": 4, "status": model.AnchorStatePublished},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/anchors/sth/4":
+			writeJSONForTest(t, w, http.StatusOK, legacy)
+		case "/v1/anchors/sth":
+			writeJSONForTest(t, w, http.StatusOK, map[string]any{
+				"anchors": []any{legacy}, "limit": 5, "direction": "desc",
+			})
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := client.GetAnchor(context.Background(), 4); err == nil || !strings.Contains(err.Error(), "outbox") {
+		t.Fatalf("GetAnchor legacy response error = %v, want unknown outbox field", err)
+	}
+	if _, err := client.ListAnchors(context.Background(), ListPageOptions{Limit: 5}); err == nil || !strings.Contains(err.Error(), "outbox") {
+		t.Fatalf("ListAnchors legacy response error = %v, want unknown outbox field", err)
+	}
+}
+
+func TestHTTPTransportRejectsIncompleteAnchorEnvelope(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSONForTest(t, w, http.StatusOK, anchorEnvelope{
+			TreeSize: 4, Status: model.AnchorStatePending, ProofLevel: ProofLevelL5,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := client.GetAnchor(context.Background(), 4); err == nil || !strings.Contains(err.Error(), "non-published") {
+		t.Fatalf("GetAnchor incomplete response error = %v, want non-published failure", err)
 	}
 }
 

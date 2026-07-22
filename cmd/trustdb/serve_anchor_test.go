@@ -215,6 +215,7 @@ func TestBuildOtsUpgrader_RejectsBadDuration(t *testing.T) {
 		{"timeout-bad", otsUpgraderParams{Enabled: true, TimeoutText: "🍩"}, "anchor-ots-upgrade-timeout"},
 		{"timeout-zero", otsUpgraderParams{Enabled: true, TimeoutText: "0s"}, "anchor-ots-upgrade-timeout"},
 		{"batch-negative", otsUpgraderParams{Enabled: true, BatchSize: -1}, "anchor-ots-upgrade-batch-size"},
+		{"batch-too-large", otsUpgraderParams{Enabled: true, BatchSize: anchor.MaxOtsUpgradeBatchSize + 1}, "anchor-ots-upgrade-batch-size"},
 	}
 	for _, tc := range cases {
 		tc := tc

@@ -3,7 +3,9 @@ package anchorschedule
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"sort"
+	"strings"
 
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
@@ -47,41 +49,38 @@ func ValidateCandidate(candidate model.STHAnchorCandidate) error {
 	return nil
 }
 
-// BindOutboxResult fills the legacy worker's result envelope from its durable
-// outbox target, then applies the same strict validation used by the new
-// scheduler. This keeps the transitional writer on the new immutable result
-// layout without accepting partially bound cryptographic evidence.
-func BindOutboxResult(item model.STHAnchorOutboxItem, result model.STHAnchorResult, publishedAtUnixN int64) (model.STHAnchorResult, error) {
+// BindAttemptResult fills a sink response from the immutable in-flight target
+// and then verifies the exact cryptographic binding before it can be stored.
+func BindAttemptResult(key model.STHAnchorScheduleKey, attempt model.STHAnchorAttempt, result model.STHAnchorResult, publishedAtUnixN int64) (model.STHAnchorResult, error) {
 	if result.SchemaVersion == "" {
 		result.SchemaVersion = model.SchemaSTHAnchorResult
 	}
 	if result.TreeSize == 0 {
-		result.TreeSize = item.TreeSize
+		result.TreeSize = attempt.Target.TreeSize
 	}
 	if result.NodeID == "" {
-		result.NodeID = item.STH.NodeID
+		result.NodeID = key.NodeID
 	}
 	if result.LogID == "" {
-		result.LogID = item.STH.LogID
+		result.LogID = key.LogID
 	}
 	if result.SinkName == "" {
-		result.SinkName = item.SinkName
+		result.SinkName = key.SinkName
 	}
 	if len(result.RootHash) == 0 {
-		result.RootHash = append([]byte(nil), item.STH.RootHash...)
+		result.RootHash = append([]byte(nil), attempt.Target.RootHash...)
 	}
 	if result.STH.TreeSize == 0 {
-		result.STH = item.STH
+		result.STH = attempt.Target
 	}
 	if result.PublishedAtUnixN == 0 {
 		result.PublishedAtUnixN = publishedAtUnixN
 	}
-	key := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
 	if err := ValidateResult(key, result); err != nil {
 		return model.STHAnchorResult{}, err
 	}
-	if item.TreeSize != result.TreeSize || item.SinkName != "" && item.SinkName != result.SinkName || !SameTarget(item.STH, result.STH) {
-		return model.STHAnchorResult{}, trusterr.New(trusterr.CodeDataLoss, "anchor result does not match durable outbox target")
+	if !ResultMatchesTarget(result, attempt.Target) {
+		return model.STHAnchorResult{}, trusterr.New(trusterr.CodeDataLoss, "anchor result does not match immutable in-flight target")
 	}
 	return result, nil
 }
@@ -243,6 +242,10 @@ func Claim(current model.STHAnchorSchedule, nowUnixN, leaseUntilUnixN int64, lea
 		attempt.LeaseToken = leaseToken
 		attempt.LeaseUntilUnixN = leaseUntilUnixN
 		attempt.LastAttemptUnixN = nowUnixN
+		// A retry may be claimed after its persisted deadline. Advance the
+		// retry timestamp to the actual claim time so the leased schedule stays
+		// valid and a lease-cleared restore remains immediately retryable.
+		attempt.NextAttemptUnixN = nowUnixN
 		current.InFlight = &attempt
 		current.Revision++
 		return current, attempt, true, nil
@@ -427,25 +430,27 @@ func CompareResultKeys(left, right model.STHAnchorResultKey) int {
 	if left.TreeSize > right.TreeSize {
 		return 1
 	}
-	if left.NodeID != right.NodeID {
-		if left.NodeID < right.NodeID {
-			return -1
-		}
-		return 1
-	}
-	if left.LogID != right.LogID {
-		if left.LogID < right.LogID {
-			return -1
-		}
-		return 1
-	}
-	if left.SinkName < right.SinkName {
+	leftIdentity := resultKeyOrderIdentity(left)
+	rightIdentity := resultKeyOrderIdentity(right)
+	if leftIdentity < rightIdentity {
 		return -1
 	}
-	if left.SinkName > right.SinkName {
+	if leftIdentity > rightIdentity {
 		return 1
 	}
 	return 0
+}
+
+// resultKeyOrderIdentity mirrors the exact byte suffix used by the ordered KV
+// backends. Comparing the encoded composite (including separators) matters:
+// URL-base64 does not preserve the lexical order of the original strings.
+func resultKeyOrderIdentity(key model.STHAnchorResultKey) string {
+	parts := [...]string{
+		base64.RawURLEncoding.EncodeToString([]byte(key.NodeID)),
+		base64.RawURLEncoding.EncodeToString([]byte(key.LogID)),
+		base64.RawURLEncoding.EncodeToString([]byte(key.SinkName)),
+	}
+	return strings.Join(parts[:], "/")
 }
 
 func SameTarget(left, right model.SignedTreeHead) bool {
@@ -459,6 +464,42 @@ func SameTarget(left, right model.SignedTreeHead) bool {
 		left.Signature.Alg == right.Signature.Alg &&
 		left.Signature.KeyID == right.Signature.KeyID &&
 		bytes.Equal(left.Signature.Signature, right.Signature.Signature)
+}
+
+// SelectPublicationTargets canonicalizes a possibly non-monotonic retry
+// batch. The highest STH covers every lower tree size, while the fixed window
+// starts at the earliest STH not already covered by the keyed latest result.
+// Equal tree sizes must be byte-identical or the store is internally
+// inconsistent and anchoring fails closed.
+func SelectPublicationTargets(sths []model.SignedTreeHead, coveredTreeSize uint64) (model.SignedTreeHead, model.SignedTreeHead, error) {
+	if len(sths) == 0 {
+		return model.SignedTreeHead{}, model.SignedTreeHead{}, trusterr.New(trusterr.CodeInvalidArgument, "anchor publication requires at least one STH")
+	}
+	seen := make(map[uint64]model.SignedTreeHead, len(sths))
+	var windowStart model.SignedTreeHead
+	var highest model.SignedTreeHead
+	for _, sth := range sths {
+		if sth.TreeSize == 0 {
+			return model.SignedTreeHead{}, model.SignedTreeHead{}, trusterr.New(trusterr.CodeInvalidArgument, "anchor publication STH tree_size is required")
+		}
+		if existing, found := seen[sth.TreeSize]; found {
+			if !SameTarget(existing, sth) {
+				return model.SignedTreeHead{}, model.SignedTreeHead{}, trusterr.New(trusterr.CodeDataLoss, "anchor publication contains conflicting STHs at one tree size")
+			}
+		} else {
+			seen[sth.TreeSize] = sth
+		}
+		if highest.TreeSize == 0 || sth.TreeSize > highest.TreeSize {
+			highest = sth
+		}
+		if sth.TreeSize > coveredTreeSize && (windowStart.TreeSize == 0 || sth.TreeSize < windowStart.TreeSize) {
+			windowStart = sth
+		}
+	}
+	if windowStart.TreeSize == 0 {
+		windowStart = highest
+	}
+	return windowStart, highest, nil
 }
 
 // ValidateResult verifies the immutable cryptographic binding of a successful
@@ -504,6 +545,34 @@ func LatestReference(result model.STHAnchorResult) model.STHAnchorLatestReferenc
 		RootHash:      append([]byte(nil), result.RootHash...),
 		AnchorID:      result.AnchorID,
 	}
+}
+
+// EmptyLatestReference is derived negative state for a stream that has been
+// scanned and has no successful anchor result. Persisting it prevents every
+// candidate merge for a new sink from rescanning unrelated result history.
+func EmptyLatestReference(stream *model.STHAnchorScheduleKey) model.STHAnchorLatestReference {
+	ref := model.STHAnchorLatestReference{SchemaVersion: model.SchemaSTHAnchorLatestEmpty}
+	if stream != nil {
+		ref.Key.NodeID = stream.NodeID
+		ref.Key.LogID = stream.LogID
+		ref.Key.SinkName = stream.SinkName
+	}
+	return ref
+}
+
+func EmptyLatestReferenceMatches(ref model.STHAnchorLatestReference, stream *model.STHAnchorScheduleKey) bool {
+	if !ValidEmptyLatestReference(ref) {
+		return false
+	}
+	actual := ScheduleKey(ref.Key)
+	if stream == nil {
+		return actual == (model.STHAnchorScheduleKey{})
+	}
+	return SameKey(actual, *stream)
+}
+
+func ValidEmptyLatestReference(ref model.STHAnchorLatestReference) bool {
+	return ref.SchemaVersion == model.SchemaSTHAnchorLatestEmpty && ref.Key.TreeSize == 0 && len(ref.RootHash) == 0 && ref.AnchorID == ""
 }
 
 func ReferenceMatchesResult(ref model.STHAnchorLatestReference, result model.STHAnchorResult) bool {

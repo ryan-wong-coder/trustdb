@@ -11,7 +11,80 @@ import (
 
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
+	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
+
+func TestGlobalPublicationPersistsIntentBeforeChunkedL4Projection(t *testing.T) {
+	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	const batchID = "batch-pebble-intent-first"
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox,
+		BatchID:       batchID,
+		BatchRoot: model.BatchRoot{
+			SchemaVersion: model.SchemaBatchRoot,
+			BatchID:       batchID,
+			BatchRoot:     bytes.Repeat([]byte{0x31}, 32),
+			TreeSize:      1,
+		},
+		Status: model.AnchorStatePending,
+	}); err != nil {
+		t.Fatalf("EnqueueGlobalLog: %v", err)
+	}
+	danglingID := "tr1-pebble-dangling"
+	danglingKey := appendRecordIndexEncodedPrefix(nil, prefixRecordByBatch, batchID, 1, danglingID)
+	seed := store.db.NewBatch()
+	if err := stageRecordIndexRef(seed, danglingKey, danglingID); err != nil {
+		_ = seed.Close()
+		t.Fatalf("stage dangling batch index: %v", err)
+	}
+	if err := seed.Commit(pdb.Sync); err != nil {
+		_ = seed.Close()
+		t.Fatalf("commit dangling batch index: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close dangling batch index: %v", err)
+	}
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
+	sth := model.SignedTreeHead{
+		SchemaVersion: model.SchemaSignedTreeHead, TreeAlg: model.DefaultMerkleTreeAlg,
+		TreeSize: 1, RootHash: bytes.Repeat([]byte{0x41}, 32), TimestampUnixN: 101,
+		NodeID: key.NodeID, LogID: key.LogID,
+		Signature: model.Signature{Alg: model.DefaultSignatureAlg, KeyID: "server-key", Signature: bytes.Repeat([]byte{0x41}, 64)},
+	}
+	candidate := model.STHAnchorCandidate{Key: key, STH: sth, ObservedAtUnixN: 100, DueAtUnixN: 200}
+	err = store.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, []string{batchID}, []model.SignedTreeHead{sth}, candidate)
+	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("MarkGlobalLogPublishedBatchWithAnchorCandidate error=%v, want data loss", err)
+	}
+	schedule, found, err := store.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || schedule.Pending == nil || schedule.Pending.Target.TreeSize != sth.TreeSize || schedule.Revision != 1 {
+		t.Fatalf("durable anchor intent=%+v found=%v err=%v", schedule, found, err)
+	}
+	item, found, err := store.GetGlobalLogOutboxItem(ctx, batchID)
+	if err != nil || !found || item.Status != model.AnchorStatePending {
+		t.Fatalf("outbox after failed projection=%+v found=%v err=%v", item, found, err)
+	}
+
+	if err := store.db.Delete(danglingKey, pdb.Sync); err != nil {
+		t.Fatalf("remove injected dangling index: %v", err)
+	}
+	if err := store.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, []string{batchID}, []model.SignedTreeHead{sth}, candidate); err != nil {
+		t.Fatalf("retry global publication: %v", err)
+	}
+	schedule, found, err = store.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || schedule.Revision != 1 {
+		t.Fatalf("retry duplicated candidate schedule=%+v found=%v err=%v", schedule, found, err)
+	}
+	item, found, err = store.GetGlobalLogOutboxItem(ctx, batchID)
+	if err != nil || !found || item.Status != model.AnchorStatePublished {
+		t.Fatalf("outbox after retry=%+v found=%v err=%v", item, found, err)
+	}
+}
 
 func TestStageRecordIndexPromotionMutationCounts(t *testing.T) {
 	t.Parallel()

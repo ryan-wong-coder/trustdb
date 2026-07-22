@@ -61,7 +61,6 @@ anchor:
   scope: "global"
   max_delay: "5m"
   poll_interval: "2s"
-  workers: 4
   sink: "noop"
   path: "/var/lib/trustdb/anchors/sth-anchors.jsonl"
   ots:

@@ -27,7 +27,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/trusterr"
 )
 
-const SchemaManifest = "trustdb.backup.v3"
+const SchemaManifest = "trustdb.backup.v4"
 const SchemaRestoreCheckpoint = "trustdb.backup-restore-checkpoint.v1"
 const scanPageSize = 1024
 const maxRestoreEntryBytes int64 = 128 << 20
@@ -65,7 +65,6 @@ type Manifest struct {
 	STHs            int     `json:"sths"`
 	GlobalTiles     int     `json:"global_tiles"`
 	GlobalOutboxes  int     `json:"global_outboxes"`
-	AnchorOutboxes  int     `json:"anchor_outboxes"`
 	AnchorResults   int     `json:"anchor_results"`
 	AnchorSchedules int     `json:"anchor_schedules"`
 	Entries         []Entry `json:"entries,omitempty"`
@@ -318,25 +317,6 @@ func Create(ctx context.Context, store proofstore.Store, path string, opts Optio
 		}
 	}
 
-	afterAnchorTreeSize := uint64(0)
-	for {
-		items, err := store.ListSTHAnchorOutboxItemsAfter(ctx, afterAnchorTreeSize, scanPageSize)
-		if err != nil {
-			return Manifest{}, err
-		}
-		if len(items) == 0 {
-			break
-		}
-		for _, item := range items {
-			name := fmt.Sprintf("anchors/sth-outbox/%020d.tdsth-anchor", item.TreeSize)
-			if err := writeCBORTracked(tw, &report, &ordinal, name, "sth_anchor_outbox", item); err != nil {
-				return Manifest{}, err
-			}
-			report.AnchorOutboxes++
-			afterAnchorTreeSize = item.TreeSize
-		}
-	}
-
 	// Capture mutable scheduler state before immutable results. If a publish
 	// completes while the backup is running, this ordering can at worst retain
 	// a retryable in-flight target alongside its successful result; it cannot
@@ -448,9 +428,6 @@ func RestoreWithOptions(ctx context.Context, store proofstore.Store, path string
 	scheduleRestorer, ok := store.(proofstore.STHAnchorScheduleRestorer)
 	if !ok {
 		return Manifest{}, trusterr.New(trusterr.CodeFailedPrecondition, "restore store cannot restore STH anchor schedules")
-	}
-	if _, ok := store.(proofstore.STHAnchorResultKeyedReader); !ok {
-		return Manifest{}, trusterr.New(trusterr.CodeFailedPrecondition, "restore store cannot read keyed STH anchor results")
 	}
 	verified, err := Verify(ctx, path)
 	if err != nil {
@@ -596,16 +573,6 @@ func RestoreWithOptions(ctx context.Context, store proofstore.Store, path string
 				return err
 			}
 			return markRestored()
-		case strings.HasPrefix(entry.Name, "anchors/sth-outbox/"):
-			var v model.STHAnchorOutboxItem
-			if err := decodeCBOREntry(entry, &v); err != nil {
-				return err
-			}
-			report.AnchorOutboxes++
-			if err := store.EnqueueSTHAnchor(ctx, v); err != nil && trusterr.CodeOf(err) != trusterr.CodeAlreadyExists {
-				return err
-			}
-			return markRestored()
 		case strings.HasPrefix(entry.Name, "anchors/sth-result/"):
 			var v model.STHAnchorResult
 			if err := decodeCBOREntry(entry, &v); err != nil {
@@ -624,10 +591,6 @@ func RestoreWithOptions(ctx context.Context, store proofstore.Store, path string
 			v, err := anchorschedule.ClearLeaseForRestore(v)
 			if err != nil {
 				return trusterr.Wrap(trusterr.CodeDataLoss, "restore invalid STH anchor schedule", err)
-			}
-			v, err = reconcileRestoredAnchorSchedule(ctx, store, v)
-			if err != nil {
-				return err
 			}
 			report.AnchorSchedules++
 			if err := scheduleRestorer.PutSTHAnchorSchedule(ctx, v); err != nil {
@@ -648,47 +611,6 @@ func RestoreWithOptions(ctx context.Context, store proofstore.Store, path string
 		}
 	}
 	return report, nil
-}
-
-func reconcileRestoredAnchorSchedule(ctx context.Context, store proofstore.Store, schedule model.STHAnchorSchedule) (model.STHAnchorSchedule, error) {
-	reader, ok := store.(proofstore.STHAnchorResultKeyedReader)
-	if !ok {
-		return model.STHAnchorSchedule{}, trusterr.New(trusterr.CodeFailedPrecondition, "restore store cannot read keyed STH anchor results")
-	}
-	if schedule.InFlight != nil {
-		resultKey := model.STHAnchorResultKey{
-			NodeID: schedule.Key.NodeID, LogID: schedule.Key.LogID, SinkName: schedule.Key.SinkName, TreeSize: schedule.InFlight.Target.TreeSize,
-		}
-		result, found, err := reader.GetSTHAnchorResultForKey(ctx, resultKey)
-		if err != nil {
-			return model.STHAnchorSchedule{}, err
-		}
-		if found {
-			resultKey := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
-			if !anchorschedule.SameKey(resultKey, schedule.Key) {
-				return model.STHAnchorSchedule{}, trusterr.New(trusterr.CodeDataLoss, "restored STH anchor result conflicts with schedule key")
-			}
-			schedule, _, err = anchorschedule.ReconcileCompleted(schedule, result)
-			if err != nil {
-				return model.STHAnchorSchedule{}, trusterr.Wrap(trusterr.CodeDataLoss, "reconcile restored in-flight anchor result", err)
-			}
-		}
-	}
-	if schedule.Pending == nil {
-		return schedule, nil
-	}
-	latest, found, err := reader.LatestSTHAnchorResultForKey(ctx, schedule.Key)
-	if err != nil {
-		return model.STHAnchorSchedule{}, err
-	}
-	if !found {
-		return schedule, nil
-	}
-	schedule, _, err = anchorschedule.ReconcileCompleted(schedule, latest)
-	if err != nil {
-		return model.STHAnchorSchedule{}, trusterr.Wrap(trusterr.CodeDataLoss, "reconcile restored pending anchor result", err)
-	}
-	return schedule, nil
 }
 
 func writeCBOR(tw *tar.Writer, name string, v any) error {
@@ -926,9 +848,6 @@ func validateStreamEntry(entry archiveEntry) error {
 		return decodeCBOREntry(entry, &v)
 	case strings.HasPrefix(entry.Name, "global/outbox/"):
 		var v model.GlobalLogOutboxItem
-		return decodeCBOREntry(entry, &v)
-	case strings.HasPrefix(entry.Name, "anchors/sth-outbox/"):
-		var v model.STHAnchorOutboxItem
 		return decodeCBOREntry(entry, &v)
 	case strings.HasPrefix(entry.Name, "anchors/sth-result/"):
 		var v model.STHAnchorResult

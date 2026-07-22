@@ -69,26 +69,21 @@ type Store interface {
 	CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error
 
 	// Global-log append outbox. Batch commit writes these items durably; a
-	// separate worker appends them to the global transparency log and then
-	// enqueues STH anchors.
+	// separate worker appends them to the global transparency log and merges
+	// the newest STH into the constant-space anchor scheduler.
 	EnqueueGlobalLog(ctx context.Context, item model.GlobalLogOutboxItem) error
 	ListPendingGlobalLog(ctx context.Context, nowUnixN int64, limit int) ([]model.GlobalLogOutboxItem, error)
+	// ListPendingGlobalLogForStream returns only work owned by one Global Log
+	// identity. Anchored workers use this scoped form so a shared proofstore
+	// cannot hand one log's durable outbox item to another log's signer.
+	ListPendingGlobalLogForStream(ctx context.Context, nodeID, logID string, nowUnixN int64, limit int) ([]model.GlobalLogOutboxItem, error)
 	ListGlobalLogOutboxItemsAfter(ctx context.Context, afterBatchID string, limit int) ([]model.GlobalLogOutboxItem, error)
 	GetGlobalLogOutboxItem(ctx context.Context, batchID string) (model.GlobalLogOutboxItem, bool, error)
 	MarkGlobalLogPublished(ctx context.Context, batchID string, sth model.SignedTreeHead) error
 	RescheduleGlobalLog(ctx context.Context, batchID string, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error
 
-	// STH anchor outbox. L5 only publishes SignedTreeHead/global roots;
-	// batch roots are never direct anchor targets.
-	EnqueueSTHAnchor(ctx context.Context, item model.STHAnchorOutboxItem) error
-	ListPendingSTHAnchors(ctx context.Context, nowUnixN int64, limit int) ([]model.STHAnchorOutboxItem, error)
-	ListPublishedSTHAnchors(ctx context.Context, limit int) ([]model.STHAnchorOutboxItem, error)
-	ListSTHAnchorOutboxItemsAfter(ctx context.Context, afterTreeSize uint64, limit int) ([]model.STHAnchorOutboxItem, error)
-	ListSTHAnchorsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error)
-	GetSTHAnchorOutboxItem(ctx context.Context, treeSize uint64) (model.STHAnchorOutboxItem, bool, error)
-	RescheduleSTHAnchor(ctx context.Context, treeSize uint64, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error
-	MarkSTHAnchorPublished(ctx context.Context, result model.STHAnchorResult) error
-	MarkSTHAnchorFailed(ctx context.Context, treeSize uint64, lastErrorMessage string) error
+	// Successful anchor evidence is immutable by cryptographic binding. The
+	// legacy per-STH mutable queue is deliberately not part of Store.
 	GetSTHAnchorResult(ctx context.Context, treeSize uint64) (model.STHAnchorResult, bool, error)
 
 	io.Closer
@@ -98,7 +93,7 @@ type Store interface {
 // value and pointer receivers on LocalStore resolve through the method
 // set of the pointer, so we pin the pointer form here.
 var _ Store = (*LocalStore)(nil)
-var _ GlobalLogPublishedBatchWithAnchorsMarker = (*LocalStore)(nil)
+var _ GlobalLogPublishedBatchWithAnchorCandidateMarker = (*LocalStore)(nil)
 
 // WALCheckpointPruneSafety is an optional capability for stores that can make
 // a local WAL checkpoint safe to trust after a crash. Returning true certifies
@@ -189,12 +184,8 @@ type GlobalLogPublishedBatchMarker interface {
 	MarkGlobalLogPublishedBatch(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead) error
 }
 
-type GlobalLogPublishedBatchWithAnchorsMarker interface {
-	MarkGlobalLogPublishedBatchWithAnchors(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, anchors []model.STHAnchorOutboxItem) error
-}
-
-type STHAnchorBatchEnqueuer interface {
-	EnqueueSTHAnchors(ctx context.Context, items []model.STHAnchorOutboxItem) error
+type GlobalLogPublishedBatchWithAnchorCandidateMarker interface {
+	MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, candidate model.STHAnchorCandidate) error
 }
 
 // LatestSTHAnchorResultReader provides a bounded lookup for the newest
@@ -208,8 +199,20 @@ type STHAnchorResultWriter interface {
 	PutSTHAnchorResult(context.Context, model.STHAnchorResult) error
 }
 
+// STHAnchorResultUpdater conditionally persists sink-specific proof enrichment
+// for an existing immutable result binding. The write succeeds only when the
+// stored result still exactly matches expected, preventing concurrent
+// OpenTimestamps calendar upgrades from overwriting one another.
+type STHAnchorResultUpdater interface {
+	UpdateSTHAnchorResult(context.Context, model.STHAnchorResult, model.STHAnchorResult) error
+}
+
 type STHAnchorResultKeyedReader interface {
 	GetSTHAnchorResultForKey(context.Context, model.STHAnchorResultKey) (model.STHAnchorResult, bool, error)
+	LatestSTHAnchorResultForKeyReader
+}
+
+type LatestSTHAnchorResultForKeyReader interface {
 	LatestSTHAnchorResultForKey(context.Context, model.STHAnchorScheduleKey) (model.STHAnchorResult, bool, error)
 }
 
@@ -217,9 +220,15 @@ type STHAnchorResultLister interface {
 	ListSTHAnchorResultsAfter(context.Context, model.STHAnchorResultKey, int) ([]model.STHAnchorResult, error)
 }
 
+// STHAnchorResultPager performs bounded, direction-aware immutable result
+// pagination. Ordered backends must seek directly from the composite cursor;
+// transport list requests must not scan the complete anchor history.
+type STHAnchorResultPager interface {
+	ListSTHAnchorResultsPage(context.Context, model.AnchorListOptions) ([]model.STHAnchorResult, error)
+}
+
 // STHAnchorScheduleStore owns the durable constant-space Pending/InFlight
-// scheduler state. Runtime wiring is intentionally separate so the storage
-// contract can land and be verified before replacing the legacy outbox.
+// scheduler state used directly by the runtime anchor worker.
 type STHAnchorScheduleStore interface {
 	UpsertSTHAnchorCandidate(context.Context, model.STHAnchorCandidate) (model.STHAnchorSchedule, error)
 	GetSTHAnchorSchedule(context.Context, model.STHAnchorScheduleKey) (model.STHAnchorSchedule, bool, error)
@@ -235,6 +244,13 @@ type STHAnchorScheduleStore interface {
 // before invoking it; normal runtime mutations use STHAnchorScheduleStore.
 type STHAnchorScheduleRestorer interface {
 	PutSTHAnchorSchedule(context.Context, model.STHAnchorSchedule) error
+}
+
+// STHAnchorScheduleReplacer is reserved for explicit offline migration with
+// overwrite enabled. Runtime and logical-backup restore use the conflict-
+// detecting restorer above.
+type STHAnchorScheduleReplacer interface {
+	ReplaceSTHAnchorSchedule(context.Context, model.STHAnchorSchedule) error
 }
 
 // L5CoverageCheckpointStore persists only the continuous projected prefix.

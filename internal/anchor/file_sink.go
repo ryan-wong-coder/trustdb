@@ -16,7 +16,7 @@ import (
 )
 
 // FileSinkName is the stable Sink identifier recorded in every
-// STHAnchorOutboxItem / STHAnchorResult produced by FileSink. Changing this
+// STHAnchorResult produced by FileSink. Changing this
 // value is a breaking change for existing proof bundles, so treat it
 // as a schema constant.
 const FileSinkName = "file"
@@ -27,9 +27,7 @@ const FileSinkName = "file"
 // file can tamper with it) but it exercises the end-to-end L5 flow
 // and gives tests a deterministic sink backend.
 //
-// Concurrency: the writer mutex serialises Publish calls so the JSONL
-// file remains well-formed even when the worker has multiple
-// goroutines publishing in parallel.
+// The writer mutex also keeps direct and test callers serialized.
 type FileSink struct {
 	path string
 
@@ -69,15 +67,14 @@ func NewFileSink(path string) (*FileSink, error) {
 	return &FileSink{path: path}, nil
 }
 
-// Name identifies this sink in STHAnchorOutboxItem.SinkName and
-// STHAnchorResult.SinkName. A verifier uses this to route the Proof bytes
+// Name identifies this sink in STHAnchorResult.SinkName. A verifier uses this to route the Proof bytes
 // to the right parser.
 func (s *FileSink) Name() string { return FileSinkName }
 
 // Publish appends a JSONL entry for the STH and returns an
 // STHAnchorResult. The AnchorID is derived deterministically from
 // tree size + root hash so re-publishing the same STH (e.g. after a crash between
-// the append and the outbox transition) yields the same AnchorID —
+// the append and the schedule completion) yields the same AnchorID —
 // which keeps the file log idempotent at the cost of a duplicate line
 // per retry. Consumers dedupe by AnchorID.
 //

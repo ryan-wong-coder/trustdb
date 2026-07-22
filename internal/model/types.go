@@ -1,36 +1,36 @@
 package model
 
 const (
-	SchemaClientClaim       = "trustdb.claim.v1"
-	SchemaSignedClaim       = "trustdb.signed-claim.v1"
-	SchemaServerRecord      = "trustdb.server-record.v1"
-	SchemaAcceptedReceipt   = "trustdb.accepted-receipt.v1"
-	SchemaCommittedReceipt  = "trustdb.committed-receipt.v1"
-	SchemaProofBundle       = "trustdb.proof-bundle.v1"
-	SchemaSingleProof       = "trustdb.sproof.v1"
-	SchemaRecordIndex       = "trustdb.record-index.v1"
-	SchemaBatchRoot         = "trustdb.batch-root.v1"
-	SchemaBatchManifest     = "trustdb.batch-manifest.v1"
-	SchemaBatchTreeLeaf     = "trustdb.batch-tree-leaf.v1"
-	SchemaBatchTreeNode     = "trustdb.batch-tree-node.v1"
-	SchemaWALCheckpoint     = "trustdb.wal-checkpoint.v1"
-	SchemaKeyEvent          = "trustdb.key-event.v1"
-	SchemaGlobalLogLeaf     = "trustdb.global-log-leaf.v1"
-	SchemaGlobalLogNode     = "trustdb.global-log-node.v1"
-	SchemaGlobalLogState    = "trustdb.global-log-state.v1"
-	SchemaSignedTreeHead    = "trustdb.signed-tree-head.v1"
-	SchemaGlobalLogProof    = "trustdb.global-log-proof.v1"
-	SchemaGlobalLogTile     = "trustdb.global-log-tile.v1"
-	SchemaGlobalLogOutbox   = "trustdb.global-log-outbox.v1"
-	SchemaSTHAnchorOutbox   = "trustdb.sth-anchor-outbox.v1"
-	SchemaSTHAnchorResult   = "trustdb.sth-anchor-result.v1"
-	SchemaSTHAnchorSchedule = "trustdb.sth-anchor-schedule.v1"
-	SchemaSTHAnchorLatest   = "trustdb.sth-anchor-latest.v1"
-	SchemaL5Coverage        = "trustdb.l5-coverage-checkpoint.v1"
-	DefaultHashAlg          = "sha256"
-	DefaultSignatureAlg     = "ed25519"
-	DefaultMerkleTreeAlg    = "rfc6962-sha256"
-	DefaultValidationPolicy = "trustdb.policy.v1"
+	SchemaClientClaim          = "trustdb.claim.v1"
+	SchemaSignedClaim          = "trustdb.signed-claim.v1"
+	SchemaServerRecord         = "trustdb.server-record.v1"
+	SchemaAcceptedReceipt      = "trustdb.accepted-receipt.v1"
+	SchemaCommittedReceipt     = "trustdb.committed-receipt.v1"
+	SchemaProofBundle          = "trustdb.proof-bundle.v1"
+	SchemaSingleProof          = "trustdb.sproof.v1"
+	SchemaRecordIndex          = "trustdb.record-index.v1"
+	SchemaBatchRoot            = "trustdb.batch-root.v1"
+	SchemaBatchManifest        = "trustdb.batch-manifest.v1"
+	SchemaBatchTreeLeaf        = "trustdb.batch-tree-leaf.v1"
+	SchemaBatchTreeNode        = "trustdb.batch-tree-node.v1"
+	SchemaWALCheckpoint        = "trustdb.wal-checkpoint.v1"
+	SchemaKeyEvent             = "trustdb.key-event.v1"
+	SchemaGlobalLogLeaf        = "trustdb.global-log-leaf.v1"
+	SchemaGlobalLogNode        = "trustdb.global-log-node.v1"
+	SchemaGlobalLogState       = "trustdb.global-log-state.v1"
+	SchemaSignedTreeHead       = "trustdb.signed-tree-head.v1"
+	SchemaGlobalLogProof       = "trustdb.global-log-proof.v1"
+	SchemaGlobalLogTile        = "trustdb.global-log-tile.v1"
+	SchemaGlobalLogOutbox      = "trustdb.global-log-outbox.v1"
+	SchemaSTHAnchorResult      = "trustdb.sth-anchor-result.v1"
+	SchemaSTHAnchorSchedule    = "trustdb.sth-anchor-schedule.v1"
+	SchemaSTHAnchorLatest      = "trustdb.sth-anchor-latest.v1"
+	SchemaSTHAnchorLatestEmpty = "trustdb.sth-anchor-latest-empty.v1"
+	SchemaL5Coverage           = "trustdb.l5-coverage-checkpoint.v1"
+	DefaultHashAlg             = "sha256"
+	DefaultSignatureAlg        = "ed25519"
+	DefaultMerkleTreeAlg       = "rfc6962-sha256"
+	DefaultValidationPolicy    = "trustdb.policy.v1"
 )
 
 // SchemaWALCheckpointContiguous uses the same fields as the legacy v1
@@ -280,9 +280,10 @@ type GlobalLeafListOptions struct {
 }
 
 type AnchorListOptions struct {
-	Limit         int
-	Direction     string
-	AfterTreeSize uint64
+	Limit          int
+	Direction      string
+	AfterResultKey STHAnchorResultKey
+	HasAfter       bool
 }
 
 func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
@@ -552,7 +553,7 @@ type GlobalLogTile struct {
 
 // GlobalLogOutboxItem decouples batch commit from global-log append. A batch
 // worker only persists this item; a separate worker appends the batch root,
-// creates the STH, and then enqueues the STH anchor outbox item.
+// creates the STH, and coalesces the batch's final STH into anchor state.
 type GlobalLogOutboxItem struct {
 	SchemaVersion    string         `cbor:"schema_version" json:"schema_version"`
 	BatchID          string         `cbor:"batch_id" json:"batch_id"`
@@ -578,21 +579,6 @@ type ClientKey struct {
 	Status             string `cbor:"status" json:"status"`
 	RevokedAtUnixN     int64  `cbor:"revoked_at_unix_nano,omitempty" json:"revoked_at_unix_nano,omitempty"`
 	CompromisedAtUnixN int64  `cbor:"compromised_at_unix_nano,omitempty" json:"compromised_at_unix_nano,omitempty"`
-}
-
-// STHAnchorOutboxItem is the unit of work consumed by the L5 anchor worker.
-// It is keyed by STH tree size; batch roots are never directly anchored.
-type STHAnchorOutboxItem struct {
-	SchemaVersion    string         `cbor:"schema_version" json:"schema_version"`
-	TreeSize         uint64         `cbor:"tree_size" json:"tree_size"`
-	Status           string         `cbor:"status" json:"status"`
-	SinkName         string         `cbor:"sink_name" json:"sink_name"`
-	STH              SignedTreeHead `cbor:"sth" json:"sth"`
-	Attempts         int            `cbor:"attempts" json:"attempts"`
-	EnqueuedAtUnixN  int64          `cbor:"enqueued_at_unix_nano" json:"enqueued_at_unix_nano"`
-	NextAttemptUnixN int64          `cbor:"next_attempt_unix_nano,omitempty" json:"next_attempt_unix_nano,omitempty"`
-	LastErrorMessage string         `cbor:"last_error_message,omitempty" json:"last_error_message,omitempty"`
-	LastAttemptUnixN int64          `cbor:"last_attempt_unix_nano,omitempty" json:"last_attempt_unix_nano,omitempty"`
 }
 
 // STHAnchorResult records a successful external publication of an STH/global

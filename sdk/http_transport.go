@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -190,16 +191,18 @@ func (t *httpTransport) ListGlobalLeaves(ctx context.Context, opts ListPageOptio
 func (t *httpTransport) ListAnchors(ctx context.Context, opts ListPageOptions) (AnchorPage, error) {
 	values := pageValues(opts)
 	var env anchorsEnvelope
-	if err := t.getJSON(ctx, "/v1/anchors/sth", values, &env); err != nil {
+	if err := t.getStrictJSON(ctx, "/v1/anchors/sth", values, &env); err != nil {
 		return AnchorPage{}, err
 	}
 	items := make([]AnchorPageItem, 0, len(env.Anchors))
 	for _, item := range env.Anchors {
+		if err := validatePublishedAnchorEnvelope("list anchors", t.endpoint("/v1/anchors/sth", values), item); err != nil {
+			return AnchorPage{}, err
+		}
 		items = append(items, AnchorPageItem{
 			TreeSize: item.TreeSize,
 			Status:   item.Status,
 			Result:   item.Result,
-			Outbox:   item.Outbox,
 		})
 	}
 	return AnchorPage{Anchors: items, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
@@ -242,7 +245,11 @@ func (t *httpTransport) GetGlobalEvidence(ctx context.Context, batchID string) (
 
 func (t *httpTransport) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {
 	var env anchorEnvelope
-	if err := t.getJSON(ctx, "/v1/anchors/sth/"+strconv.FormatUint(treeSize, 10), nil, &env); err != nil {
+	path := "/v1/anchors/sth/" + strconv.FormatUint(treeSize, 10)
+	if err := t.getStrictJSON(ctx, path, nil, &env); err != nil {
+		return AnchorStatus{}, err
+	}
+	if err := validatePublishedAnchorEnvelope("get anchor", t.endpoint(path, nil), env); err != nil {
 		return AnchorStatus{}, err
 	}
 	return AnchorStatus{TreeSize: env.TreeSize, Status: env.Status, Result: env.Result}, nil
@@ -274,6 +281,25 @@ func (t *httpTransport) MetricsRaw(ctx context.Context) (string, error) {
 
 func (t *httpTransport) getJSON(ctx context.Context, path string, query url.Values, dst any) error {
 	return t.doJSON(ctx, http.MethodGet, path, query, nil, "", dst)
+}
+
+func (t *httpTransport) getStrictJSON(ctx context.Context, path string, query url.Values, dst any) error {
+	raw, err := t.doRaw(ctx, http.MethodGet, path, query, nil, "", 0)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return &Error{Op: http.MethodGet, URL: t.endpoint(path, query), Err: fmt.Errorf("decode json: %w", err)}
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return &Error{Op: http.MethodGet, URL: t.endpoint(path, query), Err: fmt.Errorf("decode json: %w", err)}
+	}
+	return nil
 }
 
 func (t *httpTransport) doJSON(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string, dst any) error {
@@ -445,10 +471,20 @@ type rootsEnvelope struct {
 }
 
 type anchorEnvelope struct {
-	TreeSize uint64                     `json:"tree_size"`
-	Status   string                     `json:"status"`
-	Result   *STHAnchorResult           `json:"result,omitempty"`
-	Outbox   *model.STHAnchorOutboxItem `json:"outbox,omitempty"`
+	TreeSize   uint64           `json:"tree_size"`
+	Status     string           `json:"status"`
+	ProofLevel string           `json:"proof_level"`
+	Result     *STHAnchorResult `json:"result,omitempty"`
+}
+
+func validatePublishedAnchorEnvelope(op, endpoint string, env anchorEnvelope) error {
+	if env.Status != model.AnchorStatePublished || env.ProofLevel != ProofLevelL5 || env.Result == nil {
+		return &Error{Op: op, URL: endpoint, Message: "server returned a non-published or incomplete anchor result"}
+	}
+	if env.TreeSize == 0 || env.Result.TreeSize != env.TreeSize || env.Result.SchemaVersion != model.SchemaSTHAnchorResult || env.Result.AnchorID == "" {
+		return &Error{Op: op, URL: endpoint, Message: "server returned an inconsistent anchor result"}
+	}
+	return nil
 }
 
 type sthsEnvelope struct {

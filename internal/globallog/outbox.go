@@ -7,6 +7,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
@@ -17,16 +18,18 @@ const (
 	defaultOutboxBatchSize      = 128
 	defaultOutboxInitialBackoff = 100 * time.Millisecond
 	defaultOutboxMaxBackoff     = time.Minute
+	defaultAnchorMaxDelay       = 5 * time.Minute
 )
 
 // OutboxConfig wires the durable batch-root -> global-log worker. Batch commit
 // only writes GlobalLogOutboxItem; this worker performs the slower append and
-// optional STH anchor enqueue path outside the batch goroutine.
+// optional durable STH anchor candidate merge outside the batch goroutine.
 type OutboxConfig struct {
 	Store          proofstore.Store
 	Global         *Service
-	OnAnchorsReady func()
-	AnchorOutbox   bool
+	AnchorKey      *model.STHAnchorScheduleKey
+	AnchorMaxDelay time.Duration
+	OnAnchorReady  func()
 	Metrics        *observability.Metrics
 
 	Logger         zerolog.Logger
@@ -49,6 +52,9 @@ func (c *OutboxConfig) applyDefaults() {
 	}
 	if c.MaxBackoff < c.InitialBackoff {
 		c.MaxBackoff = defaultOutboxMaxBackoff
+	}
+	if c.AnchorKey != nil && c.AnchorMaxDelay <= 0 {
+		c.AnchorMaxDelay = defaultAnchorMaxDelay
 	}
 	if c.Clock == nil {
 		c.Clock = time.Now
@@ -79,11 +85,13 @@ func (w *OutboxWorker) Start(ctx context.Context) {
 		w.mu.Unlock()
 		return
 	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
 	w.running = true
-	w.stop = make(chan struct{})
-	w.done = make(chan struct{})
+	w.stop = stop
+	w.done = done
 	w.mu.Unlock()
-	go w.run(ctx)
+	go w.run(ctx, stop, done)
 }
 
 func (w *OutboxWorker) Stop() {
@@ -92,9 +100,11 @@ func (w *OutboxWorker) Stop() {
 		w.mu.Unlock()
 		return
 	}
-	close(w.stop)
+	if w.stop != nil {
+		close(w.stop)
+		w.stop = nil
+	}
 	done := w.done
-	w.running = false
 	w.mu.Unlock()
 	if done != nil {
 		<-done
@@ -108,8 +118,8 @@ func (w *OutboxWorker) Trigger() {
 	}
 }
 
-func (w *OutboxWorker) run(ctx context.Context) {
-	defer close(w.done)
+func (w *OutboxWorker) run(ctx context.Context, stop, done chan struct{}) {
+	defer w.finishRun(done)
 	w.tick(ctx)
 	timer := time.NewTimer(w.cfg.PollInterval)
 	defer timer.Stop()
@@ -117,7 +127,7 @@ func (w *OutboxWorker) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-w.stop:
+		case <-stop:
 			return
 		case <-timer.C:
 			w.tick(ctx)
@@ -135,15 +145,44 @@ func (w *OutboxWorker) run(ctx context.Context) {
 	}
 }
 
+func (w *OutboxWorker) finishRun(done chan struct{}) {
+	w.mu.Lock()
+	if w.done == done {
+		w.running = false
+		w.stop = nil
+		w.done = nil
+	}
+	w.mu.Unlock()
+	close(done)
+}
+
 func (w *OutboxWorker) tick(ctx context.Context) {
 	if ctx.Err() != nil || w.cfg.Store == nil || w.cfg.Global == nil {
 		return
 	}
 	now := w.cfg.Clock().UTC().UnixNano()
-	items, err := w.cfg.Store.ListPendingGlobalLog(ctx, now, w.cfg.BatchSize)
+	nodeID, logID := w.cfg.Global.StreamIdentity()
+	if w.cfg.AnchorKey != nil {
+		if w.cfg.AnchorKey.NodeID != nodeID || w.cfg.AnchorKey.LogID != logID {
+			w.cfg.Logger.Error().
+				Str("anchor_node_id", w.cfg.AnchorKey.NodeID).
+				Str("anchor_log_id", w.cfg.AnchorKey.LogID).
+				Str("signer_node_id", nodeID).
+				Str("signer_log_id", logID).
+				Msg("global log outbox: anchor schedule identity does not match signer")
+			return
+		}
+	}
+	items, err := w.cfg.Store.ListPendingGlobalLogForStream(ctx, nodeID, logID, now, w.cfg.BatchSize)
 	if err != nil {
 		w.cfg.Logger.Warn().Err(err).Msg("global log outbox: list pending failed")
 		return
+	}
+	for i := range items {
+		if items[i].BatchRoot.NodeID != nodeID || items[i].BatchRoot.LogID != logID {
+			w.cfg.Logger.Error().Str("batch_id", items[i].BatchID).Msg("global log outbox: scoped listing returned a foreign stream item")
+			return
+		}
 	}
 	w.processBatch(ctx, items)
 }
@@ -170,29 +209,78 @@ func (w *OutboxWorker) processBatch(ctx context.Context, items []model.GlobalLog
 		}
 		return
 	}
-	anchorsEnqueued := false
-	if w.cfg.AnchorOutbox {
-		marker, ok := w.cfg.Store.(proofstore.GlobalLogPublishedBatchWithAnchorsMarker)
+	if len(sths) != len(items) {
+		w.cfg.Logger.Error().Int("items", len(items)).Int("sths", len(sths)).Msg("global log outbox: append returned inconsistent STH count")
+		return
+	}
+	nodeID, logID := w.cfg.Global.StreamIdentity()
+	for i := range sths {
+		if sths[i].NodeID != nodeID || sths[i].LogID != logID {
+			w.cfg.Logger.Error().Str("batch_id", items[i].BatchID).Msg("global log outbox: append returned a foreign stream STH")
+			return
+		}
+	}
+	anchorCandidateStored := false
+	if w.cfg.AnchorKey != nil {
+		marker, ok := w.cfg.Store.(proofstore.GlobalLogPublishedBatchWithAnchorCandidateMarker)
 		if !ok {
 			w.cfg.Logger.Error().Msg("global log outbox: durable anchor publication is unsupported")
 			return
 		}
-		anchors := make([]model.STHAnchorOutboxItem, len(sths))
-		for i := range sths {
-			anchors[i] = model.STHAnchorOutboxItem{
-				SchemaVersion: model.SchemaSTHAnchorOutbox,
-				TreeSize:      sths[i].TreeSize,
-				Status:        model.AnchorStatePending,
-				STH:           sths[i],
-			}
-		}
-		if err := marker.MarkGlobalLogPublishedBatchWithAnchors(ctx, batchIDs, sths, anchors); err != nil {
-			w.cfg.Logger.Error().Err(err).Int("count", len(items)).Msg("global log outbox: mark batch published with anchors failed")
+		scheduleStore, ok := w.cfg.Store.(proofstore.STHAnchorScheduleStore)
+		if !ok {
+			w.cfg.Logger.Error().Msg("global log outbox: durable anchor schedule lookup is unsupported")
 			return
 		}
-		anchorsEnqueued = true
+		schedule, scheduleFound, err := scheduleStore.GetSTHAnchorSchedule(ctx, *w.cfg.AnchorKey)
+		if err != nil {
+			w.cfg.Logger.Error().Err(err).Msg("global log outbox: read durable anchor schedule failed")
+			return
+		}
+		coveredTreeSize := uint64(0)
+		if scheduleFound {
+			if schedule.InFlight != nil {
+				coveredTreeSize = schedule.InFlight.Target.TreeSize
+			}
+			if schedule.Pending != nil && schedule.Pending.Target.TreeSize > coveredTreeSize {
+				coveredTreeSize = schedule.Pending.Target.TreeSize
+			}
+		}
+		latestReader, ok := w.cfg.Store.(proofstore.LatestSTHAnchorResultForKeyReader)
+		if !ok {
+			w.cfg.Logger.Error().Msg("global log outbox: keyed latest anchor lookup is unsupported")
+			return
+		}
+		latest, latestFound, err := latestReader.LatestSTHAnchorResultForKey(ctx, *w.cfg.AnchorKey)
+		if err != nil {
+			w.cfg.Logger.Error().Err(err).Msg("global log outbox: read latest keyed anchor failed")
+			return
+		}
+		if latestFound && latest.TreeSize > coveredTreeSize {
+			coveredTreeSize = latest.TreeSize
+		}
+		windowStart, target, err := anchorschedule.SelectPublicationTargets(sths, coveredTreeSize)
+		if err != nil {
+			w.cfg.Logger.Error().Err(err).Msg("global log outbox: canonicalize STH publication batch failed")
+			return
+		}
+		// The first STH in this append opened the fixed, non-sliding anchor
+		// window. Covered retry prefixes are skipped so a newly appended suffix
+		// gets its own window, while the signed timestamp survives restarts.
+		observedAt := time.Unix(0, windowStart.TimestampUnixN).UTC()
+		candidate := model.STHAnchorCandidate{
+			Key:             *w.cfg.AnchorKey,
+			STH:             target,
+			ObservedAtUnixN: observedAt.UnixNano(),
+			DueAtUnixN:      observedAt.Add(w.cfg.AnchorMaxDelay).UnixNano(),
+		}
+		if err := marker.MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx, batchIDs, sths, candidate); err != nil {
+			w.cfg.Logger.Error().Err(err).Int("count", len(items)).Msg("global log outbox: mark batch published with anchor candidate failed")
+			return
+		}
+		anchorCandidateStored = true
 	}
-	if !anchorsEnqueued {
+	if !anchorCandidateStored {
 		if marker, ok := w.cfg.Store.(proofstore.GlobalLogPublishedBatchMarker); ok {
 			if err := marker.MarkGlobalLogPublishedBatch(ctx, batchIDs, sths); err != nil {
 				w.cfg.Logger.Error().Err(err).Int("count", len(items)).Msg("global log outbox: mark batch published failed")
@@ -210,9 +298,9 @@ func (w *OutboxWorker) processBatch(ctx context.Context, items []model.GlobalLog
 	if w.cfg.Metrics != nil {
 		w.cfg.Metrics.GlobalLogPublished.Add(float64(len(items)))
 	}
-	if anchorsEnqueued {
-		if w.cfg.OnAnchorsReady != nil {
-			w.cfg.OnAnchorsReady()
+	if anchorCandidateStored {
+		if w.cfg.OnAnchorReady != nil {
+			w.cfg.OnAnchorReady()
 		}
 	}
 	for i := range items {

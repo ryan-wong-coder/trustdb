@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/cborx"
 	"github.com/ryan-wong-coder/trustdb/internal/ingest"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
@@ -509,14 +510,10 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 			{SchemaVersion: model.SchemaGlobalLogLeaf, BatchID: "batch-1", LeafIndex: 0},
 		},
 	}, fakeAnchorService{
-		items: []model.STHAnchorOutboxItem{
-			{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 3, Status: model.AnchorStatePending},
-			{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 2, Status: model.AnchorStatePublished},
-			{SchemaVersion: model.SchemaSTHAnchorOutbox, TreeSize: 1, Status: model.AnchorStatePublished},
-		},
-		results: map[uint64]model.STHAnchorResult{
-			2: {SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, AnchorID: "anchor-2", SinkName: "ots"},
-			1: {SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 1, AnchorID: "anchor-1", SinkName: "ots"},
+		results: []model.STHAnchorResult{
+			{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, AnchorID: "anchor-2", SinkName: "ots"},
+			{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, AnchorID: "anchor-2-file", SinkName: "file"},
+			{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 1, AnchorID: "anchor-1", SinkName: "ots"},
 		},
 	})
 
@@ -554,12 +551,57 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("anchor list status = %d body=%s", rec.Code, rec.Body.String())
 	}
+	if strings.Contains(rec.Body.String(), `"outbox"`) {
+		t.Fatalf("anchor list leaked mutable scheduler state: %s", rec.Body.String())
+	}
 	var anchorsPage anchorsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &anchorsPage); err != nil {
 		t.Fatalf("decode anchor page: %v", err)
 	}
-	if len(anchorsPage.Anchors) != 2 || anchorsPage.Anchors[0].TreeSize != 3 || anchorsPage.NextCursor == "" {
+	if len(anchorsPage.Anchors) != 2 || anchorsPage.Anchors[0].TreeSize != 2 || anchorsPage.NextCursor == "" {
 		t.Fatalf("anchor page = %+v", anchorsPage)
+	}
+	for _, item := range anchorsPage.Anchors {
+		if item.Status != model.AnchorStatePublished || item.ProofLevel != "L5" || item.Result == nil {
+			t.Fatalf("anchor list item is not immutable publication evidence: %+v", item)
+		}
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth?limit=2&cursor="+anchorsPage.NextCursor, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second anchor page status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var secondAnchorsPage anchorsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &secondAnchorsPage); err != nil {
+		t.Fatalf("decode second anchor page: %v", err)
+	}
+	if len(secondAnchorsPage.Anchors) != 1 || secondAnchorsPage.Anchors[0].TreeSize != 1 {
+		t.Fatalf("second anchor page skipped or duplicated a same-tree sink: %+v", secondAnchorsPage)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth/2", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anchor get status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"outbox"`) {
+		t.Fatalf("anchor get leaked mutable scheduler state: %s", rec.Body.String())
+	}
+	var anchorItem anchorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &anchorItem); err != nil {
+		t.Fatalf("decode anchor response: %v", err)
+	}
+	if anchorItem.Status != model.AnchorStatePublished || anchorItem.ProofLevel != "L5" || anchorItem.Result == nil || anchorItem.Result.AnchorID != "anchor-2" {
+		t.Fatalf("anchor response = %+v", anchorItem)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth/3", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unpublished anchor status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1060,38 +1102,35 @@ func (f fakeGlobalService) Evidence(context.Context, string) (model.GlobalLogEvi
 }
 
 type fakeAnchorService struct {
-	items   []model.STHAnchorOutboxItem
-	results map[uint64]model.STHAnchorResult
+	results []model.STHAnchorResult
 }
 
 func (f fakeAnchorService) AnchorResult(_ context.Context, treeSize uint64) (model.STHAnchorResult, bool, error) {
-	result, ok := f.results[treeSize]
-	return result, ok, nil
-}
-
-func (f fakeAnchorService) AnchorStatus(_ context.Context, treeSize uint64) (model.STHAnchorOutboxItem, bool, error) {
-	for _, item := range f.items {
-		if item.TreeSize == treeSize {
-			return item, true, nil
+	for _, result := range f.results {
+		if result.TreeSize == treeSize {
+			return result, true, nil
 		}
 	}
-	return model.STHAnchorOutboxItem{}, false, nil
+	return model.STHAnchorResult{}, false, nil
 }
 
-func (f fakeAnchorService) Anchors(_ context.Context, opts model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error) {
-	items := append([]model.STHAnchorOutboxItem(nil), f.items...)
+func (f fakeAnchorService) Anchors(_ context.Context, opts model.AnchorListOptions) ([]model.STHAnchorResult, error) {
+	items := append([]model.STHAnchorResult(nil), f.results...)
 	desc := !strings.EqualFold(opts.Direction, model.RecordListDirectionAsc)
 	sort.Slice(items, func(i, j int) bool {
-		cmp := model.CompareUint64Position(items[i].TreeSize, items[j].TreeSize)
+		cmp := anchorschedule.CompareResultKeys(anchorschedule.ResultKey(items[i]), anchorschedule.ResultKey(items[j]))
 		if desc {
 			return cmp > 0
 		}
 		return cmp < 0
 	})
-	out := make([]model.STHAnchorOutboxItem, 0, opts.Limit)
+	out := make([]model.STHAnchorResult, 0, opts.Limit)
 	for _, item := range items {
-		if !model.Uint64AfterCursor(item.TreeSize, opts.AfterTreeSize, opts.Direction) {
-			continue
+		if opts.HasAfter {
+			cmp := anchorschedule.CompareResultKeys(anchorschedule.ResultKey(item), opts.AfterResultKey)
+			if opts.Direction == model.RecordListDirectionAsc && cmp <= 0 || opts.Direction != model.RecordListDirectionAsc && cmp >= 0 {
+				continue
+			}
 		}
 		out = append(out, item)
 		if len(out) >= opts.Limit {

@@ -55,13 +55,11 @@ type BatchService interface {
 	BatchTreeNodes(context.Context, model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error)
 }
 
-// AnchorService is the tiny surface the HTTP layer needs to expose
-// L5 proof data. Keeping it minimal (two reads) avoids coupling the
-// public API to the outbox bookkeeping helpers used by the worker.
+// AnchorService exposes immutable L5 publication evidence only. Mutable
+// scheduler state is intentionally not part of the public API.
 type AnchorService interface {
 	AnchorResult(context.Context, uint64) (model.STHAnchorResult, bool, error)
-	AnchorStatus(context.Context, uint64) (model.STHAnchorOutboxItem, bool, error)
-	Anchors(context.Context, model.AnchorListOptions) ([]model.STHAnchorOutboxItem, error)
+	Anchors(context.Context, model.AnchorListOptions) ([]model.STHAnchorResult, error)
 }
 
 type GlobalLogService interface {
@@ -183,11 +181,10 @@ type anchorsResponse struct {
 }
 
 type anchorResponse struct {
-	TreeSize   uint64                     `json:"tree_size"`
-	Status     string                     `json:"status"`
-	ProofLevel string                     `json:"proof_level"`
-	Result     *model.STHAnchorResult     `json:"result,omitempty"`
-	Outbox     *model.STHAnchorOutboxItem `json:"outbox,omitempty"`
+	TreeSize   uint64                 `json:"tree_size"`
+	Status     string                 `json:"status"`
+	ProofLevel string                 `json:"proof_level"`
+	Result     *model.STHAnchorResult `json:"result,omitempty"`
 }
 
 type errorResponse struct {
@@ -945,11 +942,12 @@ func parseAnchorListOptions(r *http.Request) (model.AnchorListOptions, error) {
 	}
 	opts := model.AnchorListOptions{Limit: limit, Direction: direction}
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
-		cursor, err := decodeUint64Cursor(raw)
+		cursor, err := decodeAnchorCursor(raw)
 		if err != nil {
 			return model.AnchorListOptions{}, err
 		}
-		opts.AfterTreeSize = cursor.Value
+		opts.AfterResultKey = cursor.resultKey()
+		opts.HasAfter = true
 	}
 	return opts, nil
 }
@@ -1060,6 +1058,13 @@ type uint64Cursor struct {
 	Value uint64 `json:"v"`
 }
 
+type anchorCursor struct {
+	TreeSize uint64 `json:"t"`
+	NodeID   string `json:"n,omitempty"`
+	LogID    string `json:"l,omitempty"`
+	SinkName string `json:"s"`
+}
+
 type globalNodeCursor struct {
 	Level      uint64 `json:"l"`
 	StartIndex uint64 `json:"s"`
@@ -1083,6 +1088,30 @@ func decodeUint64Cursor(raw string) (uint64Cursor, error) {
 		return uint64Cursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
 	}
 	return cursor, nil
+}
+
+func encodeAnchorCursor(key model.STHAnchorResultKey) string {
+	data, err := json.Marshal(anchorCursor{TreeSize: key.TreeSize, NodeID: key.NodeID, LogID: key.LogID, SinkName: key.SinkName})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeAnchorCursor(raw string) (anchorCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return anchorCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	var cursor anchorCursor
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.TreeSize == 0 || cursor.SinkName == "" {
+		return anchorCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	return cursor, nil
+}
+
+func (c anchorCursor) resultKey() model.STHAnchorResultKey {
+	return model.STHAnchorResultKey{NodeID: c.NodeID, LogID: c.LogID, SinkName: c.SinkName, TreeSize: c.TreeSize}
 }
 
 func encodeGlobalNodeCursor(level, startIndex uint64) string {
@@ -1340,16 +1369,8 @@ func (h Handler) getGlobalEvidence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, evidence)
 }
 
-// getAnchor exposes L5 anchor state for a committed batch. The shape
-// of the response reflects the three possible worlds a client may see:
-//
-//   - outbox entry missing → anchor_unknown (batch exists but no
-//     anchoring was attempted, e.g. sink=noop in a prior run).
-//   - outbox entry present, still pending/failed → status field
-//     surfaces the lifecycle and the outbox object gives attempts /
-//     last_error for debugging.
-//   - outbox entry present + published → result carries the external
-//     anchor_id and proof bytes the verifier can present.
+// getAnchor exposes one immutable, successfully published L5 result.
+// Pending and retry state remain internal to the durable scheduler.
 func (h Handler) getAnchor(w http.ResponseWriter, r *http.Request) {
 	if h.Anchors == nil {
 		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "anchor service is not configured"))
@@ -1360,40 +1381,24 @@ func (h Handler) getAnchor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	item, itemOK, err := h.Anchors.AnchorStatus(r.Context(), treeSize)
+	result, ok, err := h.Anchors.AnchorResult(r.Context(), treeSize)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	result, resultOK, err := h.Anchors.AnchorResult(r.Context(), treeSize)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if !itemOK && !resultOK {
+	if !ok {
 		writeError(w, trusterr.New(trusterr.CodeNotFound, "anchor not found for STH"))
 		return
 	}
-	writeJSON(w, http.StatusOK, buildAnchorResponse(treeSize, item, itemOK, result, resultOK))
+	writeJSON(w, http.StatusOK, buildAnchorResponse(result))
 }
 
-func buildAnchorResponse(treeSize uint64, item model.STHAnchorOutboxItem, itemOK bool, result model.STHAnchorResult, resultOK bool) anchorResponse {
-	resp := anchorResponse{TreeSize: treeSize, ProofLevel: prooflevel.L5.String()}
-	switch {
-	case resultOK:
-		resp.Status = model.AnchorStatePublished
-		r := result
-		resp.Result = &r
-	case itemOK:
-		resp.Status = item.Status
-	default:
-		resp.Status = "unknown"
+func buildAnchorResponse(result model.STHAnchorResult) anchorResponse {
+	r := result
+	return anchorResponse{
+		TreeSize: result.TreeSize, Status: model.AnchorStatePublished,
+		ProofLevel: prooflevel.L5.String(), Result: &r,
 	}
-	if itemOK {
-		it := item
-		resp.Outbox = &it
-	}
-	return resp
 }
 
 func (h Handler) listAnchors(w http.ResponseWriter, r *http.Request) {
@@ -1412,17 +1417,13 @@ func (h Handler) listAnchors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	anchors := make([]anchorResponse, 0, len(items))
-	for _, item := range items {
-		result, resultOK, err := h.Anchors.AnchorResult(r.Context(), item.TreeSize)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		anchors = append(anchors, buildAnchorResponse(item.TreeSize, item, true, result, resultOK))
+	for _, result := range items {
+		anchors = append(anchors, buildAnchorResponse(result))
 	}
 	next := ""
 	if len(items) == opts.Limit {
-		next = encodeUint64Cursor(items[len(items)-1].TreeSize)
+		last := items[len(items)-1]
+		next = encodeAnchorCursor(model.STHAnchorResultKey{NodeID: last.NodeID, LogID: last.LogID, SinkName: last.SinkName, TreeSize: last.TreeSize})
 	}
 	writeJSON(w, http.StatusOK, anchorsResponse{
 		Anchors:    anchors,

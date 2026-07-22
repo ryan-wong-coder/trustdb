@@ -12,28 +12,31 @@ import (
 )
 
 type seedCounts struct {
-	manifests      int
-	bundles        int
-	roots          int
-	globalLeaves   int
-	globalNodes    int
-	globalState    bool
-	sths           int
-	globalTiles    int
-	anchorOutboxes int
-	anchorResults  int
+	manifests       int
+	bundles         int
+	roots           int
+	globalLeaves    int
+	globalNodes     int
+	globalState     bool
+	sths            int
+	globalTiles     int
+	anchorResults   int
+	anchorSchedules int
 }
 
 // seedFileStore populates a file-backed proofstore with a representative
-// mixture of manifests, bundles, roots, global log artefacts, STH anchors,
-// and a node-local checkpoint so migration can verify that only portable data
-// is copied.
+// mixture of manifests, bundles, roots, global log artefacts, immutable STH
+// anchor results, scheduler state, and node-local/derived checkpoints so
+// migration can verify that only portable data is copied.
 // It returns the counts used by the assertions so the test body does not
 // have to hard-code magic numbers that would drift whenever the seed changes.
 func seedFileStore(t *testing.T, dir string) seedCounts {
 	t.Helper()
 	ctx := context.Background()
-	store := &proofstore.LocalStore{Root: dir}
+	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: dir})
+	if err != nil {
+		t.Fatalf("open file proofstore: %v", err)
+	}
 
 	// Two manifests: one committed with 2 bundles, one prepared with a
 	// single bundle. The committed manifest's bundles also drive the
@@ -137,6 +140,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 		TreeSize:       1,
 		RootHash:       bytes.Repeat([]byte{0xaa}, 32),
 		TimestampUnixN: 301,
+		NodeID:         "node-1",
 		LogID:          "test-log",
 		Signature:      model.Signature{Alg: model.DefaultSignatureAlg, KeyID: "test", Signature: []byte{1}},
 	}
@@ -155,42 +159,65 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 	if err := store.PutGlobalLogTile(ctx, tile); err != nil {
 		t.Fatalf("PutGlobalLogTile: %v", err)
 	}
-	outbox := model.STHAnchorOutboxItem{
-		SchemaVersion:   model.SchemaSTHAnchorOutbox,
-		TreeSize:        1,
-		Status:          model.AnchorStatePending,
-		SinkName:        "file",
-		STH:             sth,
-		EnqueuedAtUnixN: 303,
-	}
-	if err := store.EnqueueSTHAnchor(ctx, outbox); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
+	anchorKey := model.STHAnchorScheduleKey{NodeID: sth.NodeID, LogID: sth.LogID, SinkName: "file"}
 	result := model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		NodeID:           anchorKey.NodeID,
+		LogID:            anchorKey.LogID,
 		TreeSize:         1,
-		SinkName:         "file",
+		SinkName:         anchorKey.SinkName,
 		AnchorID:         "anchor-1",
 		RootHash:         append([]byte(nil), sth.RootHash...),
 		STH:              sth,
 		Proof:            []byte(`{"ok":true}`),
 		PublishedAtUnixN: 304,
 	}
-	if err := store.MarkSTHAnchorPublished(ctx, result); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
+	resultWriter := any(store).(proofstore.STHAnchorResultWriter)
+	if err := resultWriter.PutSTHAnchorResult(ctx, result); err != nil {
+		t.Fatalf("PutSTHAnchorResult: %v", err)
+	}
+
+	scheduler := any(store).(proofstore.STHAnchorScheduleStore)
+	inFlightSTH := sth
+	inFlightSTH.TreeSize = 2
+	inFlightSTH.RootHash = bytes.Repeat([]byte{0xbb}, 32)
+	inFlightSTH.TimestampUnixN = 400
+	if _, err := scheduler.UpsertSTHAnchorCandidate(ctx, model.STHAnchorCandidate{Key: anchorKey, STH: inFlightSTH, ObservedAtUnixN: 400, DueAtUnixN: 400}); err != nil {
+		t.Fatalf("UpsertSTHAnchorCandidate in-flight: %v", err)
+	}
+	attempt, claimed, err := scheduler.ClaimSTHAnchorAttempt(ctx, anchorKey, 400, 450, "worker-1", "lease-1")
+	if err != nil || !claimed {
+		t.Fatalf("ClaimSTHAnchorAttempt initial claimed=%v err=%v", claimed, err)
+	}
+	if err := scheduler.RescheduleSTHAnchorAttempt(ctx, anchorKey, attempt.Generation, "lease-1", 2, 500, "temporary outage"); err != nil {
+		t.Fatalf("RescheduleSTHAnchorAttempt: %v", err)
+	}
+	if _, claimed, err := scheduler.ClaimSTHAnchorAttempt(ctx, anchorKey, 500, 550, "worker-2", "lease-2"); err != nil || !claimed {
+		t.Fatalf("ClaimSTHAnchorAttempt retry claimed=%v err=%v", claimed, err)
+	}
+	pendingSTH := inFlightSTH
+	pendingSTH.TreeSize = 3
+	pendingSTH.RootHash = bytes.Repeat([]byte{0xcc}, 32)
+	pendingSTH.TimestampUnixN = 510
+	if _, err := scheduler.UpsertSTHAnchorCandidate(ctx, model.STHAnchorCandidate{Key: anchorKey, STH: pendingSTH, ObservedAtUnixN: 510, DueAtUnixN: 610}); err != nil {
+		t.Fatalf("UpsertSTHAnchorCandidate pending: %v", err)
+	}
+	coverage := any(store).(proofstore.L5CoverageCheckpointStore)
+	if _, err := coverage.AdvanceL5CoverageCheckpoint(ctx, anchorKey, 1, 520); err != nil {
+		t.Fatalf("AdvanceL5CoverageCheckpoint: %v", err)
 	}
 
 	return seedCounts{
-		manifests:      2,
-		bundles:        3,
-		roots:          2,
-		globalLeaves:   1,
-		globalNodes:    1,
-		globalState:    true,
-		sths:           1,
-		globalTiles:    1,
-		anchorOutboxes: 1,
-		anchorResults:  1,
+		manifests:       2,
+		bundles:         3,
+		roots:           2,
+		globalLeaves:    1,
+		globalNodes:     1,
+		globalState:     true,
+		sths:            1,
+		globalTiles:     1,
+		anchorResults:   1,
+		anchorSchedules: 1,
 	}
 }
 
@@ -239,11 +266,11 @@ func TestMetastoreMigrateCopiesEverything(t *testing.T) {
 	if report["global_tiles"] != float64(want.globalTiles) {
 		t.Fatalf("global_tiles = %v, want %d", report["global_tiles"], want.globalTiles)
 	}
-	if report["anchor_outboxes"] != float64(want.anchorOutboxes) {
-		t.Fatalf("anchor_outboxes = %v, want %d", report["anchor_outboxes"], want.anchorOutboxes)
-	}
 	if report["anchor_results"] != float64(want.anchorResults) {
 		t.Fatalf("anchor_results = %v, want %d", report["anchor_results"], want.anchorResults)
+	}
+	if report["anchor_schedules"] != float64(want.anchorSchedules) {
+		t.Fatalf("anchor_schedules = %v, want %d", report["anchor_schedules"], want.anchorSchedules)
 	}
 	if _, present := report["checkpoint"]; present {
 		t.Fatalf("node-local checkpoint unexpectedly appeared in report: %+v", report)
@@ -309,11 +336,28 @@ func TestMetastoreMigrateCopiesEverything(t *testing.T) {
 	if len(tiles) != want.globalTiles {
 		t.Fatalf("dst global tiles len = %d, want %d", len(tiles), want.globalTiles)
 	}
-	if _, ok, err := dst.GetSTHAnchorOutboxItem(ctx, 1); err != nil || !ok {
-		t.Fatalf("dst GetSTHAnchorOutboxItem ok=%v err=%v", ok, err)
+	result, ok, err := dst.GetSTHAnchorResult(ctx, 1)
+	if err != nil || !ok || result.AnchorID != "anchor-1" {
+		t.Fatalf("dst GetSTHAnchorResult result=%+v ok=%v err=%v", result, ok, err)
 	}
-	if _, ok, err := dst.GetSTHAnchorResult(ctx, 1); err != nil || !ok {
-		t.Fatalf("dst GetSTHAnchorResult ok=%v err=%v", ok, err)
+	anchorKey := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "test-log", SinkName: "file"}
+	scheduler := any(dst).(proofstore.STHAnchorScheduleStore)
+	schedule, ok, err := scheduler.GetSTHAnchorSchedule(ctx, anchorKey)
+	if err != nil || !ok {
+		t.Fatalf("dst GetSTHAnchorSchedule schedule=%+v ok=%v err=%v", schedule, ok, err)
+	}
+	if schedule.InFlight == nil || schedule.InFlight.Target.TreeSize != 2 || schedule.InFlight.Attempts != 2 || schedule.InFlight.NextAttemptUnixN != 500 || schedule.InFlight.LastAttemptUnixN != 500 || schedule.InFlight.LastErrorMessage != "temporary outage" {
+		t.Fatalf("dst in-flight schedule = %+v", schedule.InFlight)
+	}
+	if schedule.InFlight.LeaseOwner != "" || schedule.InFlight.LeaseToken != "" || schedule.InFlight.LeaseUntilUnixN != 0 {
+		t.Fatalf("dst schedule retained process lease = %+v", schedule.InFlight)
+	}
+	if schedule.Pending == nil || schedule.Pending.Target.TreeSize != 3 || schedule.Pending.OpenedAtUnixN != 510 || schedule.Pending.DueAtUnixN != 610 {
+		t.Fatalf("dst pending schedule = %+v", schedule.Pending)
+	}
+	coverage := any(dst).(proofstore.L5CoverageCheckpointStore)
+	if checkpoint, found, err := coverage.GetL5CoverageCheckpoint(ctx, anchorKey); err != nil || found {
+		t.Fatalf("dst derived L5 checkpoint=%+v found=%v err=%v, want absent", checkpoint, found, err)
 	}
 }
 
@@ -405,5 +449,68 @@ func TestMetastoreMigrateIsIdempotent(t *testing.T) {
 	// original roots, not four — the second run must not duplicate.
 	if len(gotRoots) != 2 {
 		t.Fatalf("dst roots after idempotent runs = %d, want 2", len(gotRoots))
+	}
+}
+
+func TestMetastoreMigrateOverwriteReplacesAnchorSchedule(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	fromDir := filepath.Join(tmp, "file")
+	toDir := filepath.Join(tmp, "pebble")
+	_ = seedFileStore(t, fromDir)
+	runMigrate := func(overwrite bool) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		cmd := newRootCommand(&out, &errOut)
+		args := []string{"metastore", "migrate", "--from", fromDir, "--to", toDir}
+		if overwrite {
+			args = append(args, "--overwrite")
+		}
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("metastore migrate overwrite=%v error=%v stderr=%s", overwrite, err, errOut.String())
+		}
+	}
+
+	runMigrate(false)
+	ctx := context.Background()
+	dst, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "test-log", SinkName: "file"}
+	scheduler := any(dst).(proofstore.STHAnchorScheduleStore)
+	higher := model.SignedTreeHead{
+		SchemaVersion: model.SchemaSignedTreeHead, TreeAlg: model.DefaultMerkleTreeAlg,
+		TreeSize: 4, RootHash: bytes.Repeat([]byte{0xdd}, 32), TimestampUnixN: 620,
+		NodeID: key.NodeID, LogID: key.LogID,
+		Signature: model.Signature{Alg: model.DefaultSignatureAlg, KeyID: "test", Signature: []byte{4}},
+	}
+	if _, err := scheduler.UpsertSTHAnchorCandidate(ctx, model.STHAnchorCandidate{
+		Key: key, STH: higher, ObservedAtUnixN: 620, DueAtUnixN: 720,
+	}); err != nil {
+		t.Fatalf("mutate destination schedule: %v", err)
+	}
+	mutated, found, err := scheduler.GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found || mutated.Pending == nil || mutated.Pending.Target.TreeSize != 4 {
+		t.Fatalf("mutated schedule=%+v found=%v err=%v", mutated, found, err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runMigrate(true)
+	dst, err = proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	restored, found, err := any(dst).(proofstore.STHAnchorScheduleStore).GetSTHAnchorSchedule(ctx, key)
+	if err != nil || !found {
+		t.Fatalf("restored schedule=%+v found=%v err=%v", restored, found, err)
+	}
+	if restored.Pending == nil || restored.Pending.Target.TreeSize != 3 {
+		t.Fatalf("overwrite retained destination scheduler mutation: %+v", restored.Pending)
 	}
 }

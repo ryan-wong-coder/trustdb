@@ -380,6 +380,7 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 
 	engine := app.LocalEngine{
 		ServerID:         "server-verify",
+		LogID:            "server-verify",
 		ServerKeyID:      "server-key",
 		ClientPublicKey:  clientPub,
 		ServerPrivateKey: serverPriv,
@@ -395,9 +396,13 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 	if err != nil {
 		t.Fatalf("NewFileSink: %v", err)
 	}
+	anchorKey := model.STHAnchorScheduleKey{
+		NodeID: engine.ServerID, LogID: engine.ServerID, SinkName: sink.Name(),
+	}
 	anchorSvc, err := anchor.NewService(anchor.Config{
 		Sink:         sink,
 		Store:        proofStore,
+		Key:          anchorKey,
 		Metrics:      metrics,
 		PollInterval: 20 * time.Millisecond,
 	})
@@ -410,6 +415,7 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 	rt := &runtimeConfig{logger: silentLogger()}
 	globalSvc, err := globallog.New(globallog.Options{
 		Store:      proofStore,
+		NodeID:     engine.ServerID,
 		LogID:      engine.ServerID,
 		KeyID:      engine.ServerKeyID,
 		PrivateKey: serverPriv,
@@ -420,9 +426,10 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 	globalOutbox := globallog.NewOutboxWorker(globallog.OutboxConfig{
 		Store:          proofStore,
 		Global:         globalSvc,
+		AnchorKey:      &anchorKey,
+		AnchorMaxDelay: 20 * time.Millisecond,
+		OnAnchorReady:  anchorSvc.Trigger,
 		PollInterval:   20 * time.Millisecond,
-		AnchorOutbox:   true,
-		OnAnchorsReady: anchorSvc.Trigger,
 	})
 	globalOutbox.Start(ctx)
 	t.Cleanup(globalOutbox.Stop)

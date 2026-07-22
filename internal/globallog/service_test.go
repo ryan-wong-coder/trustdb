@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ryan-wong-coder/trustdb/internal/anchor"
+	"github.com/ryan-wong-coder/trustdb/internal/anchorschedule"
 	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
@@ -130,15 +131,6 @@ func TestEvidenceUsesLatestCoveringAnchoredSTH(t *testing.T) {
 		t.Fatalf("AppendBatchRoots: %v", err)
 	}
 	anchored := sths[len(sths)-1]
-	if err := store.EnqueueSTHAnchor(ctx, model.STHAnchorOutboxItem{
-		SchemaVersion: model.SchemaSTHAnchorOutbox,
-		TreeSize:      anchored.TreeSize,
-		Status:        model.AnchorStatePending,
-		SinkName:      anchor.NoopSinkName,
-		STH:           anchored,
-	}); err != nil {
-		t.Fatalf("EnqueueSTHAnchor: %v", err)
-	}
 	result := model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           anchored.NodeID,
@@ -150,8 +142,8 @@ func TestEvidenceUsesLatestCoveringAnchoredSTH(t *testing.T) {
 		STH:              anchored,
 		PublishedAtUnixN: time.Unix(101, 0).UnixNano(),
 	}
-	if err := store.MarkSTHAnchorPublished(ctx, result); err != nil {
-		t.Fatalf("MarkSTHAnchorPublished: %v", err)
+	if err := store.PutSTHAnchorResult(ctx, result); err != nil {
+		t.Fatalf("PutSTHAnchorResult: %v", err)
 	}
 	for _, batchID := range []string{"b1", "b2", "b3"} {
 		evidence, err := svc.Evidence(ctx, batchID)
@@ -263,6 +255,77 @@ func TestAppendBatchRootsPreservesSTHSequence(t *testing.T) {
 	leaves, err := store.ListGlobalLeaves(ctx)
 	if err != nil || len(leaves) != 4 {
 		t.Fatalf("leaves=%d err=%v", len(leaves), err)
+	}
+}
+
+func TestAppendBatchRootRejectsConflictingDurableReplay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	svc, store := newTestService(t)
+	original := batchRoot("batch-replay-conflict", 7)
+	if _, err := svc.AppendBatchRoot(ctx, original); err != nil {
+		t.Fatalf("AppendBatchRoot(original): %v", err)
+	}
+	conflict := original
+	conflict.BatchRoot = bytes.Repeat([]byte{0x99}, 32)
+	if _, err := svc.AppendBatchRoot(ctx, conflict); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("AppendBatchRoot(conflict) error=%v, want data loss", err)
+	}
+	leaves, err := store.ListGlobalLeaves(ctx)
+	if err != nil || len(leaves) != 1 {
+		t.Fatalf("ListGlobalLeaves len=%d err=%v, want one durable leaf", len(leaves), err)
+	}
+}
+
+func TestAppendBatchRootRejectsForeignStream(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	svc, store := newTestService(t)
+	foreign := batchRoot("batch-foreign-stream", 8)
+	foreign.NodeID = "foreign-node"
+	foreign.LogID = "foreign-log"
+	if _, err := svc.AppendBatchRoot(ctx, foreign); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
+		t.Fatalf("AppendBatchRoot(foreign) error=%v, want invalid argument", err)
+	}
+	leaves, err := store.ListGlobalLeaves(ctx)
+	if err != nil || len(leaves) != 0 {
+		t.Fatalf("ListGlobalLeaves len=%d err=%v, want no append", len(leaves), err)
+	}
+}
+
+func TestAppendBatchRootSameIdentityReplayKeepsOriginalSigner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := proofstore.LocalStore{Root: t.TempDir()}
+	newService := func(keyID string) *Service {
+		_, privateKey, err := trustcrypto.GenerateEd25519Key()
+		if err != nil {
+			t.Fatalf("GenerateEd25519Key(%s): %v", keyID, err)
+		}
+		svc, err := New(Options{
+			Store: store, NodeID: "stable-node", LogID: "stable-log", KeyID: keyID, PrivateKey: privateKey,
+			Clock: func() time.Time { return time.Unix(100, 0).UTC() },
+		})
+		if err != nil {
+			t.Fatalf("New(%s): %v", keyID, err)
+		}
+		return svc
+	}
+	root := batchRoot("batch-key-rotation-replay", 9)
+	original, err := newService("old-key").AppendBatchRoot(ctx, root)
+	if err != nil {
+		t.Fatalf("AppendBatchRoot(original): %v", err)
+	}
+	replayed, err := newService("new-key").AppendBatchRoot(ctx, root)
+	if err != nil {
+		t.Fatalf("AppendBatchRoot(replay): %v", err)
+	}
+	if !anchorschedule.SameTarget(original, replayed) || replayed.Signature.KeyID != "old-key" {
+		t.Fatalf("replayed STH=%+v, want exact original signer %+v", replayed, original)
+	}
+	leaves, err := store.ListGlobalLeaves(ctx)
+	if err != nil || len(leaves) != 1 {
+		t.Fatalf("ListGlobalLeaves len=%d err=%v, want one durable leaf", len(leaves), err)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/ryan-wong-coder/trustdb/internal/grpcapi"
 	"github.com/ryan-wong-coder/trustdb/internal/httpapi"
 	"github.com/ryan-wong-coder/trustdb/internal/ingest"
+	"github.com/ryan-wong-coder/trustdb/internal/model"
 	"github.com/ryan-wong-coder/trustdb/internal/observability"
 	"github.com/ryan-wong-coder/trustdb/internal/proofstore"
 	"github.com/ryan-wong-coder/trustdb/internal/trustcrypto"
@@ -386,6 +387,7 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 	reg, metrics := observability.NewRegistry()
 	engine := app.LocalEngine{
 		ServerID:         "server-bench-pebble-e2e",
+		LogID:            "server-bench-pebble-e2e",
 		ServerKeyID:      "server-key",
 		ClientPublicKey:  clientPub,
 		ServerPrivateKey: serverPriv,
@@ -410,9 +412,13 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 16, Workers: 2}, metrics)
 	t.Cleanup(func() { _ = ingestSvc.Shutdown(context.Background()) })
 
+	anchorKey := model.STHAnchorScheduleKey{
+		NodeID: engine.ServerID, LogID: engine.ServerID, SinkName: anchor.NoopSinkName,
+	}
 	anchorSvc, err := anchor.NewService(anchor.Config{
 		Sink:         anchor.NewNoopSink(),
 		Store:        store,
+		Key:          anchorKey,
 		Metrics:      metrics,
 		PollInterval: 20 * time.Millisecond,
 	})
@@ -425,6 +431,7 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 	rt := &runtimeConfig{logger: silentLogger()}
 	globalSvc, err := globallog.New(globallog.Options{
 		Store:      store,
+		NodeID:     engine.ServerID,
 		LogID:      engine.ServerID,
 		KeyID:      engine.ServerKeyID,
 		PrivateKey: serverPriv,
@@ -435,9 +442,10 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 	globalOutbox := globallog.NewOutboxWorker(globallog.OutboxConfig{
 		Store:          store,
 		Global:         globalSvc,
+		AnchorKey:      &anchorKey,
+		AnchorMaxDelay: 20 * time.Millisecond,
+		OnAnchorReady:  anchorSvc.Trigger,
 		PollInterval:   20 * time.Millisecond,
-		AnchorOutbox:   true,
-		OnAnchorsReady: anchorSvc.Trigger,
 	})
 	globalOutbox.Start(context.Background())
 	t.Cleanup(globalOutbox.Stop)

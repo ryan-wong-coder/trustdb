@@ -184,11 +184,10 @@ type GetAnchorRequest struct {
 }
 
 type GetAnchorResponse struct {
-	TreeSize   uint64                     `cbor:"tree_size" json:"tree_size"`
-	Status     string                     `cbor:"status" json:"status"`
-	ProofLevel string                     `cbor:"proof_level" json:"proof_level"`
-	Result     *model.STHAnchorResult     `cbor:"result,omitempty" json:"result,omitempty"`
-	Outbox     *model.STHAnchorOutboxItem `cbor:"outbox,omitempty" json:"outbox,omitempty"`
+	TreeSize   uint64                 `cbor:"tree_size" json:"tree_size"`
+	Status     string                 `cbor:"status" json:"status"`
+	ProofLevel string                 `cbor:"proof_level" json:"proof_level"`
+	Result     *model.STHAnchorResult `cbor:"result,omitempty" json:"result,omitempty"`
 }
 
 type ListAnchorsRequest struct {

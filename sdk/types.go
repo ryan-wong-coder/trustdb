@@ -117,7 +117,6 @@ type AnchorPageItem struct {
 	TreeSize uint64
 	Status   string
 	Result   *STHAnchorResult
-	Outbox   *model.STHAnchorOutboxItem
 }
 
 type AnchorPage struct {

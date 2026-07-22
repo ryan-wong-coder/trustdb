@@ -130,6 +130,16 @@ func NewReader(store Store) (*Service, error) {
 	}, nil
 }
 
+// StreamIdentity returns the signer identity for newly created Signed Tree
+// Heads. Durable outbox workers use it to reject a mismatched anchor schedule
+// before an append can create an STH for the wrong stream.
+func (s *Service) StreamIdentity() (string, string) {
+	if s == nil {
+		return "", ""
+	}
+	return s.nodeID, s.logID
+}
+
 func (s *Service) AppendBatchRoot(ctx context.Context, root model.BatchRoot) (model.SignedTreeHead, error) {
 	sths, err := s.AppendBatchRoots(ctx, []model.BatchRoot{root})
 	if err != nil {
@@ -186,15 +196,33 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 	sths := make([]model.SignedTreeHead, len(roots))
 	appends := make([]model.GlobalLogAppend, 0, len(roots))
 	planned := make(map[string]model.SignedTreeHead, len(roots))
+	plannedRoots := make(map[string]model.BatchRoot, len(roots))
 	for i := range roots {
 		root := roots[i]
+		root.NodeID = strings.TrimSpace(root.NodeID)
+		if root.NodeID == "" {
+			root.NodeID = s.nodeID
+		}
+		root.LogID = strings.TrimSpace(root.LogID)
+		if root.LogID == "" {
+			root.LogID = s.logID
+		}
+		if root.NodeID != s.nodeID || root.LogID != s.logID {
+			return nil, false, trusterr.New(trusterr.CodeInvalidArgument, "global log batch root identity does not match signer stream")
+		}
 		if sth, ok := planned[root.BatchID]; ok {
+			if err := validateGlobalLogReplayRoot(plannedRoots[root.BatchID], root); err != nil {
+				return nil, false, err
+			}
 			sths[i] = sth
 			continue
 		}
 		if existing, ok, err := s.store.GetGlobalLeafByBatchID(ctx, root.BatchID); err != nil {
 			return nil, false, err
 		} else if ok {
+			if err := validateGlobalLogReplayLeaf(existing, root); err != nil {
+				return nil, false, err
+			}
 			sth, found, err := s.store.GetSignedTreeHead(ctx, existing.LeafIndex+1)
 			if err != nil {
 				return nil, false, err
@@ -202,22 +230,18 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 			if !found {
 				return nil, false, trusterr.New(trusterr.CodeDataLoss, "global log leaf exists without matching signed tree head")
 			}
+			if sth.NodeID != s.nodeID || sth.LogID != s.logID {
+				return nil, false, trusterr.New(trusterr.CodeDataLoss, "global log replay signed tree head identity does not match signer stream")
+			}
 			sths[i] = sth
 			planned[root.BatchID] = sth
+			plannedRoots[root.BatchID] = root
 			continue
-		}
-		nodeID := strings.TrimSpace(root.NodeID)
-		if nodeID == "" {
-			nodeID = s.nodeID
-		}
-		logID := strings.TrimSpace(root.LogID)
-		if logID == "" {
-			logID = s.logID
 		}
 		leaf := model.GlobalLogLeaf{
 			SchemaVersion:      model.SchemaGlobalLogLeaf,
-			NodeID:             nodeID,
-			LogID:              logID,
+			NodeID:             root.NodeID,
+			LogID:              root.LogID,
 			BatchID:            root.BatchID,
 			BatchRoot:          append([]byte(nil), root.BatchRoot...),
 			BatchTreeSize:      root.TreeSize,
@@ -242,6 +266,7 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 		state = nextState
 		sths[i] = sth
 		planned[root.BatchID] = sth
+		plannedRoots[root.BatchID] = root
 	}
 	if len(appends) > 0 {
 		if store, ok := s.store.(BatchAppendStore); ok {
@@ -257,6 +282,30 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 		}
 	}
 	return sths, false, nil
+}
+
+func validateGlobalLogReplayRoot(existing, incoming model.BatchRoot) error {
+	if existing.BatchID != incoming.BatchID ||
+		existing.NodeID != incoming.NodeID ||
+		existing.LogID != incoming.LogID ||
+		existing.TreeSize != incoming.TreeSize ||
+		existing.ClosedAtUnixN != incoming.ClosedAtUnixN ||
+		!bytes.Equal(existing.BatchRoot, incoming.BatchRoot) {
+		return trusterr.New(trusterr.CodeDataLoss, "global log batch_id replay does not match the original batch root")
+	}
+	return nil
+}
+
+func validateGlobalLogReplayLeaf(existing model.GlobalLogLeaf, incoming model.BatchRoot) error {
+	if existing.BatchID != incoming.BatchID ||
+		existing.NodeID != incoming.NodeID ||
+		existing.LogID != incoming.LogID ||
+		existing.BatchTreeSize != incoming.TreeSize ||
+		existing.BatchClosedAtUnixN != incoming.ClosedAtUnixN ||
+		!bytes.Equal(existing.BatchRoot, incoming.BatchRoot) {
+		return trusterr.New(trusterr.CodeDataLoss, "global log batch_id conflicts with the durable leaf")
+	}
+	return nil
 }
 
 func (s *Service) LatestSTH(ctx context.Context) (model.SignedTreeHead, bool, error) {

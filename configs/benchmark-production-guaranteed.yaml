@@ -45,7 +45,6 @@ anchor:
   scope: "global"
   max_delay: "5m"
   poll_interval: "250ms"
-  workers: 4
   sink: "ots"
   ots:
     calendars: []

@@ -388,18 +388,14 @@ func (s *Server) GetAnchor(ctx context.Context, req *GetAnchorRequest) (*GetAnch
 	if req.TreeSize == 0 {
 		return nil, toStatusError(trusterr.New(trusterr.CodeInvalidArgument, "tree_size must be a positive integer"))
 	}
-	item, itemOK, err := s.Anchors.AnchorStatus(ctx, req.TreeSize)
+	result, ok, err := s.Anchors.AnchorResult(ctx, req.TreeSize)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
-	result, resultOK, err := s.Anchors.AnchorResult(ctx, req.TreeSize)
-	if err != nil {
-		return nil, toStatusError(err)
-	}
-	if !itemOK && !resultOK {
+	if !ok {
 		return nil, toStatusError(trusterr.New(trusterr.CodeNotFound, "anchor not found for STH"))
 	}
-	return anchorEnvelopeResponse(req.TreeSize, item, itemOK, result, resultOK), nil
+	return anchorEnvelopeResponse(result), nil
 }
 
 func (s *Server) ListAnchors(ctx context.Context, req *ListAnchorsRequest) (*ListAnchorsResponse, error) {
@@ -418,27 +414,25 @@ func (s *Server) ListAnchors(ctx context.Context, req *ListAnchorsRequest) (*Lis
 		return nil, toStatusError(trusterr.New(trusterr.CodeInvalidArgument, "limit must be between 1 and 1000"))
 	}
 	if req.Cursor != "" {
-		cursor, err := decodeUint64Cursor(req.Cursor)
+		cursor, err := decodeAnchorCursor(req.Cursor)
 		if err != nil {
 			return nil, toStatusError(err)
 		}
-		opts.AfterTreeSize = cursor.Value
+		opts.AfterResultKey = cursor.resultKey()
+		opts.HasAfter = true
 	}
 	items, err := s.Anchors.Anchors(ctx, opts)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 	anchors := make([]GetAnchorResponse, 0, len(items))
-	for _, item := range items {
-		result, resultOK, err := s.Anchors.AnchorResult(ctx, item.TreeSize)
-		if err != nil {
-			return nil, toStatusError(err)
-		}
-		anchors = append(anchors, *anchorEnvelopeResponse(item.TreeSize, item, true, result, resultOK))
+	for _, result := range items {
+		anchors = append(anchors, *anchorEnvelopeResponse(result))
 	}
 	next := ""
 	if len(items) == opts.Limit {
-		next = encodeUint64Cursor(items[len(items)-1].TreeSize)
+		last := items[len(items)-1]
+		next = encodeAnchorCursor(model.STHAnchorResultKey{NodeID: last.NodeID, LogID: last.LogID, SinkName: last.SinkName, TreeSize: last.TreeSize})
 	}
 	return &ListAnchorsResponse{Anchors: anchors, Limit: opts.Limit, Direction: opts.Direction, NextCursor: next}, nil
 }
@@ -598,6 +592,13 @@ type uint64Cursor struct {
 	Value uint64 `json:"v"`
 }
 
+type anchorCursor struct {
+	TreeSize uint64 `json:"t"`
+	NodeID   string `json:"n,omitempty"`
+	LogID    string `json:"l,omitempty"`
+	SinkName string `json:"s"`
+}
+
 func encodeUint64Cursor(value uint64) string {
 	data, err := json.Marshal(uint64Cursor{Value: value})
 	if err != nil {
@@ -618,6 +619,30 @@ func decodeUint64Cursor(raw string) (uint64Cursor, error) {
 	return cursor, nil
 }
 
+func encodeAnchorCursor(key model.STHAnchorResultKey) string {
+	data, err := json.Marshal(anchorCursor{TreeSize: key.TreeSize, NodeID: key.NodeID, LogID: key.LogID, SinkName: key.SinkName})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeAnchorCursor(raw string) (anchorCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return anchorCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	var cursor anchorCursor
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.TreeSize == 0 || cursor.SinkName == "" {
+		return anchorCursor{}, trusterr.New(trusterr.CodeInvalidArgument, "cursor is invalid")
+	}
+	return cursor, nil
+}
+
+func (c anchorCursor) resultKey() model.STHAnchorResultKey {
+	return model.STHAnchorResultKey{NodeID: c.NodeID, LogID: c.LogID, SinkName: c.SinkName, TreeSize: c.TreeSize}
+}
+
 func parseDirection(raw string) (string, error) {
 	switch raw {
 	case "":
@@ -629,21 +654,11 @@ func parseDirection(raw string) (string, error) {
 	}
 }
 
-func anchorEnvelopeResponse(treeSize uint64, item model.STHAnchorOutboxItem, itemOK bool, result model.STHAnchorResult, resultOK bool) *GetAnchorResponse {
-	resp := &GetAnchorResponse{TreeSize: treeSize, ProofLevel: prooflevel.L5.String()}
-	switch {
-	case resultOK:
-		resp.Status = model.AnchorStatePublished
-		resp.Result = &result
-	case itemOK:
-		resp.Status = item.Status
-	default:
-		resp.Status = "unknown"
+func anchorEnvelopeResponse(result model.STHAnchorResult) *GetAnchorResponse {
+	return &GetAnchorResponse{
+		TreeSize: result.TreeSize, Status: model.AnchorStatePublished,
+		ProofLevel: prooflevel.L5.String(), Result: &result,
 	}
-	if itemOK {
-		resp.Outbox = &item
-	}
-	return resp
 }
 
 func toStatusError(err error) error {

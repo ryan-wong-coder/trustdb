@@ -58,6 +58,12 @@ func TestDefaultYAMLIsStructured(t *testing.T) {
 	if !strings.Contains(DefaultYAML, `poll_interval: "2s"`) {
 		t.Fatal("default yaml missing anchor.poll_interval")
 	}
+	if strings.Contains(DefaultYAML, "  poll_interval: \"2s\"\n  workers:") {
+		t.Fatal("default yaml still exposes removed anchor.workers")
+	}
+	if Default().Anchor.MaxDelay != "5m" {
+		t.Fatalf("default anchor.max_delay = %q, want 5m", Default().Anchor.MaxDelay)
+	}
 	if Default().Server.ReadHeaderTimeout != "5s" {
 		t.Fatalf("default server.read_header_timeout = %q, want 5s", Default().Server.ReadHeaderTimeout)
 	}
@@ -70,6 +76,9 @@ func TestFromViperDefaultsMissingAnchorPollInterval(t *testing.T) {
 	t.Parallel()
 
 	cfg := FromViper(viper.New())
+	if cfg.Anchor.MaxDelay != "5m" {
+		t.Fatalf("anchor.max_delay = %q, want 5m", cfg.Anchor.MaxDelay)
+	}
 	if cfg.Anchor.PollInterval != "2s" {
 		t.Fatalf("anchor.poll_interval = %q, want 2s", cfg.Anchor.PollInterval)
 	}
