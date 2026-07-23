@@ -2,12 +2,12 @@ package merkle
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -16,10 +16,11 @@ const maxLeafBufferCapacity = 1 << 20
 var leafBufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 type Tree struct {
-	leafHashes [][sha256.Size]byte
-	root       [sha256.Size]byte
+	profile    Profile
+	leafHashes []digest
+	root       digest
 	nodeIndex  map[nodeRange]int
-	nodeHashes [][sha256.Size]byte
+	nodeHashes []digest
 }
 
 type Leaf struct {
@@ -38,41 +39,57 @@ type CompactNode struct {
 	Level      uint64
 	StartIndex uint64
 	Width      uint64
-	Hash       [sha256.Size]byte
+	Hash       [DigestSize]byte
 }
 
 func Build(records []model.ServerRecord) (Tree, error) {
+	return BuildForSuite(cryptosuite.INTLV1, cryptosuite.MerkleRFC6962SHA256, records)
+}
+
+func BuildForSuite(suiteID cryptosuite.ID, treeAlgorithm string, records []model.ServerRecord) (Tree, error) {
+	profile, err := ProfileForAlgorithm(suiteID, treeAlgorithm)
+	if err != nil {
+		return Tree{}, err
+	}
 	if len(records) == 0 {
 		return Tree{}, errors.New("merkle: cannot build empty tree")
 	}
-	leaves := make([][sha256.Size]byte, len(records))
+	leaves := make([]digest, len(records))
 	for i := range records {
-		leaf, err := hashLeafArray(&records[i])
+		leaf, err := hashLeafArray(profile, &records[i])
 		if err != nil {
 			return Tree{}, fmt.Errorf("merkle: hash leaf %d: %w", i, err)
 		}
 		leaves[i] = leaf
 	}
-	return buildFromLeafHashes(leaves), nil
+	return buildFromLeafHashes(profile, leaves), nil
 }
 
 func HashLeaf(record model.ServerRecord) ([]byte, error) {
-	leaf, err := hashLeafArray(&record)
+	return HashLeafForSuite(cryptosuite.INTLV1, cryptosuite.MerkleRFC6962SHA256, record)
+}
+
+func HashLeafForSuite(suiteID cryptosuite.ID, treeAlgorithm string, record model.ServerRecord) ([]byte, error) {
+	profile, err := ProfileForAlgorithm(suiteID, treeAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+	leaf, err := hashLeafArray(profile, &record)
 	if err != nil {
 		return nil, err
 	}
 	return cloneHash(leaf), nil
 }
 
-func hashLeafArray(record *model.ServerRecord) ([sha256.Size]byte, error) {
+func hashLeafArray(profile Profile, record *model.ServerRecord) (digest, error) {
 	buf := leafBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	buf.WriteByte(0)
+	buf.WriteByte(profile.leafPrefix)
 	if err := cborx.MarshalBuffer(buf, record); err != nil {
 		releaseLeafBuffer(buf)
-		return [sha256.Size]byte{}, err
+		return digest{}, err
 	}
-	out := sha256.Sum256(buf.Bytes())
+	out := profile.hashBytes(buf.Bytes())
 	releaseLeafBuffer(buf)
 	return out, nil
 }
@@ -86,37 +103,56 @@ func releaseLeafBuffer(buf *bytes.Buffer) {
 }
 
 func RootFromLeaves(leaves [][]byte) ([]byte, error) {
+	return RootFromLeavesForSuite(cryptosuite.INTLV1, cryptosuite.MerkleRFC6962SHA256, leaves)
+}
+
+func RootFromLeavesForSuite(suiteID cryptosuite.ID, treeAlgorithm string, leaves [][]byte) ([]byte, error) {
+	profile, err := ProfileForAlgorithm(suiteID, treeAlgorithm)
+	if err != nil {
+		return nil, err
+	}
 	if len(leaves) == 0 {
 		return nil, errors.New("merkle: empty leaves")
 	}
-	copied := make([][sha256.Size]byte, len(leaves))
+	copied := make([]digest, len(leaves))
 	for i := range leaves {
-		if len(leaves[i]) != sha256.Size {
+		if len(leaves[i]) != profile.Size() {
 			return nil, fmt.Errorf("merkle: leaf %d has size %d", i, len(leaves[i]))
 		}
 		copy(copied[i][:], leaves[i])
 	}
-	tree := buildFromLeafHashes(copied)
+	tree := buildFromLeafHashes(profile, copied)
 	return tree.Root(), nil
 }
 
 func AuditPathFromLeaves(leaves [][]byte, index uint64) ([][]byte, error) {
+	return AuditPathFromLeavesForSuite(cryptosuite.INTLV1, cryptosuite.MerkleRFC6962SHA256, leaves, index)
+}
+
+func AuditPathFromLeavesForSuite(suiteID cryptosuite.ID, treeAlgorithm string, leaves [][]byte, index uint64) ([][]byte, error) {
+	profile, err := ProfileForAlgorithm(suiteID, treeAlgorithm)
+	if err != nil {
+		return nil, err
+	}
 	if len(leaves) == 0 {
 		return nil, errors.New("merkle: empty leaves")
 	}
 	if index >= uint64(len(leaves)) {
 		return nil, fmt.Errorf("merkle: leaf index out of range: %d", index)
 	}
-	copied := make([][sha256.Size]byte, len(leaves))
+	copied := make([]digest, len(leaves))
 	for i := range leaves {
-		if len(leaves[i]) != sha256.Size {
+		if len(leaves[i]) != profile.Size() {
 			return nil, fmt.Errorf("merkle: leaf %d has size %d", i, len(leaves[i]))
 		}
 		copy(copied[i][:], leaves[i])
 	}
-	tree := buildFromLeafHashes(copied)
+	tree := buildFromLeafHashes(profile, copied)
 	return tree.Proof(int(index))
 }
+
+func (t Tree) Suite() cryptosuite.ID { return t.profile.Suite() }
+func (t Tree) Algorithm() string     { return t.profile.Algorithm() }
 
 func (t Tree) Root() []byte {
 	return cloneHash(t.root)
@@ -136,7 +172,7 @@ func (t Tree) LeafHashView(index int) ([]byte, error) {
 	return t.leafHashes[index][:], nil
 }
 
-func (t Tree) CompactLeaves() [][sha256.Size]byte {
+func (t Tree) CompactLeaves() [][DigestSize]byte {
 	return t.leafHashes
 }
 
@@ -219,11 +255,23 @@ func (t Tree) ProofView(index int) ([][]byte, error) {
 }
 
 func Verify(leafHash []byte, index, treeSize uint64, auditPath [][]byte, root []byte) bool {
-	if len(leafHash) != sha256.Size || len(root) != sha256.Size || treeSize == 0 || index >= treeSize {
+	return verifyWithProfile(defaultProfile, leafHash, index, treeSize, auditPath, root)
+}
+
+func VerifyForSuite(suiteID cryptosuite.ID, treeAlgorithm string, leafHash []byte, index, treeSize uint64, auditPath [][]byte, root []byte) (bool, error) {
+	profile, err := ProfileForAlgorithm(suiteID, treeAlgorithm)
+	if err != nil {
+		return false, err
+	}
+	return verifyWithProfile(profile, leafHash, index, treeSize, auditPath, root), nil
+}
+
+func verifyWithProfile(profile Profile, leafHash []byte, index, treeSize uint64, auditPath [][]byte, root []byte) bool {
+	if len(leafHash) != profile.Size() || len(root) != profile.Size() || treeSize == 0 || index >= treeSize {
 		return false
 	}
 	pos := 0
-	got, ok := rebuild(leafHash, int(index), int(treeSize), auditPath, &pos)
+	got, ok := rebuild(profile, leafHash, int(index), int(treeSize), auditPath, &pos)
 	if !ok || pos != len(auditPath) {
 		return false
 	}
@@ -231,15 +279,23 @@ func Verify(leafHash []byte, index, treeSize uint64, auditPath [][]byte, root []
 }
 
 func HashNode(left, right []byte) ([]byte, error) {
-	if len(left) != sha256.Size {
+	return HashNodeForSuite(cryptosuite.INTLV1, cryptosuite.MerkleRFC6962SHA256, left, right)
+}
+
+func HashNodeForSuite(suiteID cryptosuite.ID, treeAlgorithm string, left, right []byte) ([]byte, error) {
+	profile, err := ProfileForAlgorithm(suiteID, treeAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+	if len(left) != profile.Size() {
 		return nil, fmt.Errorf("merkle: left node has size %d", len(left))
 	}
-	if len(right) != sha256.Size {
+	if len(right) != profile.Size() {
 		return nil, fmt.Errorf("merkle: right node has size %d", len(right))
 	}
 	leftHash := bytesToHash(left)
 	rightHash := bytesToHash(right)
-	node := hashNode(leftHash, rightHash)
+	node := hashNode(profile, leftHash, rightHash)
 	return cloneHash(node), nil
 }
 
@@ -248,36 +304,36 @@ type nodeRange struct {
 	size  int
 }
 
-func buildFromLeafHashes(leaves [][sha256.Size]byte) Tree {
+func buildFromLeafHashes(profile Profile, leaves []digest) Tree {
 	nodeIndex := make(map[nodeRange]int, len(leaves)*2)
-	nodeHashes := make([][sha256.Size]byte, 0, len(leaves)*2)
-	root := buildRange(leaves, nodeIndex, &nodeHashes, 0, len(leaves))
-	return Tree{leafHashes: leaves, root: root, nodeIndex: nodeIndex, nodeHashes: nodeHashes}
+	nodeHashes := make([]digest, 0, len(leaves)*2)
+	root := buildRange(profile, leaves, nodeIndex, &nodeHashes, 0, len(leaves))
+	return Tree{profile: profile, leafHashes: leaves, root: root, nodeIndex: nodeIndex, nodeHashes: nodeHashes}
 }
 
-func buildRange(leaves [][sha256.Size]byte, nodeIndex map[nodeRange]int, nodeHashes *[][sha256.Size]byte, start, size int) [sha256.Size]byte {
+func buildRange(profile Profile, leaves []digest, nodeIndex map[nodeRange]int, nodeHashes *[]digest, start, size int) digest {
 	key := nodeRange{start: start, size: size}
-	var out [sha256.Size]byte
+	var out digest
 	if size == 1 {
 		out = leaves[start]
 	} else {
 		k := largestPowerOfTwoLessThan(size)
-		left := buildRange(leaves, nodeIndex, nodeHashes, start, k)
-		right := buildRange(leaves, nodeIndex, nodeHashes, start+k, size-k)
-		out = hashNode(left, right)
+		left := buildRange(profile, leaves, nodeIndex, nodeHashes, start, k)
+		right := buildRange(profile, leaves, nodeIndex, nodeHashes, start+k, size-k)
+		out = hashNode(profile, left, right)
 	}
 	nodeIndex[key] = len(*nodeHashes)
 	*nodeHashes = append(*nodeHashes, out)
 	return out
 }
 
-func (t Tree) auditPath(index int) [][sha256.Size]byte {
-	path := make([][sha256.Size]byte, 0, merklePathLen(len(t.leafHashes)))
+func (t Tree) auditPath(index int) []digest {
+	path := make([]digest, 0, merklePathLen(len(t.leafHashes)))
 	t.appendAuditPath(&path, 0, len(t.leafHashes), index)
 	return path
 }
 
-func (t Tree) appendAuditPath(path *[][sha256.Size]byte, start, size, index int) {
+func (t Tree) appendAuditPath(path *[]digest, start, size, index int) {
 	if size == 1 {
 		return
 	}
@@ -305,51 +361,51 @@ func (t Tree) appendAuditPathRanges(path *[]nodeRange, start, size, index int) {
 	*path = append(*path, nodeRange{start: start, size: k})
 }
 
-func rebuild(leafHash []byte, index, treeSize int, path [][]byte, pos *int) ([sha256.Size]byte, bool) {
+func rebuild(profile Profile, leafHash []byte, index, treeSize int, path [][]byte, pos *int) (digest, bool) {
 	if treeSize == 1 {
 		return bytesToHash(leafHash), true
 	}
 	k := largestPowerOfTwoLessThan(treeSize)
 	if index < k {
-		left, ok := rebuild(leafHash, index, k, path, pos)
+		left, ok := rebuild(profile, leafHash, index, k, path, pos)
 		if !ok || *pos >= len(path) {
-			return [sha256.Size]byte{}, false
+			return digest{}, false
 		}
 		right := path[*pos]
 		*pos = *pos + 1
-		if len(right) != sha256.Size {
-			return [sha256.Size]byte{}, false
+		if len(right) != profile.Size() {
+			return digest{}, false
 		}
-		return hashNode(left, bytesToHash(right)), true
+		return hashNode(profile, left, bytesToHash(right)), true
 	}
-	right, ok := rebuild(leafHash, index-k, treeSize-k, path, pos)
+	right, ok := rebuild(profile, leafHash, index-k, treeSize-k, path, pos)
 	if !ok || *pos >= len(path) {
-		return [sha256.Size]byte{}, false
+		return digest{}, false
 	}
 	left := path[*pos]
 	*pos = *pos + 1
-	if len(left) != sha256.Size {
-		return [sha256.Size]byte{}, false
+	if len(left) != profile.Size() {
+		return digest{}, false
 	}
-	return hashNode(bytesToHash(left), right), true
+	return hashNode(profile, bytesToHash(left), right), true
 }
 
-func hashNode(left, right [sha256.Size]byte) [sha256.Size]byte {
-	var buf [1 + sha256.Size*2]byte
-	buf[0] = 1
-	copy(buf[1:1+sha256.Size], left[:])
-	copy(buf[1+sha256.Size:], right[:])
-	return sha256.Sum256(buf[:])
+func hashNode(profile Profile, left, right digest) digest {
+	var buf [1 + DigestSize*2]byte
+	buf[0] = profile.nodePrefix
+	copy(buf[1:1+DigestSize], left[:])
+	copy(buf[1+DigestSize:], right[:])
+	return profile.hashBytes(buf[:])
 }
 
-func bytesToHash(in []byte) [sha256.Size]byte {
-	var out [sha256.Size]byte
+func bytesToHash(in []byte) digest {
+	var out digest
 	copy(out[:], in)
 	return out
 }
 
-func cloneHash(in [sha256.Size]byte) []byte {
-	out := make([]byte, sha256.Size)
+func cloneHash(in digest) []byte {
+	out := make([]byte, DigestSize)
 	copy(out, in[:])
 	return out
 }
