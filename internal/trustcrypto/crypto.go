@@ -41,11 +41,11 @@ func HashBytes(alg string, data []byte) ([]byte, error) {
 }
 
 func HashBytesForSuite(suiteID cryptosuite.ID, alg string, data []byte) ([]byte, error) {
-	provider, err := ProviderForSuite(suiteID)
+	factory, err := HashFactoryForSuite(suiteID, alg)
 	if err != nil {
 		return nil, err
 	}
-	return HashBytesWithProvider(provider, alg, data)
+	return factory.Sum(data), nil
 }
 
 func HashBytesWithProvider(provider Provider, alg string, data []byte) ([]byte, error) {
@@ -64,11 +64,11 @@ func HashReader(alg string, r io.Reader) (sum []byte, bytesRead int64, err error
 }
 
 func HashReaderForSuite(suiteID cryptosuite.ID, alg string, r io.Reader) (sum []byte, bytesRead int64, err error) {
-	provider, err := ProviderForSuite(suiteID)
+	factory, err := HashFactoryForSuite(suiteID, alg)
 	if err != nil {
 		return nil, 0, err
 	}
-	return HashReaderWithProvider(provider, alg, r)
+	return hashReader(factory, r)
 }
 
 func HashReaderWithProvider(provider Provider, alg string, r io.Reader) (sum []byte, bytesRead int64, err error) {
@@ -78,6 +78,13 @@ func HashReaderWithProvider(provider Provider, alg string, r io.Reader) (sum []b
 	factory, err := provider.HashFactory(alg)
 	if err != nil {
 		return nil, 0, err
+	}
+	return hashReader(factory, r)
+}
+
+func hashReader(factory HashFactory, r io.Reader) (sum []byte, bytesRead int64, err error) {
+	if factory == nil {
+		return nil, 0, errors.New("hash factory is required")
 	}
 	h := factory.New()
 	n, err := io.Copy(h, r)
