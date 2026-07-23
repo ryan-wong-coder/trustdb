@@ -14,7 +14,7 @@ TrustDB 为 `CN_SM_V1` 实现 SM3 byte、fixed-width 和 streaming hash，并实
 
 `INTL_V1` 继续使用 `rfc6962-sha256`，旧 API 只是其薄包装；已有 leaf、root、proof、STH 和 idempotency key 字节保持不变。摘要同为 32 字节不构成兼容条件，suite 或 tree algorithm 不精确匹配时必须在计算 proof path 前拒绝。
 
-本 ADR 不启用 `CN_SM_V1` 生产 Provider，不生成 SM2 签名，也不把当前 V1 model 重新解释成国密证据。完整 CN 写入、V2/V5 对象传播和离线证据发布仍由 #448、#454 和 #455 完成。
+本 ADR 不启用 `CN_SM_V1` 生产 Provider，也不把当前 V1 model 重新解释成国密证据。#448 已由 [`ADR-0007`](ADR-0007-CANONICAL-SM2-SM3-SIGNATURES.zh-CN.md) 完成 canonical SM2-SM3 核心；完整 CN 写入、V2/V5 对象传播和离线证据发布仍由 #454 和 #455 完成。
 
 ## 2. 哈希注册表
 
@@ -110,7 +110,7 @@ SM3(
 
 ## 8. 后续边界
 
-- #448：SM2-SM3、固定 user ID、严格 DER 与 key validation；
+- #448：SM2-SM3、固定 user ID、严格 DER 与 key validation 已完成，见 [`ADR-0007`](ADR-0007-CANONICAL-SM2-SM3-SIGNATURES.zh-CN.md)；
 - #454：V2 Server 全链路显式传播 `crypto_suite`，启用 `CN_SM_V1` Provider，并将 proofstore suite marker 传入所有业务计算；
 - #455：`.sproof v2` 携带 suite、SM3 path、SM2 STH 和完整离线验证材料；
 - #456/#457：Go SDK、CLI 与 Desktop 使用同一 suite/tree registry；

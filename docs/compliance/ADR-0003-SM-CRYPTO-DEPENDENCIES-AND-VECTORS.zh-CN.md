@@ -123,9 +123,9 @@ canonical domain 是 `trustdb.sm4-envelope.v2`。向量的完整 AAD、nonce、p
 当前自动测试执行以下两层验证：
 
 1. 使用固定的 `emmansun/gmsm v0.44.0` 验证全部 SM2、SM3、SM4 和 SM4-GCM 向量。
-2. 若系统存在 `openssl`，使用独立 OpenSSL/LibreSSL 命令重新计算 SM3 与 SM4 单块结果；CI 的 Ubuntu runner 必须实际通过而不是依赖生产代码生成 expected bytes。
+2. 若系统存在 `openssl`，使用独立 OpenSSL/LibreSSL 命令重新计算 SM3 与 SM4 单块结果；Linux OpenSSL 3 还必须使用固定 `distid` 独立验证官方 SM2 签名。CI 的 Ubuntu runner 必须实际通过而不是依赖生产代码生成 expected bytes。
 
-SM2 标准签名取自标准参数并与 OpenSSL 上游测试源交叉核对。`CN_SM_V1` 从 `reserved` 变为 `available` 前，还必须增加至少一条可重复的 GmSSL 或 Tongsuo SM2/证书互操作 Gate，并覆盖：
+SM2 标准签名取自标准参数并与 OpenSSL 上游测试源交叉核对；TrustDB 的 canonical signer/verifier、strict DER/public-key validation 和 OpenSSL 3 oracle 已由 [`ADR-0007`](ADR-0007-CANONICAL-SM2-SM3-SIGNATURES.zh-CN.md) 实现。`CN_SM_V1` 从 `reserved` 变为 `available` 前，还必须增加至少一条可重复的 GmSSL 或 Tongsuo SM2/证书互操作 Gate，并覆盖：
 
 - canonical user ID、ZA、DER 编码；
 - 公钥/证书导入导出；

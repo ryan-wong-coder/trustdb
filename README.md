@@ -261,6 +261,7 @@ The screenshot below is rendered directly from the current desktop client code:
 - [docs/compliance/ADR-0004-PROVIDER-NEUTRAL-CRYPTO-CONTRACTS.zh-CN.md](docs/compliance/ADR-0004-PROVIDER-NEUTRAL-CRYPTO-CONTRACTS.zh-CN.md): suite-aware hashing, non-exportable key handles, signer/verifier contracts, and fail-closed provider rules (Chinese).
 - [docs/compliance/ADR-0005-IMMUTABLE-PROOFSTORE-SUITE-MARKERS.zh-CN.md](docs/compliance/ADR-0005-IMMUTABLE-PROOFSTORE-SUITE-MARKERS.zh-CN.md): immutable suite markers, atomic backend initialization, and backup/migration binding rules (Chinese).
 - [docs/compliance/ADR-0006-SM3-AND-RFC6962-MERKLE-PROFILES.zh-CN.md](docs/compliance/ADR-0006-SM3-AND-RFC6962-MERKLE-PROFILES.zh-CN.md): SM3 hashing, exact suite-bound RFC6962 Merkle profiles, cross-suite rejection, and performance contracts (Chinese).
+- [docs/compliance/ADR-0007-CANONICAL-SM2-SM3-SIGNATURES.zh-CN.md](docs/compliance/ADR-0007-CANONICAL-SM2-SM3-SIGNATURES.zh-CN.md): canonical SM2-SM3 signing, strict DER/public-key validation, fixed user ID, suite-bound signature inputs, and production enablement boundaries (Chinese).
 - [COMMUNITY.md](COMMUNITY.md): support, discussion, and first-contribution entry points.
 - [ROADMAP.md](ROADMAP.md): public product direction and ways to influence it.
 - [SECURITY.md](SECURITY.md): private vulnerability reporting and supported-version policy.
