@@ -111,6 +111,12 @@ func TestValidateRejectsInvalidEnabledNATSConfig(t *testing.T) {
 		{name: "invalid stream", mutate: func(n *NATS) { n.Stream = "trustdb.ingress" }, want: "nats.stream"},
 		{name: "wildcard subject", mutate: func(n *NATS) { n.Subject = "trustdb.ingress.*" }, want: "nats.subject"},
 		{name: "invalid durable", mutate: func(n *NATS) { n.Durable = "trustdb.ingress" }, want: "nats.durable"},
+		{name: "invalid storage", mutate: func(n *NATS) { n.StreamStorage = "disk" }, want: "nats.stream_storage"},
+		{name: "zero replicas", mutate: func(n *NATS) { n.StreamReplicas = 0 }, want: "nats.stream_replicas"},
+		{name: "too many replicas", mutate: func(n *NATS) { n.StreamReplicas = 6 }, want: "nats.stream_replicas"},
+		{name: "zero stream bytes", mutate: func(n *NATS) { n.StreamMaxBytes = 0 }, want: "nats.stream_max_bytes"},
+		{name: "negative max age", mutate: func(n *NATS) { n.StreamMaxAge = "-1s" }, want: "nats.stream_max_age"},
+		{name: "zero duplicate window", mutate: func(n *NATS) { n.DuplicateWindow = "0s" }, want: "nats.duplicate_window"},
 		{name: "negative workers", mutate: func(n *NATS) { n.Workers = -1 }, want: "nats.workers"},
 		{name: "zero fetch batch", mutate: func(n *NATS) { n.FetchBatch = 0 }, want: "nats.fetch_batch"},
 		{name: "fetch exceeds pending", mutate: func(n *NATS) { n.FetchBatch = n.MaxAckPending + 1 }, want: "must not exceed"},
@@ -144,6 +150,12 @@ func TestFromViperMapsNATSConfig(t *testing.T) {
 	v.Set("nats.stream", "INGRESS")
 	v.Set("nats.subject", "claims.ingress")
 	v.Set("nats.durable", "worker-a")
+	v.Set("nats.provision", true)
+	v.Set("nats.stream_storage", "memory")
+	v.Set("nats.stream_replicas", 3)
+	v.Set("nats.stream_max_bytes", int64(1<<30))
+	v.Set("nats.stream_max_age", "24h")
+	v.Set("nats.duplicate_window", "5m")
 	v.Set("nats.workers", 12)
 	v.Set("nats.fetch_batch", 128)
 	v.Set("nats.fetch_wait", "250ms")
@@ -165,6 +177,9 @@ func TestFromViperMapsNATSConfig(t *testing.T) {
 	}
 	if got.Stream != "INGRESS" || got.Subject != "claims.ingress" || got.Durable != "worker-a" || got.Workers != 12 {
 		t.Fatalf("NATS identity/config = %+v", got)
+	}
+	if !got.Provision || got.StreamStorage != "memory" || got.StreamReplicas != 3 || got.StreamMaxBytes != 1<<30 || got.StreamMaxAge != "24h" || got.DuplicateWindow != "5m" {
+		t.Fatalf("NATS topology = %+v", got)
 	}
 	if got.FetchBatch != 128 || got.MaxAckPending != 1024 || got.MaxDeliver != 20 || got.MaxReconnects != 50 {
 		t.Fatalf("NATS limits = %+v", got)

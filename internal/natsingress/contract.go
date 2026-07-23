@@ -1,6 +1,7 @@
 // Package natsingress defines TrustDB's transport-only JetStream ingress wire
-// contract. Broker correlation and routing metadata never participates in
-// claim, receipt, Merkle, STH, anchor, or offline-proof verification.
+// contract and optional broker bootstrap. Broker correlation and routing
+// metadata never participates in claim, receipt, Merkle, STH, anchor, or
+// offline-proof verification.
 package natsingress
 
 import (
