@@ -32,6 +32,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/l5coverage"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstoremeta"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -2554,8 +2555,12 @@ func (s *Store) ListPreparedManifests(ctx context.Context, nodeID string, nowUni
 	return manifests, nil
 }
 
-func idempotencyDecisionKey(identity model.IdempotencyIdentity) []byte {
-	return append([]byte(prefixIdempotency), idempotency.StorageKey(identity)...)
+func idempotencyDecisionKey(suiteID cryptosuite.ID, identity model.IdempotencyIdentity) ([]byte, error) {
+	storageKey, err := idempotency.StorageKeyForSuite(suiteID, identity)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(prefixIdempotency), storageKey...), nil
 }
 
 // EnsureIdempotencyProjection initializes the native TiKV point-read
@@ -2646,14 +2651,18 @@ func (s *Store) GetIdempotencyDecision(ctx context.Context, identity model.Idemp
 		return model.IdempotencyDecision{}, false, trusterr.New(trusterr.CodeFailedPrecondition, "idempotency projection is not ready")
 	}
 	var decision model.IdempotencyDecision
-	found, err := s.readCBOR(idempotencyDecisionKey(identity), &decision)
+	decisionKey, err := idempotencyDecisionKey(s.CryptoSuite(), identity)
+	if err != nil {
+		return model.IdempotencyDecision{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "derive idempotency decision key", err)
+	}
+	found, err := s.readCBOR(decisionKey, &decision)
 	if err != nil {
 		return model.IdempotencyDecision{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "read idempotency decision", err)
 	}
 	if !found {
 		return model.IdempotencyDecision{}, false, nil
 	}
-	if err := idempotency.ValidateDecision(identity, decision); err != nil {
+	if err := idempotency.ValidateDecisionForSuite(s.CryptoSuite(), identity, decision); err != nil {
 		return model.IdempotencyDecision{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "validate stored idempotency decision", err)
 	}
 	return decision, true, nil
@@ -2663,7 +2672,11 @@ func (s *Store) PublishCommittedBatch(ctx context.Context, manifest model.BatchM
 	if !s.idempotencyReady.Load() {
 		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "idempotency projection is not ready")
 	}
-	manifestData, decisions, encoded, err := prepareCommittedIdempotencyPublication(manifest, bundles)
+	provider, err := trustcrypto.ProviderForSuite(s.CryptoSuite())
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "create idempotency crypto provider", err)
+	}
+	manifestData, decisions, encoded, err := prepareCommittedIdempotencyPublication(provider, manifest, bundles)
 	if err != nil {
 		return nil, err
 	}
@@ -2689,7 +2702,11 @@ func (s *Store) PublishCommittedBatch(ctx context.Context, manifest model.BatchM
 	return decisions, nil
 }
 
-func prepareCommittedIdempotencyPublication(manifest model.BatchManifest, bundles []model.ProofBundle) ([]byte, []model.IdempotencyDecision, map[string][]byte, error) {
+func prepareCommittedIdempotencyPublication(provider trustcrypto.Provider, manifest model.BatchManifest, bundles []model.ProofBundle) ([]byte, []model.IdempotencyDecision, map[string][]byte, error) {
+	if provider == nil {
+		return nil, nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "idempotency crypto provider is required")
+	}
+	suiteID := provider.Suite()
 	if manifest.BatchID == "" || manifest.State != model.BatchStateCommitted {
 		return nil, nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "a committed batch manifest is required")
 	}
@@ -2728,14 +2745,17 @@ func prepareCommittedIdempotencyPublication(manifest model.BatchManifest, bundle
 		if bundle.SignedClaim.Claim.IdempotencyKey == "" {
 			continue
 		}
-		decision, err := idempotency.BuildDecision(manifest.BatchID, bundle.SignedClaim, bundle.ServerRecord, bundle.AcceptedReceipt)
+		decision, err := idempotency.BuildDecisionWithProvider(provider, manifest.BatchID, bundle.SignedClaim, bundle.ServerRecord, bundle.AcceptedReceipt)
 		if err != nil {
 			return nil, nil, nil, trusterr.Wrap(trusterr.CodeDataLoss, "build committed idempotency decision", err)
 		}
-		if err := idempotency.ValidateDecision(decision.Identity, decision); err != nil {
+		if err := idempotency.ValidateDecisionForSuite(suiteID, decision.Identity, decision); err != nil {
 			return nil, nil, nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "validate idempotency decision", err)
 		}
-		storageKey := idempotency.StorageKey(decision.Identity)
+		storageKey, err := idempotency.StorageKeyForSuite(suiteID, decision.Identity)
+		if err != nil {
+			return nil, nil, nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "derive idempotency storage key", err)
+		}
 		if prior, exists := seenIdentities[storageKey]; exists {
 			if !idempotency.Equivalent(prior, decision) {
 				return nil, nil, nil, trusterr.New(trusterr.CodeAlreadyExists, "idempotency identity has conflicting decisions")
@@ -2792,8 +2812,15 @@ func (s *Store) tryPublishCommittedBatch(ctx context.Context, manifest model.Bat
 		return err
 	}
 	for i := range decisions {
-		storageKey := idempotency.StorageKey(decisions[i].Identity)
-		physicalKey := s.db.physicalKey(idempotencyDecisionKey(decisions[i].Identity))
+		storageKey, err := idempotency.StorageKeyForSuite(s.CryptoSuite(), decisions[i].Identity)
+		if err != nil {
+			return err
+		}
+		decisionKey, err := idempotencyDecisionKey(s.CryptoSuite(), decisions[i].Identity)
+		if err != nil {
+			return err
+		}
+		physicalKey := s.db.physicalKey(decisionKey)
 		existingData, err := txn.Get(ctx, physicalKey)
 		switch {
 		case err == nil:

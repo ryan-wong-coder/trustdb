@@ -3,7 +3,6 @@ package verify
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -83,6 +82,10 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	if bundle.SchemaVersion != model.SchemaProofBundle {
 		return Result{}, fmt.Errorf("verify: unexpected proof bundle schema: %s", bundle.SchemaVersion)
 	}
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return Result{}, err
+	}
 	sum, n, err := trustcrypto.HashReaderWithProvider(provider, bundle.SignedClaim.Claim.Content.HashAlg, raw)
 	if err != nil {
 		return Result{}, err
@@ -109,20 +112,26 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	if err := receipt.VerifyCommittedWithProvider(context.Background(), bundle.CommittedReceipt, keys.ServerPublicKey, provider); err != nil {
 		return Result{}, err
 	}
-	leaf, err := merkle.HashLeaf(bundle.ServerRecord)
+	leaf, err := merkle.HashLeafForSuite(suite.ID, suite.Merkle.Algorithm, bundle.ServerRecord)
 	if err != nil {
 		return Result{}, err
 	}
 	if !bytes.Equal(leaf, bundle.CommittedReceipt.LeafHash) {
 		return Result{}, fmt.Errorf("verify: leaf hash mismatch")
 	}
-	if !merkle.Verify(
+	ok, err := merkle.VerifyForSuite(
+		suite.ID,
+		bundle.BatchProof.TreeAlg,
 		leaf,
 		bundle.BatchProof.LeafIndex,
 		bundle.BatchProof.TreeSize,
 		bundle.BatchProof.AuditPath,
 		bundle.CommittedReceipt.BatchRoot,
-	) {
+	)
+	if err != nil {
+		return Result{}, err
+	}
+	if !ok {
 		return Result{}, fmt.Errorf("verify: merkle proof failed")
 	}
 	evidence := prooflevel.EvidenceFor(prooflevel.L3)
@@ -205,7 +214,7 @@ func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified, p
 	if bundle.CommittedReceipt.LogID != "" && bundle.LogID != "" && bundle.CommittedReceipt.LogID != bundle.LogID {
 		return fmt.Errorf("verify: committed receipt log_id mismatch")
 	}
-	if bundle.BatchProof.TreeAlg != model.DefaultMerkleTreeAlg {
+	if bundle.BatchProof.TreeAlg != suite.Merkle.Algorithm {
 		return fmt.Errorf("verify: unsupported batch proof tree_alg: %s", bundle.BatchProof.TreeAlg)
 	}
 	if bundle.BatchProof.TreeSize == 0 || bundle.BatchProof.LeafIndex >= bundle.BatchProof.TreeSize {
@@ -229,20 +238,27 @@ func GlobalLogConsistency(bundle model.ProofBundle, proof model.GlobalLogProof) 
 }
 
 func globalLogConsistencyWithProvider(bundle model.ProofBundle, proof model.GlobalLogProof, provider trustcrypto.Provider) error {
+	if provider == nil {
+		return fmt.Errorf("verify: crypto provider is required")
+	}
 	if proof.SchemaVersion != model.SchemaGlobalLogProof {
 		return fmt.Errorf("verify: unexpected global log proof schema: %s", proof.SchemaVersion)
 	}
 	if proof.STH.SchemaVersion != model.SchemaSignedTreeHead {
 		return fmt.Errorf("verify: unexpected STH schema: %s", proof.STH.SchemaVersion)
 	}
-	if proof.STH.TreeAlg != model.DefaultMerkleTreeAlg {
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return err
+	}
+	if proof.STH.TreeAlg != suite.Merkle.Algorithm {
 		return fmt.Errorf("verify: unsupported STH tree_alg: %s", proof.STH.TreeAlg)
 	}
 	if proof.TreeSize != proof.STH.TreeSize {
 		return fmt.Errorf("verify: global proof tree_size mismatch: proof=%d sth=%d", proof.TreeSize, proof.STH.TreeSize)
 	}
-	if len(proof.STH.RootHash) != sha256.Size {
-		return fmt.Errorf("verify: STH root_hash must be sha256")
+	if len(proof.STH.RootHash) != suite.Merkle.Hash.DigestBytes {
+		return fmt.Errorf("verify: STH root_hash has length %d, want %d", len(proof.STH.RootHash), suite.Merkle.Hash.DigestBytes)
 	}
 	if proof.BatchID != bundle.CommittedReceipt.BatchID {
 		return fmt.Errorf("verify: global proof batch_id mismatch: proof=%s bundle=%s", proof.BatchID, bundle.CommittedReceipt.BatchID)
@@ -259,7 +275,7 @@ func globalLogConsistencyWithProvider(bundle model.ProofBundle, proof model.Glob
 	if proof.STH.LogID != "" && proof.LogID != "" && proof.STH.LogID != proof.LogID {
 		return fmt.Errorf("verify: global proof STH log_id mismatch: proof=%s sth=%s", proof.LogID, proof.STH.LogID)
 	}
-	if !globallog.VerifyInclusion(proof) {
+	if !globallog.VerifyInclusionWithProvider(provider, proof) {
 		return fmt.Errorf("verify: global log inclusion proof failed")
 	}
 	leaf := model.GlobalLogLeaf{

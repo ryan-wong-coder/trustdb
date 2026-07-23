@@ -31,6 +31,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/l5coverage"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstoremeta"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -315,8 +316,12 @@ const (
 	idempotencyDecisionPageSize = 256
 )
 
-func idempotencyDecisionKey(identity model.IdempotencyIdentity) []byte {
-	return append([]byte(prefixIdempotency), idempotency.StorageKey(identity)...)
+func idempotencyDecisionKey(suiteID cryptosuite.ID, identity model.IdempotencyIdentity) ([]byte, error) {
+	storageKey, err := idempotency.StorageKeyForSuite(suiteID, identity)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(prefixIdempotency), storageKey...), nil
 }
 
 func (s *Store) projectionReadyOnDisk() (bool, error) {
@@ -418,6 +423,10 @@ func (s *Store) EnsureIdempotencyProjection(ctx context.Context) error {
 }
 
 func (s *Store) rebuildManifestIdempotency(ctx context.Context, manifest model.BatchManifest) error {
+	provider, err := trustcrypto.ProviderForSuite(s.CryptoSuite())
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeFailedPrecondition, "create idempotency crypto provider", err)
+	}
 	for start := 0; start < len(manifest.RecordIDs); start += idempotencyDecisionPageSize {
 		end := start + idempotencyDecisionPageSize
 		if end > len(manifest.RecordIDs) {
@@ -441,7 +450,8 @@ func (s *Store) rebuildManifestIdempotency(ctx context.Context, manifest model.B
 			if bundle.ServerRecord.RecordID != recordID {
 				return trusterr.New(trusterr.CodeDataLoss, "committed bundle server record does not match manifest record")
 			}
-			decision, err := idempotency.BuildDecision(
+			decision, err := idempotency.BuildDecisionWithProvider(
+				provider,
 				manifest.BatchID,
 				bundle.SignedClaim,
 				bundle.ServerRecord,
@@ -467,7 +477,10 @@ func (s *Store) writeIdempotencyDecisionPage(decisions []model.IdempotencyDecisi
 	defer batch.Close()
 	seen := make(map[string]model.IdempotencyDecision, len(decisions))
 	for i := range decisions {
-		storageKey := idempotency.StorageKey(decisions[i].Identity)
+		storageKey, err := idempotency.StorageKeyForSuite(s.CryptoSuite(), decisions[i].Identity)
+		if err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "derive rebuilt idempotency storage key", err)
+		}
 		if prior, ok := seen[storageKey]; ok {
 			if !idempotency.Equivalent(prior, decisions[i]) {
 				return trusterr.New(trusterr.CodeDataLoss, "conflicting idempotency decisions in committed history")
@@ -476,7 +489,11 @@ func (s *Store) writeIdempotencyDecisionPage(decisions []model.IdempotencyDecisi
 		}
 		seen[storageKey] = decisions[i]
 		var existing model.IdempotencyDecision
-		found, err := s.readCBOR(idempotencyDecisionKey(decisions[i].Identity), &existing)
+		decisionKey, err := idempotencyDecisionKey(s.CryptoSuite(), decisions[i].Identity)
+		if err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, "derive rebuilt idempotency decision key", err)
+		}
+		found, err := s.readCBOR(decisionKey, &existing)
 		if err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "read rebuilt idempotency decision", err)
 		}
@@ -490,7 +507,7 @@ func (s *Store) writeIdempotencyDecisionPage(decisions []model.IdempotencyDecisi
 		if err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "encode rebuilt idempotency decision", err)
 		}
-		if err := stageSet(batch, idempotencyDecisionKey(decisions[i].Identity), data); err != nil {
+		if err := stageSet(batch, decisionKey, data); err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "stage rebuilt idempotency decision", err)
 		}
 	}
@@ -2111,6 +2128,10 @@ func (s *Store) PublishCommittedBatch(ctx context.Context, manifest model.BatchM
 	if manifest.SchemaVersion == "" {
 		manifest.SchemaVersion = model.SchemaBatchManifest
 	}
+	provider, err := trustcrypto.ProviderForSuite(s.CryptoSuite())
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "create idempotency crypto provider", err)
+	}
 	manifestData, err := cborx.Marshal(manifest)
 	if err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "encode committed batch manifest", err)
@@ -2145,7 +2166,8 @@ func (s *Store) PublishCommittedBatch(ctx context.Context, manifest model.BatchM
 		if bundles[i].SignedClaim.Claim.IdempotencyKey == "" {
 			continue
 		}
-		decision, err := idempotency.BuildDecision(
+		decision, err := idempotency.BuildDecisionWithProvider(
+			provider,
 			manifest.BatchID,
 			bundles[i].SignedClaim,
 			bundles[i].ServerRecord,
@@ -2170,10 +2192,13 @@ func (s *Store) PublishCommittedBatch(ctx context.Context, manifest model.BatchM
 			return nil, trusterr.New(trusterr.CodeInvalidArgument, "duplicate idempotency decision record")
 		}
 		decisionRecords[decisions[i].Record.RecordID] = struct{}{}
-		if err := idempotency.ValidateDecision(decisions[i].Identity, decisions[i]); err != nil {
+		if err := idempotency.ValidateDecisionForSuite(s.CryptoSuite(), decisions[i].Identity, decisions[i]); err != nil {
 			return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "validate idempotency decision", err)
 		}
-		storageKey := idempotency.StorageKey(decisions[i].Identity)
+		storageKey, err := idempotency.StorageKeyForSuite(s.CryptoSuite(), decisions[i].Identity)
+		if err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "derive idempotency storage key", err)
+		}
 		if prior, exists := prepared[storageKey]; exists {
 			if !idempotency.Equivalent(prior, decisions[i]) {
 				return nil, trusterr.New(trusterr.CodeAlreadyExists, "idempotency identity has conflicting decisions")
@@ -2269,14 +2294,18 @@ func (s *Store) GetIdempotencyDecision(ctx context.Context, identity model.Idemp
 		return model.IdempotencyDecision{}, false, trusterr.New(trusterr.CodeFailedPrecondition, "idempotency projection is not ready")
 	}
 	var decision model.IdempotencyDecision
-	found, err := s.readCBOR(idempotencyDecisionKey(identity), &decision)
+	decisionKey, err := idempotencyDecisionKey(s.CryptoSuite(), identity)
+	if err != nil {
+		return model.IdempotencyDecision{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "derive idempotency decision key", err)
+	}
+	found, err := s.readCBOR(decisionKey, &decision)
 	if err != nil {
 		return model.IdempotencyDecision{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "read idempotency decision", err)
 	}
 	if !found {
 		return model.IdempotencyDecision{}, false, nil
 	}
-	if err := idempotency.ValidateDecision(identity, decision); err != nil {
+	if err := idempotency.ValidateDecisionForSuite(s.CryptoSuite(), identity, decision); err != nil {
 		return model.IdempotencyDecision{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "validate stored idempotency decision", err)
 	}
 	return decision, true, nil

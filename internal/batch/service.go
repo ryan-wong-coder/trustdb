@@ -595,13 +595,21 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeInternal, "commit batch", err)
 	}
+	if commit.TreeAlg == "" {
+		return trusterr.New(trusterr.CodeInternal, "commit batch returned no tree algorithm")
+	}
+	for i := range commit.Bundles {
+		if commit.Bundles[i].BatchProof.TreeAlg != commit.TreeAlg {
+			return trusterr.New(trusterr.CodeInternal, "commit batch returned mixed tree algorithms")
+		}
+	}
 	manifest := model.BatchManifest{
 		SchemaVersion:    model.SchemaBatchManifest,
 		BatchID:          batchID,
 		NodeID:           commit.Root.NodeID,
 		LogID:            commit.Root.LogID,
 		State:            model.BatchStatePreparing,
-		TreeAlg:          model.DefaultMerkleTreeAlg,
+		TreeAlg:          commit.TreeAlg,
 		TreeSize:         commit.Root.TreeSize,
 		BatchRoot:        append([]byte(nil), commit.Root.BatchRoot...),
 		RecordIDs:        recordIDs,
@@ -848,7 +856,10 @@ func (s *Service) computeBatch(ctx context.Context, batchID string, closedAt tim
 		if err != nil {
 			return model.BatchCommit{}, err
 		}
-		result := model.BatchCommit{Root: rootFromBundles(batchID, bundles), Bundles: bundles}
+		result := model.BatchCommit{Root: rootFromBundles(batchID, bundles), Bundles: bundles, TreeAlg: model.DefaultMerkleTreeAlg}
+		if len(bundles) > 0 && bundles[0].BatchProof.TreeAlg != "" {
+			result.TreeAlg = bundles[0].BatchProof.TreeAlg
+		}
 		result.Indexes = make([]model.RecordIndex, len(bundles))
 		for i := range bundles {
 			result.Indexes[i] = model.RecordIndexFromBundle(bundles[i])
@@ -862,7 +873,7 @@ func (s *Service) computeBatch(ctx context.Context, batchID string, closedAt tim
 	if err != nil {
 		return model.BatchCommit{}, err
 	}
-	result := model.BatchCommit{Root: root, Indexes: indexes}
+	result := model.BatchCommit{Root: root, Indexes: indexes, TreeAlg: model.DefaultMerkleTreeAlg}
 	if opts.IncludeTree {
 		result.Tree, err = buildBatchTreeSnapshot(batchID, root, records)
 	}
@@ -1201,6 +1212,9 @@ func (s *Service) materializeManifest(ctx context.Context, manifest model.BatchM
 	}
 	if len(commit.Bundles) != len(manifest.RecordIDs) {
 		return model.BatchRoot{}, trusterr.New(trusterr.CodeInternal, "materialized bundle count mismatch")
+	}
+	if commit.TreeAlg == "" || commit.TreeAlg != manifest.TreeAlg {
+		return model.BatchRoot{}, trusterr.New(trusterr.CodeDataLoss, "materialized batch tree algorithm does not match prepared manifest")
 	}
 	if len(manifest.BatchRoot) > 0 && !bytes.Equal(manifest.BatchRoot, commit.Root.BatchRoot) {
 		return model.BatchRoot{}, trusterr.New(trusterr.CodeDataLoss, "materialized batch root does not match prepared manifest")

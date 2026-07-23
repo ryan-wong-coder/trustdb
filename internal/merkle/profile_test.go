@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"math/bits"
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
@@ -70,12 +71,64 @@ func TestRFC6962SM3BuildProofAndVerifyManySizes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if len(proof) > bits.Len(uint(size-1)) {
+					t.Fatalf("proof length %d exceeds O(log N) bound %d for size %d", len(proof), bits.Len(uint(size-1)), size)
+				}
 				ok, err := VerifyForSuite(cryptosuite.CNSMV1, cryptosuite.MerkleRFC6962SM3, leaf, uint64(i), uint64(size), proof, root)
 				if err != nil || !ok {
 					t.Fatalf("VerifyForSuite(%d/%d) = %v, %v", i, size, ok, err)
 				}
 			}
 		})
+	}
+}
+
+func TestINTLV1SuiteProfileIsByteIdenticalToLegacyAPI(t *testing.T) {
+	t.Parallel()
+
+	records := []model.ServerRecord{record("intl-a"), record("intl-b"), record("intl-c")}
+	legacy, err := Build(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit, err := BuildForSuite(cryptosuite.INTLV1, cryptosuite.MerkleRFC6962SHA256, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(legacy.Root(), explicit.Root()) {
+		t.Fatalf("INTL_V1 root changed: legacy=%x explicit=%x", legacy.Root(), explicit.Root())
+	}
+	for i := range records {
+		legacyLeaf, _ := legacy.LeafHash(i)
+		explicitLeaf, _ := explicit.LeafHash(i)
+		legacyProof, _ := legacy.Proof(i)
+		explicitProof, _ := explicit.Proof(i)
+		if !bytes.Equal(legacyLeaf, explicitLeaf) || !equalPaths(legacyProof, explicitProof) {
+			t.Fatalf("INTL_V1 leaf or proof changed at index %d", i)
+		}
+	}
+}
+
+func TestVerifyForSuiteSM3DoesNotAllocate(t *testing.T) {
+	records := make([]model.ServerRecord, 1024)
+	for i := range records {
+		records[i] = record(fmt.Sprintf("sm3-alloc-%04d", i))
+	}
+	tree, err := BuildForSuite(cryptosuite.CNSMV1, cryptosuite.MerkleRFC6962SM3, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ := tree.LeafHash(777)
+	proof, _ := tree.Proof(777)
+	root := tree.Root()
+	allocs := testing.AllocsPerRun(1_000, func() {
+		ok, err := VerifyForSuite(cryptosuite.CNSMV1, cryptosuite.MerkleRFC6962SM3, leaf, 777, 1024, proof, root)
+		if err != nil || !ok {
+			panic("SM3 verification failed")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("VerifyForSuite(SM3) allocations = %v, want 0", allocs)
 	}
 }
 
@@ -150,4 +203,16 @@ func assertDigestHex(t *testing.T, got []byte, wantHex string) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("digest = %x, want %x", got, want)
 	}
+}
+
+func equalPaths(left, right [][]byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !bytes.Equal(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
 }

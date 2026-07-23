@@ -37,6 +37,7 @@ type BatchTreeSnapshotNode struct {
 }
 
 type BatchCommit struct {
+	TreeAlg string
 	Root    BatchRoot
 	Indexes []RecordIndex
 	Tree    BatchTreeSnapshot

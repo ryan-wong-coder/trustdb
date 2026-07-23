@@ -9,6 +9,8 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
@@ -114,6 +116,46 @@ func TestAppendBatchRootProducesStableSTHAndInclusionProof(t *testing.T) {
 	}
 	if proof.STH.TreeSize != latest.TreeSize || !bytes.Equal(proof.STH.RootHash, latest.RootHash) {
 		t.Fatalf("proof STH = %+v, want latest %+v", proof.STH, latest)
+	}
+}
+
+func TestVerifyInclusionRequiresExactSuiteProfile(t *testing.T) {
+	t.Parallel()
+
+	leaf, err := merkle.HashLeafPayloadForSuite(
+		cryptosuite.CNSMV1,
+		cryptosuite.MerkleRFC6962SM3,
+		[]byte("batch-root"),
+	)
+	if err != nil {
+		t.Fatalf("HashLeafPayloadForSuite() error = %v", err)
+	}
+	proof := model.GlobalLogProof{
+		SchemaVersion: model.SchemaGlobalLogProof,
+		BatchID:       "batch-sm3",
+		LeafIndex:     0,
+		LeafHash:      leaf,
+		TreeSize:      1,
+		STH: model.SignedTreeHead{
+			SchemaVersion: model.SchemaSignedTreeHead,
+			TreeAlg:       cryptosuite.MerkleRFC6962SM3,
+			TreeSize:      1,
+			RootHash:      append([]byte(nil), leaf...),
+		},
+	}
+	ok, err := VerifyInclusionForSuite(cryptosuite.CNSMV1, proof)
+	if err != nil || !ok {
+		t.Fatalf("VerifyInclusionForSuite(CN_SM_V1) = %v, %v", ok, err)
+	}
+	if ok, err := VerifyInclusionForSuite(cryptosuite.INTLV1, proof); err == nil || ok {
+		t.Fatalf("VerifyInclusionForSuite(INTL_V1) = %v, %v, want exact profile rejection", ok, err)
+	}
+	if VerifyInclusion(proof) {
+		t.Fatal("legacy INTL_V1 VerifyInclusion accepted an SM3 proof")
+	}
+	proof.STH.TreeSize = 2
+	if ok, err := VerifyInclusionForSuite(cryptosuite.CNSMV1, proof); err != nil || ok {
+		t.Fatalf("VerifyInclusionForSuite() = %v, %v for mismatched proof/STH tree size", ok, err)
 	}
 }
 
