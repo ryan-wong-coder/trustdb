@@ -7,9 +7,24 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 )
+
+func TestRequireMatchingMigrationSuitesRejectsCrossSuiteCopy(t *testing.T) {
+	t.Parallel()
+	src := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src"), SuiteID: cryptosuite.CNSMV1}
+	dst := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst"), SuiteID: cryptosuite.INTLV1}
+	if _, err := requireMatchingMigrationSuites(src, dst); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("mismatch code=%s err=%v", trusterr.CodeOf(err), err)
+	}
+	dst.SuiteID = cryptosuite.CNSMV1
+	if suiteID, err := requireMatchingMigrationSuites(src, dst); err != nil || suiteID != cryptosuite.CNSMV1 {
+		t.Fatalf("matching suite = %q, err=%v", suiteID, err)
+	}
+}
 
 type seedCounts struct {
 	manifests       int

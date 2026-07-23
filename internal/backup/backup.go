@@ -22,6 +22,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -38,6 +39,7 @@ const (
 	paxOrdinal  = "trustdb.ordinal"
 	paxSHA256   = "trustdb.sha256"
 	paxType     = "trustdb.type"
+	paxSuite    = "trustdb.crypto_suite"
 
 	encodedArchiveNamePrefix = "~"
 )
@@ -51,10 +53,11 @@ type Entry struct {
 }
 
 type Manifest struct {
-	SchemaVersion string `json:"schema_version"`
-	BackupID      string `json:"backup_id"`
-	CreatedAt     string `json:"created_at"`
-	Compression   string `json:"compression"`
+	SchemaVersion string         `json:"schema_version"`
+	BackupID      string         `json:"backup_id"`
+	CreatedAt     string         `json:"created_at"`
+	Compression   string         `json:"compression"`
+	CryptoSuite   cryptosuite.ID `json:"-"`
 
 	Manifests       int     `json:"manifests"`
 	Bundles         int     `json:"bundles"`
@@ -94,6 +97,10 @@ func Create(ctx context.Context, store proofstore.Store, path string, opts Optio
 	}
 	if path == "" {
 		return Manifest{}, trusterr.New(trusterr.CodeInvalidArgument, "backup output path is required")
+	}
+	suiteID, err := proofstore.BoundCryptoSuite(store)
+	if err != nil {
+		return Manifest{}, err
 	}
 	resultLister, ok := store.(proofstore.STHAnchorResultLister)
 	if !ok {
@@ -147,6 +154,7 @@ func Create(ctx context.Context, store proofstore.Store, path string, opts Optio
 		BackupID:      fmt.Sprintf("tdb-%d", clock().UTC().UnixNano()),
 		CreatedAt:     clock().UTC().Format(time.RFC3339Nano),
 		Compression:   compression,
+		CryptoSuite:   suiteID,
 	}
 	var ordinal int64
 
@@ -384,9 +392,25 @@ func Verify(ctx context.Context, path string) (Manifest, error) {
 	manifest := Manifest{}
 	start := Manifest{}
 	var foundStart, foundSummary bool
+	var archiveSuite cryptosuite.ID
+	var suiteErr error
 	err := readArchiveStream(path, func(entry archiveEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if suiteErr == nil {
+			switch {
+			case entry.CryptoSuite == "":
+				suiteErr = trusterr.New(trusterr.CodeFailedPrecondition, "backup entry is missing the proofstore cryptographic suite binding")
+			case archiveSuite == "":
+				if _, err := cryptosuite.RequireKnown(entry.CryptoSuite); err != nil {
+					suiteErr = trusterr.Wrap(trusterr.CodeFailedPrecondition, "backup entry has an unknown cryptographic suite", err)
+				} else {
+					archiveSuite = entry.CryptoSuite
+				}
+			case entry.CryptoSuite != archiveSuite:
+				suiteErr = trusterr.New(trusterr.CodeDataLoss, fmt.Sprintf("backup mixes cryptographic suites %s and %s", archiveSuite, entry.CryptoSuite))
+			}
 		}
 		if entry.Name == "summary.json" {
 			foundSummary = true
@@ -407,9 +431,16 @@ func Verify(ctx context.Context, path string) (Manifest, error) {
 	if start.SchemaVersion != SchemaManifest || manifest.SchemaVersion != SchemaManifest {
 		return Manifest{}, trusterr.New(trusterr.CodeFailedPrecondition, fmt.Sprintf("unsupported backup schema: manifest=%q summary=%q want=%q", start.SchemaVersion, manifest.SchemaVersion, SchemaManifest))
 	}
+	if suiteErr != nil {
+		return Manifest{}, suiteErr
+	}
+	if archiveSuite == "" {
+		return Manifest{}, trusterr.New(trusterr.CodeFailedPrecondition, "backup has no proofstore cryptographic suite binding")
+	}
 	if start.BackupID == "" || manifest.BackupID == "" || start.BackupID != manifest.BackupID {
 		return Manifest{}, trusterr.New(trusterr.CodeDataLoss, "backup manifest and summary identifiers do not match")
 	}
+	manifest.CryptoSuite = archiveSuite
 	return manifest, nil
 }
 
@@ -433,7 +464,14 @@ func RestoreWithOptions(ctx context.Context, store proofstore.Store, path string
 	if err != nil {
 		return Manifest{}, err
 	}
-	report := Manifest{SchemaVersion: SchemaManifest, BackupID: verified.BackupID}
+	destinationSuite, err := proofstore.BoundCryptoSuite(store)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := cryptosuite.RequireSame(destinationSuite, verified.CryptoSuite); err != nil {
+		return Manifest{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "backup and destination proofstore cryptographic suites do not match", err)
+	}
+	report := Manifest{SchemaVersion: SchemaManifest, BackupID: verified.BackupID, CryptoSuite: verified.CryptoSuite}
 	checkpointPath := opts.CheckpointPath
 	var restoreCP RestoreCheckpoint
 	if opts.Resume && checkpointPath == "" {
@@ -452,6 +490,9 @@ func RestoreWithOptions(ctx context.Context, store proofstore.Store, path string
 	err = readArchiveStream(path, func(entry archiveEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if entry.CryptoSuite != verified.CryptoSuite {
+			return trusterr.New(trusterr.CodeDataLoss, fmt.Sprintf("backup entry %q suite changed between verification and restore", entry.Name))
 		}
 		if opts.Resume && restoreCP.BackupID != "" && entry.BackupID == restoreCP.BackupID && entry.Ordinal <= restoreCP.LastOrdinal {
 			_, _ = io.Copy(io.Discard, entry.Reader)
@@ -681,6 +722,7 @@ func writeBytesTracked(tw *tar.Writer, manifest *Manifest, ordinal *int64, name,
 			paxOrdinal:  strconv.FormatInt(entry.Ordinal, 10),
 			paxSHA256:   entry.SHA256,
 			paxType:     typ,
+			paxSuite:    string(manifest.CryptoSuite),
 		},
 	}
 	if err := tw.WriteHeader(header); err != nil {
@@ -694,13 +736,14 @@ func writeBytesTracked(tw *tar.Writer, manifest *Manifest, ordinal *int64, name,
 }
 
 type archiveEntry struct {
-	Name     string
-	Size     int64
-	Ordinal  int64
-	BackupID string
-	SHA256   string
-	Type     string
-	Reader   io.Reader
+	Name        string
+	Size        int64
+	Ordinal     int64
+	BackupID    string
+	SHA256      string
+	Type        string
+	CryptoSuite cryptosuite.ID
+	Reader      io.Reader
 }
 
 func readArchiveStream(path string, visit func(archiveEntry) error) error {
@@ -743,13 +786,14 @@ func readArchiveStream(path string, visit func(archiveEntry) error) error {
 			}
 		}
 		entry := archiveEntry{
-			Name:     header.Name,
-			Size:     header.Size,
-			Ordinal:  ordinal,
-			BackupID: header.PAXRecords[paxBackupID],
-			SHA256:   header.PAXRecords[paxSHA256],
-			Type:     header.PAXRecords[paxType],
-			Reader:   tr,
+			Name:        header.Name,
+			Size:        header.Size,
+			Ordinal:     ordinal,
+			BackupID:    header.PAXRecords[paxBackupID],
+			SHA256:      header.PAXRecords[paxSHA256],
+			Type:        header.PAXRecords[paxType],
+			CryptoSuite: cryptosuite.ID(header.PAXRecords[paxSuite]),
+			Reader:      tr,
 		}
 		if err := visit(entry); err != nil {
 			return err
