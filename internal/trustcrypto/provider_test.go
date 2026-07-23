@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -223,5 +224,69 @@ func TestINTLV1HashFactoryMatchesGoldenSHA256(t *testing.T) {
 	}
 	if _, err := provider.HashFactory(cryptosuite.HashSM3); !errors.Is(err, ErrUnsupportedAlgorithm) {
 		t.Fatalf("HashFactory(sm3) error = %v, want unsupported algorithm", err)
+	}
+}
+
+func TestCNSMV1HashFactoryMatchesOfficialSM3Vectors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		message []byte
+		wantHex string
+	}{
+		{
+			name:    "abc",
+			message: []byte("abc"),
+			wantHex: "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0",
+		},
+		{
+			name:    "abcd repeated 16 times",
+			message: bytes.Repeat([]byte("abcd"), 16),
+			wantHex: "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			want, err := hex.DecodeString(tc.wantHex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			factory, err := HashFactoryForSuite(cryptosuite.CNSMV1, cryptosuite.HashSM3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if factory.Algorithm() != cryptosuite.HashSM3 || factory.Size() != 32 {
+				t.Fatalf("factory = (%s, %d)", factory.Algorithm(), factory.Size())
+			}
+			if got := factory.Sum(tc.message); !bytes.Equal(got, want) {
+				t.Fatalf("one-shot SM3 = %x, want %x", got, want)
+			}
+			got32 := factory.Sum32(tc.message)
+			if !bytes.Equal(got32[:], want) {
+				t.Fatalf("fixed-width SM3 = %x, want %x", got32, want)
+			}
+			streamed, n, err := HashReaderForSuite(cryptosuite.CNSMV1, cryptosuite.HashSM3, bytes.NewReader(tc.message))
+			if err != nil || n != int64(len(tc.message)) || !bytes.Equal(streamed, want) {
+				t.Fatalf("streaming SM3 = %x n=%d err=%v, want %x", streamed, n, err, want)
+			}
+		})
+	}
+}
+
+func TestHashFactoryForSuiteRejectsCrossSuiteAlgorithms(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		suite cryptosuite.ID
+		alg   string
+	}{
+		{suite: cryptosuite.INTLV1, alg: cryptosuite.HashSM3},
+		{suite: cryptosuite.CNSMV1, alg: cryptosuite.HashSHA256},
+		{suite: cryptosuite.ID("UNKNOWN"), alg: cryptosuite.HashSM3},
+	} {
+		if _, err := HashFactoryForSuite(tc.suite, tc.alg); err == nil {
+			t.Fatalf("HashFactoryForSuite(%s, %s) error = nil", tc.suite, tc.alg)
+		}
 	}
 }

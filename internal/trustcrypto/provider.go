@@ -9,6 +9,8 @@ import (
 	"hash"
 	"strings"
 
+	"github.com/emmansun/gmsm/sm3"
+
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
@@ -89,6 +91,7 @@ type HashFactory interface {
 	Size() int
 	New() hash.Hash
 	Sum([]byte) []byte
+	Sum32([]byte) [32]byte
 }
 
 // Provider supplies public operations for one immutable cryptographic suite.
@@ -105,10 +108,7 @@ type intlV1Provider struct{}
 func (intlV1Provider) Suite() cryptosuite.ID { return cryptosuite.INTLV1 }
 
 func (intlV1Provider) HashFactory(algorithm string) (HashFactory, error) {
-	if algorithm != cryptosuite.HashSHA256 {
-		return nil, fmt.Errorf("%w: hash %q for suite %s", ErrUnsupportedAlgorithm, algorithm, cryptosuite.INTLV1)
-	}
-	return sha256Factory{}, nil
+	return HashFactoryForSuite(cryptosuite.INTLV1, algorithm)
 }
 
 func (intlV1Provider) Verifier(algorithm, encoding string) (Verifier, error) {
@@ -135,6 +135,48 @@ func ProviderForSuite(suiteID cryptosuite.ID) (Provider, error) {
 
 func DefaultProvider() Provider {
 	return intlV1Provider{}
+}
+
+// HashFactoryForSuite exposes hash primitives for known suites without
+// changing the production availability gate enforced by ProviderForSuite.
+// This lets reserved suites complete vector, Merkle, and interoperability
+// work while claim/signature generation remains unavailable until every
+// provider capability is implemented.
+func HashFactoryForSuite(suiteID cryptosuite.ID, algorithm string) (HashFactory, error) {
+	suite, err := cryptosuite.RequireKnown(suiteID)
+	if err != nil {
+		return nil, err
+	}
+	if !suiteUsesHashAlgorithm(suite, algorithm) {
+		return nil, fmt.Errorf("%w: hash %q for suite %s", ErrUnsupportedAlgorithm, algorithm, suiteID)
+	}
+	switch algorithm {
+	case cryptosuite.HashSHA256:
+		return sha256Factory{}, nil
+	case cryptosuite.HashSM3:
+		return sm3Factory{}, nil
+	default:
+		return nil, fmt.Errorf("%w: hash %q for suite %s", ErrUnsupportedAlgorithm, algorithm, suiteID)
+	}
+}
+
+func suiteUsesHashAlgorithm(suite cryptosuite.Suite, algorithm string) bool {
+	for _, spec := range []cryptosuite.HashSpec{
+		suite.ContentHash,
+		suite.ClaimHash,
+		suite.SignatureHash,
+		suite.RecordIDHash,
+		suite.KeyEventHash,
+		suite.KeyFingerprintHash,
+		suite.StorageIntegrityHash,
+		suite.Merkle.Hash,
+		suite.AnchorDigest,
+	} {
+		if spec.Algorithm == algorithm {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidatePublicKey(provider Provider, descriptor PublicKeyDescriptor) error {
@@ -272,6 +314,18 @@ func (sha256Factory) Sum(data []byte) []byte {
 	sum := sha256.Sum256(data)
 	return append([]byte(nil), sum[:]...)
 }
+func (sha256Factory) Sum32(data []byte) [32]byte { return sha256.Sum256(data) }
+
+type sm3Factory struct{}
+
+func (sm3Factory) Algorithm() string { return cryptosuite.HashSM3 }
+func (sm3Factory) Size() int         { return sm3.Size }
+func (sm3Factory) New() hash.Hash    { return sm3.New() }
+func (sm3Factory) Sum(data []byte) []byte {
+	sum := sm3.Sum(data)
+	return append([]byte(nil), sum[:]...)
+}
+func (sm3Factory) Sum32(data []byte) [32]byte { return sm3.Sum(data) }
 
 type ed25519Verifier struct{}
 

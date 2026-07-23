@@ -5,7 +5,6 @@ package idempotency
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -13,11 +12,10 @@ import (
 	"reflect"
 
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
-
-const storageKeyDomain = "trustdb.idempotency-storage-key.v1"
 
 // BuildDecision derives and validates the durable idempotency projection for
 // one accepted record that opted into idempotency with a non-empty key.
@@ -27,13 +25,32 @@ func BuildDecision(
 	record model.ServerRecord,
 	accepted model.AcceptedReceipt,
 ) (model.IdempotencyDecision, error) {
+	return BuildDecisionWithProvider(trustcrypto.DefaultProvider(), batchID, signed, record, accepted)
+}
+
+func BuildDecisionWithProvider(
+	provider trustcrypto.Provider,
+	batchID string,
+	signed model.SignedClaim,
+	record model.ServerRecord,
+	accepted model.AcceptedReceipt,
+) (model.IdempotencyDecision, error) {
+	if provider == nil {
+		return model.IdempotencyDecision{}, errors.New("idempotency: crypto provider is required")
+	}
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return model.IdempotencyDecision{}, err
+	}
 	if signed.SchemaVersion != model.SchemaSignedClaim {
 		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: unexpected signed claim schema %q", signed.SchemaVersion)
 	}
 	if signed.Signature.KeyID != signed.Claim.KeyID {
 		return model.IdempotencyDecision{}, errors.New("idempotency: signature key_id does not match claim key_id")
 	}
-	if signed.Signature.Alg != model.DefaultSignatureAlg || len(signed.Signature.Signature) != ed25519.SignatureSize {
+	if signed.Signature.Alg != suite.Signature.Algorithm ||
+		len(signed.Signature.Signature) == 0 ||
+		(suite.ID == cryptosuite.INTLV1 && len(signed.Signature.Signature) != ed25519.SignatureSize) {
 		return model.IdempotencyDecision{}, errors.New("idempotency: valid client signature metadata is required")
 	}
 	if signed.Claim.IdempotencyKey == "" {
@@ -43,17 +60,21 @@ func BuildDecision(
 	if err != nil {
 		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: canonicalize claim: %w", err)
 	}
-	claimHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, claimCBOR)
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, claimCBOR)
 	if err != nil {
 		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: hash claim: %w", err)
 	}
 	if !bytes.Equal(record.ClaimHash, claimHash) {
 		return model.IdempotencyDecision{}, errors.New("idempotency: server record claim hash does not match signed claim")
 	}
-	if record.RecordID != claim.RecordID(claimCBOR, signed.Signature) {
+	recordID, err := claim.RecordIDWithProvider(provider, claimCBOR, signed.Signature)
+	if err != nil {
+		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: derive record id: %w", err)
+	}
+	if record.RecordID != recordID {
 		return model.IdempotencyDecision{}, errors.New("idempotency: server record id does not match signed claim")
 	}
-	signatureHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, signed.Signature.Signature)
+	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
 	if err != nil {
 		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: hash client signature: %w", err)
 	}
@@ -68,7 +89,7 @@ func BuildDecision(
 		ClientID:       signed.Claim.ClientID,
 		IdempotencyKey: signed.Claim.IdempotencyKey,
 	}
-	if err := validateResponseBindings(identity, claimHash, record, accepted); err != nil {
+	if err := validateResponseBindings(suite, identity, claimHash, record, accepted); err != nil {
 		return model.IdempotencyDecision{}, err
 	}
 	decision := model.IdempotencyDecision{
@@ -79,7 +100,7 @@ func BuildDecision(
 		Accepted:      cloneAccepted(accepted),
 		BatchID:       batchID,
 	}
-	if err := ValidateDecision(identity, decision); err != nil {
+	if err := ValidateDecisionForSuite(suite.ID, identity, decision); err != nil {
 		return model.IdempotencyDecision{}, err
 	}
 	return decision, nil
@@ -90,6 +111,14 @@ func BuildDecision(
 // BuildDecision already derives the projection from a previously verified
 // SignedClaim, while readers validate the immutable response relationships.
 func ValidateDecision(identity model.IdempotencyIdentity, decision model.IdempotencyDecision) error {
+	return ValidateDecisionForSuite(cryptosuite.INTLV1, identity, decision)
+}
+
+func ValidateDecisionForSuite(suiteID cryptosuite.ID, identity model.IdempotencyIdentity, decision model.IdempotencyDecision) error {
+	suite, err := cryptosuite.RequireKnown(suiteID)
+	if err != nil {
+		return err
+	}
 	if identity.TenantID == "" || identity.ClientID == "" || identity.IdempotencyKey == "" {
 		return errors.New("idempotency: tenant_id, client_id, and idempotency_key are required")
 	}
@@ -102,13 +131,14 @@ func ValidateDecision(identity model.IdempotencyIdentity, decision model.Idempot
 	if decision.BatchID == "" {
 		return errors.New("idempotency: batch_id is required")
 	}
-	if len(decision.ClaimHash) != sha256.Size {
-		return fmt.Errorf("idempotency: claim_hash length is %d, want %d", len(decision.ClaimHash), sha256.Size)
+	if len(decision.ClaimHash) != suite.ClaimHash.DigestBytes {
+		return fmt.Errorf("idempotency: claim_hash length is %d, want %d", len(decision.ClaimHash), suite.ClaimHash.DigestBytes)
 	}
-	return validateResponseBindings(identity, decision.ClaimHash, decision.Record, decision.Accepted)
+	return validateResponseBindings(suite, identity, decision.ClaimHash, decision.Record, decision.Accepted)
 }
 
 func validateResponseBindings(
+	suite cryptosuite.Suite,
 	identity model.IdempotencyIdentity,
 	claimHash []byte,
 	record model.ServerRecord,
@@ -129,8 +159,8 @@ func validateResponseBindings(
 	if !bytes.Equal(record.ClaimHash, claimHash) {
 		return errors.New("idempotency: server record claim_hash does not match decision")
 	}
-	if len(record.ClientSignatureHash) != sha256.Size {
-		return fmt.Errorf("idempotency: client signature hash length is %d, want %d", len(record.ClientSignatureHash), sha256.Size)
+	if len(record.ClientSignatureHash) != suite.SignatureHash.DigestBytes {
+		return fmt.Errorf("idempotency: client signature hash length is %d, want %d", len(record.ClientSignatureHash), suite.SignatureHash.DigestBytes)
 	}
 	if err := validateWALPosition(record.WAL); err != nil {
 		return err
@@ -153,9 +183,10 @@ func validateResponseBindings(
 	if accepted.WAL != record.WAL {
 		return errors.New("idempotency: accepted receipt WAL position does not match server record")
 	}
-	if accepted.ServerSig.Alg != model.DefaultSignatureAlg ||
+	if accepted.ServerSig.Alg != suite.Signature.Algorithm ||
 		accepted.ServerSig.KeyID == "" ||
-		len(accepted.ServerSig.Signature) != ed25519.SignatureSize {
+		len(accepted.ServerSig.Signature) == 0 ||
+		(suite.ID == cryptosuite.INTLV1 && len(accepted.ServerSig.Signature) != ed25519.SignatureSize) {
 		return errors.New("idempotency: accepted receipt server signature is required")
 	}
 	return nil
@@ -179,13 +210,33 @@ func Equivalent(a, b model.IdempotencyDecision) bool {
 // Each component is length-delimited before hashing, so arbitrary UTF-8 and
 // embedded NUL bytes cannot make distinct identities share a key.
 func StorageKey(identity model.IdempotencyIdentity) string {
-	h := sha256.New()
-	_, _ = h.Write([]byte(storageKeyDomain))
+	key, err := StorageKeyForSuite(cryptosuite.INTLV1, identity)
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+func StorageKeyForSuite(suiteID cryptosuite.ID, identity model.IdempotencyIdentity) (string, error) {
+	suite, err := cryptosuite.RequireKnown(suiteID)
+	if err != nil {
+		return "", err
+	}
+	factory, err := trustcrypto.HashFactoryForSuite(suiteID, suite.StorageIntegrityHash.Algorithm)
+	if err != nil {
+		return "", err
+	}
+	h := factory.New()
+	_, _ = h.Write([]byte(suite.Domains.IdempotencyStorageKey))
 	_, _ = h.Write([]byte{0})
+	if suite.ID == cryptosuite.CNSMV1 {
+		_, _ = h.Write([]byte(suite.ID))
+		_, _ = h.Write([]byte{0})
+	}
 	writeStorageKeyComponent(h, identity.TenantID)
 	writeStorageKeyComponent(h, identity.ClientID)
 	writeStorageKeyComponent(h, identity.IdempotencyKey)
-	return hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 type byteWriter interface {

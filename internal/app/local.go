@@ -302,7 +302,12 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 	if len(records) == 0 || len(records) != len(signed) || len(records) != len(accepted) {
 		return model.BatchCommit{}, fmt.Errorf("app: inconsistent batch input sizes")
 	}
-	tree, err := merkle.Build(records)
+	provider := e.cryptoProvider()
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return model.BatchCommit{}, err
+	}
+	tree, err := merkle.BuildForSuite(suite.ID, suite.Merkle.Algorithm, records)
 	if err != nil {
 		return model.BatchCommit{}, err
 	}
@@ -312,6 +317,7 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 	closedAt = closedAt.UTC()
 	root := tree.Root()
 	result := model.BatchCommit{
+		TreeAlg: suite.Merkle.Algorithm,
 		Root: model.BatchRoot{
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       batchID,
@@ -396,7 +402,7 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 					AcceptedReceipt:  accepted[i],
 					CommittedReceipt: committed,
 					BatchProof: model.BatchProof{
-						TreeAlg:   model.DefaultMerkleTreeAlg,
+						TreeAlg:   suite.Merkle.Algorithm,
 						LeafIndex: uint64(i),
 						TreeSize:  uint64(len(records)),
 						AuditPath: proof,

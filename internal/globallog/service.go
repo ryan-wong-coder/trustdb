@@ -6,7 +6,6 @@ package globallog
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"math/bits"
 	"strings"
@@ -68,6 +67,7 @@ type Service struct {
 	logID     string
 	signer    trustcrypto.Signer
 	provider  trustcrypto.Provider
+	profile   merkle.Profile
 	clock     func() time.Time
 	anchorKey *model.STHAnchorScheduleKey
 }
@@ -95,6 +95,10 @@ func New(opts Options) (*Service, error) {
 	if err := trustcrypto.ValidateSignerWithProvider(context.Background(), provider, opts.Signer); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "global log signer is invalid", err)
 	}
+	profile, err := merkle.ProfileForSuite(provider.Suite())
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "global log merkle profile is invalid", err)
+	}
 	clock := opts.Clock
 	if clock == nil {
 		clock = func() time.Time { return time.Now().UTC() }
@@ -110,6 +114,7 @@ func New(opts Options) (*Service, error) {
 		logID:    logID,
 		signer:   opts.Signer,
 		provider: provider,
+		profile:  profile,
 		clock:    clock,
 	}
 	if sinkName := strings.TrimSpace(opts.AnchorSinkName); sinkName != "" {
@@ -122,12 +127,24 @@ func New(opts Options) (*Service, error) {
 // consistency, and compaction artefacts from an existing store, but cannot
 // append because no STH signing key is configured.
 func NewReader(store Store) (*Service, error) {
+	return NewReaderWithProvider(store, trustcrypto.DefaultProvider())
+}
+
+func NewReaderWithProvider(store Store, provider trustcrypto.Provider) (*Service, error) {
 	if store == nil {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log store is required")
 	}
+	if provider == nil {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log crypto provider is required")
+	}
+	profile, err := merkle.ProfileForSuite(provider.Suite())
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "global log merkle profile is invalid", err)
+	}
 	return &Service{
 		store:    store,
-		provider: trustcrypto.DefaultProvider(),
+		provider: provider,
+		profile:  profile,
 		clock:    func() time.Time { return time.Now().UTC() },
 	}, nil
 }
@@ -164,8 +181,8 @@ func (s *Service) AppendBatchRoots(ctx context.Context, roots []model.BatchRoot)
 		if roots[i].BatchID == "" {
 			return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log batch_id is required")
 		}
-		if len(roots[i].BatchRoot) != sha256.Size {
-			return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log batch_root must be sha256")
+		if len(roots[i].BatchRoot) != s.profile.Size() {
+			return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log batch_root has the wrong digest size")
 		}
 	}
 	for attempt := 0; ; attempt++ {
@@ -516,9 +533,16 @@ func HashLeafWithProvider(provider trustcrypto.Provider, leaf model.GlobalLogLea
 	if err != nil {
 		return nil, err
 	}
+	profile, err := merkle.ProfileForAlgorithm(suite.ID, suite.Merkle.Algorithm)
+	if err != nil {
+		return nil, err
+	}
 	factory, err := provider.HashFactory(suite.Merkle.Hash.Algorithm)
 	if err != nil {
 		return nil, err
+	}
+	if factory.Algorithm() != profile.HashAlgorithm() || factory.Size() != profile.Size() {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log provider hash does not match the suite merkle profile")
 	}
 	h := factory.New()
 	h.Write([]byte{suite.Merkle.LeafPrefix})
@@ -537,6 +561,16 @@ func VerifySTH(sth model.SignedTreeHead, publicKey []byte) error {
 }
 
 func VerifySTHWithProvider(ctx context.Context, sth model.SignedTreeHead, publicKey trustcrypto.PublicKeyDescriptor, provider trustcrypto.Provider) error {
+	if provider == nil {
+		return trusterr.New(trusterr.CodeInvalidArgument, "global log crypto provider is required")
+	}
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return err
+	}
+	if sth.TreeAlg != suite.Merkle.Algorithm {
+		return fmt.Errorf("verify signed tree head: tree algorithm %q does not match suite %s", sth.TreeAlg, suite.ID)
+	}
 	sig := sth.Signature
 	sth.Signature = model.Signature{}
 	payload, err := cborx.Marshal(sth)
@@ -550,13 +584,31 @@ func VerifySTHWithProvider(ctx context.Context, sth model.SignedTreeHead, public
 }
 
 func VerifyInclusion(proof model.GlobalLogProof) bool {
-	if proof.SchemaVersion != model.SchemaGlobalLogProof {
+	ok, err := VerifyInclusionForSuite(cryptosuite.INTLV1, proof)
+	return err == nil && ok
+}
+
+func VerifyInclusionWithProvider(provider trustcrypto.Provider, proof model.GlobalLogProof) bool {
+	if provider == nil {
 		return false
+	}
+	ok, err := VerifyInclusionForSuite(provider.Suite(), proof)
+	return err == nil && ok
+}
+
+func VerifyInclusionForSuite(suiteID cryptosuite.ID, proof model.GlobalLogProof) (bool, error) {
+	if proof.SchemaVersion != model.SchemaGlobalLogProof {
+		return false, nil
+	}
+	if proof.STH.SchemaVersion != model.SchemaSignedTreeHead || proof.TreeSize != proof.STH.TreeSize {
+		return false, nil
 	}
 	if proof.TreeSize == 0 || proof.LeafIndex >= proof.TreeSize {
-		return false
+		return false, nil
 	}
-	return merkle.Verify(
+	return merkle.VerifyForSuite(
+		suiteID,
+		proof.STH.TreeAlg,
 		proof.LeafHash,
 		proof.LeafIndex,
 		proof.TreeSize,
@@ -570,13 +622,13 @@ func (s *Service) signSTH(ctx context.Context, leaves []model.GlobalLogLeaf) (mo
 	for i := range leaves {
 		hashes[i] = append([]byte(nil), leaves[i].LeafHash...)
 	}
-	root, err := merkle.RootFromLeaves(hashes)
+	root, err := merkle.RootFromLeavesForSuite(s.profile.Suite(), s.profile.Algorithm(), hashes)
 	if err != nil {
 		return model.SignedTreeHead{}, err
 	}
 	sth := model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
-		TreeAlg:        model.DefaultMerkleTreeAlg,
+		TreeAlg:        s.profile.Algorithm(),
 		TreeSize:       uint64(len(leaves)),
 		RootHash:       root,
 		TimestampUnixN: s.clock().UTC().UnixNano(),
@@ -601,12 +653,12 @@ func (s *Service) signSTHFromState(ctx context.Context, state model.GlobalLogSta
 	if state.TreeSize == 0 {
 		return model.SignedTreeHead{}, trusterr.New(trusterr.CodeInvalidArgument, "cannot sign empty global log")
 	}
-	if len(state.RootHash) != sha256.Size {
+	if len(state.RootHash) != s.profile.Size() {
 		return model.SignedTreeHead{}, trusterr.New(trusterr.CodeInternal, "global log state root is invalid")
 	}
 	sth := model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
-		TreeAlg:        model.DefaultMerkleTreeAlg,
+		TreeAlg:        s.profile.Algorithm(),
 		TreeSize:       state.TreeSize,
 		RootHash:       append([]byte(nil), state.RootHash...),
 		TimestampUnixN: s.clock().UTC().UnixNano(),
@@ -672,8 +724,8 @@ func (s *Service) loadState(ctx context.Context) (model.GlobalLogState, error) {
 }
 
 func (s *Service) appendState(state model.GlobalLogState, leaf model.GlobalLogLeaf) (model.GlobalLogState, []model.GlobalLogNode, error) {
-	if len(leaf.LeafHash) != sha256.Size {
-		return model.GlobalLogState{}, nil, trusterr.New(trusterr.CodeInvalidArgument, "global leaf hash must be sha256")
+	if len(leaf.LeafHash) != s.profile.Size() {
+		return model.GlobalLogState{}, nil, trusterr.New(trusterr.CodeInvalidArgument, "global leaf hash has the wrong digest size")
 	}
 	if leaf.LeafIndex != state.TreeSize {
 		return model.GlobalLogState{}, nil, trusterr.New(trusterr.CodeFailedPrecondition, "global leaf index does not match tree frontier")
@@ -697,7 +749,7 @@ func (s *Service) appendState(state model.GlobalLogState, leaf model.GlobalLogLe
 			return model.GlobalLogState{}, nil, trusterr.New(trusterr.CodeInternal, "global frontier start underflow")
 		}
 		parentStart := start - width
-		parent, err := merkle.HashNode(frontier[level], current)
+		parent, err := merkle.HashNodeForSuite(s.profile.Suite(), s.profile.Algorithm(), frontier[level], current)
 		if err != nil {
 			return model.GlobalLogState{}, nil, err
 		}
@@ -718,7 +770,7 @@ func (s *Service) appendState(state model.GlobalLogState, leaf model.GlobalLogLe
 		frontier = append(frontier, nil)
 	}
 	frontier[level] = append([]byte(nil), current...)
-	root, err := rootFromFrontier(frontier)
+	root, err := rootFromFrontier(s.profile, frontier)
 	if err != nil {
 		return model.GlobalLogState{}, nil, err
 	}
@@ -832,24 +884,27 @@ func (s *Service) subtreeRoot(ctx context.Context, start, width uint64) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	return merkle.HashNode(left, right)
+	return merkle.HashNodeForSuite(s.profile.Suite(), s.profile.Algorithm(), left, right)
 }
 
-func rootFromFrontier(frontier [][]byte) ([]byte, error) {
+func rootFromFrontier(profile merkle.Profile, frontier [][]byte) ([]byte, error) {
+	if profile.Size() == 0 {
+		return nil, trusterr.New(trusterr.CodeInternal, "global merkle profile is invalid")
+	}
 	var root []byte
 	for level := 0; level < len(frontier); level++ {
 		h := frontier[level]
 		if len(h) == 0 {
 			continue
 		}
-		if len(h) != sha256.Size {
+		if len(h) != profile.Size() {
 			return nil, trusterr.New(trusterr.CodeInternal, "global frontier hash is invalid")
 		}
 		if root == nil {
 			root = append([]byte(nil), h...)
 			continue
 		}
-		combined, err := merkle.HashNode(h, root)
+		combined, err := merkle.HashNodeForSuite(profile.Suite(), profile.Algorithm(), h, root)
 		if err != nil {
 			return nil, err
 		}

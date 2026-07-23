@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/receipt"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
@@ -106,6 +107,25 @@ func TestValidateDecisionRejectsLookupIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateDecisionForSuiteRequiresSuiteSignatureMetadata(t *testing.T) {
+	t.Parallel()
+
+	signed, record, accepted := validDecisionInputs(t, "request-a")
+	decision, err := BuildDecision("batch-a", signed, record, accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision.Accepted.ServerSig.Alg = cryptosuite.SignatureEd25519
+	if err := ValidateDecisionForSuite(cryptosuite.CNSMV1, decision.Identity, decision); err == nil {
+		t.Fatal("ValidateDecisionForSuite(CN_SM_V1) accepted INTL_V1 signature metadata")
+	}
+	decision.Accepted.ServerSig.Alg = cryptosuite.SignatureSM2SM3
+	decision.Accepted.ServerSig.Signature = nil
+	if err := ValidateDecisionForSuite(cryptosuite.CNSMV1, decision.Identity, decision); err == nil {
+		t.Fatal("ValidateDecisionForSuite(CN_SM_V1) accepted an empty signature")
+	}
+}
+
 func TestEquivalentDetectsResponseChanges(t *testing.T) {
 	t.Parallel()
 
@@ -140,6 +160,66 @@ func TestStorageKeyIsStableAndComponentSafe(t *testing.T) {
 	}
 	if first == StorageKey(model.IdempotencyIdentity{TenantID: "tenant", ClientID: "client", IdempotencyKey: "key\x00"}) {
 		t.Fatal("StorageKey() ignored embedded NUL")
+	}
+}
+
+func TestStorageKeyForSuitePinsCanonicalVectors(t *testing.T) {
+	t.Parallel()
+
+	identity := model.IdempotencyIdentity{
+		TenantID:       "tenant",
+		ClientID:       "client",
+		IdempotencyKey: "key",
+	}
+	tests := []struct {
+		name    string
+		suiteID cryptosuite.ID
+		want    string
+	}{
+		{
+			name:    "INTL_V1 SHA-256",
+			suiteID: cryptosuite.INTLV1,
+			want:    "35f7b4a2c0e49e8c72708eba6245c0fcca7107b13953141630f8b286a5947638",
+		},
+		{
+			name:    "CN_SM_V1 SM3 and suite framing",
+			suiteID: cryptosuite.CNSMV1,
+			want:    "c9c4fc9a13e82043c97e461201fdba1faf7286edeee33e5fd89b1b9096262645",
+		},
+	}
+	keys := make(map[string]struct{}, len(tests))
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := StorageKeyForSuite(tt.suiteID, identity)
+			if err != nil {
+				t.Fatalf("StorageKeyForSuite(%s) error = %v", tt.suiteID, err)
+			}
+			if got != tt.want {
+				t.Fatalf("StorageKeyForSuite(%s) = %q, want %q", tt.suiteID, got, tt.want)
+			}
+		})
+		key, err := StorageKeyForSuite(tt.suiteID, identity)
+		if err != nil {
+			t.Fatalf("StorageKeyForSuite(%s) error = %v", tt.suiteID, err)
+		}
+		if _, exists := keys[key]; exists {
+			t.Fatalf("suite-specific storage key collision for %s", tt.suiteID)
+		}
+		keys[key] = struct{}{}
+	}
+	if got := StorageKey(identity); got != tests[0].want {
+		t.Fatalf("StorageKey() = %q, want legacy INTL_V1 vector %q", got, tests[0].want)
+	}
+}
+
+func TestStorageKeyForSuiteRejectsUnknownSuite(t *testing.T) {
+	t.Parallel()
+
+	identity := model.IdempotencyIdentity{TenantID: "tenant", ClientID: "client", IdempotencyKey: "key"}
+	if _, err := StorageKeyForSuite(cryptosuite.ID("UNKNOWN"), identity); err == nil {
+		t.Fatal("StorageKeyForSuite() error = nil for unknown suite")
 	}
 }
 
