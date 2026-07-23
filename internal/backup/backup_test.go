@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -115,7 +116,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if report.SchemaVersion != SchemaManifest || report.BackupID == "" || len(report.Entries) == 0 {
+	if report.SchemaVersion != SchemaManifest || report.BackupID == "" || report.CryptoSuite != cryptosuite.INTLV1 || len(report.Entries) == 0 {
 		t.Fatalf("missing v4 manifest metadata: %+v", report)
 	}
 	if report.Bundles != 1 || report.Roots != 1 || report.GlobalLeaves != 1 || report.GlobalNodes == 0 || !report.GlobalState || report.STHs != 1 || report.GlobalOutboxes != 1 || report.AnchorResults != 1 {
@@ -125,7 +126,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if verified.AnchorResults != 1 || verified.GlobalTiles != 1 {
+	if verified.CryptoSuite != cryptosuite.INTLV1 || verified.AnchorResults != 1 || verified.GlobalTiles != 1 {
 		t.Fatalf("unexpected verify report: %+v", verified)
 	}
 
@@ -165,6 +166,37 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	}
 	if checkpoint, ok, err := dst.GetCheckpoint(ctx); err != nil || ok {
 		t.Fatalf("GetCheckpoint restored checkpoint=%+v ok=%v err=%v, want absent node-local state", checkpoint, ok, err)
+	}
+}
+
+func TestRestoreRejectsSuiteMismatchBeforeApplyingEntries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src"), SuiteID: cryptosuite.CNSMV1}
+	root := model.BatchRoot{
+		SchemaVersion: model.SchemaBatchRoot,
+		BatchID:       "cn-root",
+		BatchRoot:     repeatByte(0x33, 32),
+		TreeSize:      1,
+		ClosedAtUnixN: 1,
+	}
+	if err := src.PutRoot(ctx, root); err != nil {
+		t.Fatalf("PutRoot: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "cn.tdbackup")
+	report, err := Create(ctx, src, path, Options{Compression: "none"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if report.CryptoSuite != cryptosuite.CNSMV1 {
+		t.Fatalf("backup suite = %q", report.CryptoSuite)
+	}
+	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst"), SuiteID: cryptosuite.INTLV1}
+	if _, err := Restore(ctx, dst, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("Restore mismatch code=%s err=%v", trusterr.CodeOf(err), err)
+	}
+	if _, err := dst.LatestRoot(ctx); trusterr.CodeOf(err) != trusterr.CodeNotFound {
+		t.Fatalf("destination mutated before suite rejection: %v", err)
 	}
 }
 
@@ -330,6 +362,53 @@ func TestRestoreRejectsLegacySchemaBeforeApplyingEntries(t *testing.T) {
 			}
 			if _, err := dst.LatestRoot(ctx); trusterr.CodeOf(err) != trusterr.CodeNotFound {
 				t.Fatalf("LatestRoot after rejected restore error=%v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsMissingAndMixedSuiteBindings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		firstSuite  cryptosuite.ID
+		secondSuite cryptosuite.ID
+		wantCode    trusterr.Code
+	}{
+		{name: "missing", wantCode: trusterr.CodeFailedPrecondition},
+		{name: "mixed", firstSuite: cryptosuite.INTLV1, secondSuite: cryptosuite.CNSMV1, wantCode: trusterr.CodeDataLoss},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.name+".tdbackup")
+			f, err := os.Create(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tw := tar.NewWriter(f)
+			manifest := Manifest{
+				SchemaVersion: SchemaManifest,
+				BackupID:      "suite-binding-test",
+				CreatedAt:     time.Unix(1, 0).UTC().Format(time.RFC3339Nano),
+				Compression:   "none",
+				CryptoSuite:   tc.firstSuite,
+			}
+			var ordinal int64
+			if err := writeJSONTracked(tw, &manifest, &ordinal, "manifest.json", "manifest", manifest); err != nil {
+				t.Fatal(err)
+			}
+			manifest.CryptoSuite = tc.secondSuite
+			if err := writeJSONTracked(tw, &manifest, &ordinal, "summary.json", "summary", manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(context.Background(), path); trusterr.CodeOf(err) != tc.wantCode {
+				t.Fatalf("Verify code=%s err=%v, want=%s", trusterr.CodeOf(err), err, tc.wantCode)
 			}
 		})
 	}

@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 
+	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trusterr"
-	"github.com/spf13/cobra"
 )
 
 const metastoreScanPageSize = 1024
@@ -26,19 +27,20 @@ func newMetastoreCommand(rt *runtimeConfig) *cobra.Command {
 // CI. Skipped counts entries retained at the destination when overwrite is
 // disabled.
 type migrateReport struct {
-	From            string `json:"from"`
-	To              string `json:"to"`
-	Manifests       int    `json:"manifests"`
-	Bundles         int    `json:"bundles"`
-	Roots           int    `json:"roots"`
-	GlobalLeaves    int    `json:"global_leaves"`
-	GlobalNodes     int    `json:"global_nodes"`
-	GlobalState     bool   `json:"global_state"`
-	STHs            int    `json:"sths"`
-	GlobalTiles     int    `json:"global_tiles"`
-	AnchorResults   int    `json:"anchor_results"`
-	AnchorSchedules int    `json:"anchor_schedules"`
-	Skipped         int    `json:"skipped"`
+	From            string         `json:"from"`
+	To              string         `json:"to"`
+	CryptoSuite     cryptosuite.ID `json:"crypto_suite"`
+	Manifests       int            `json:"manifests"`
+	Bundles         int            `json:"bundles"`
+	Roots           int            `json:"roots"`
+	GlobalLeaves    int            `json:"global_leaves"`
+	GlobalNodes     int            `json:"global_nodes"`
+	GlobalState     bool           `json:"global_state"`
+	STHs            int            `json:"sths"`
+	GlobalTiles     int            `json:"global_tiles"`
+	AnchorResults   int            `json:"anchor_results"`
+	AnchorSchedules int            `json:"anchor_schedules"`
+	Skipped         int            `json:"skipped"`
 }
 
 type sthAnchorScheduleLister interface {
@@ -75,6 +77,10 @@ func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
 				return trusterr.Wrap(trusterr.CodeInternal, "open destination proofstore", err)
 			}
 			defer func() { _ = dst.Close() }()
+			sourceSuite, err := requireMatchingMigrationSuites(src, dst)
+			if err != nil {
+				return err
+			}
 
 			resultLister, ok := src.(proofstore.STHAnchorResultLister)
 			if !ok {
@@ -100,7 +106,7 @@ func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
 				}
 			}
 
-			report := migrateReport{From: fromPath, To: toPath}
+			report := migrateReport{From: fromPath, To: toPath, CryptoSuite: sourceSuite}
 
 			afterBatchID := ""
 			for {
@@ -375,4 +381,19 @@ func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().StringVar(&toKindStr, "to-kind", "pebble", "destination backend kind: file or pebble (default pebble)")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "overwrite existing entries instead of skipping")
 	return cmd
+}
+
+func requireMatchingMigrationSuites(src, dst proofstore.Store) (cryptosuite.ID, error) {
+	sourceSuite, err := proofstore.BoundCryptoSuite(src)
+	if err != nil {
+		return "", err
+	}
+	destinationSuite, err := proofstore.BoundCryptoSuite(dst)
+	if err != nil {
+		return "", err
+	}
+	if err := cryptosuite.RequireSame(sourceSuite, destinationSuite); err != nil {
+		return "", trusterr.Wrap(trusterr.CodeFailedPrecondition, "source and destination proofstore cryptographic suites do not match", err)
+	}
+	return sourceSuite, nil
 }
