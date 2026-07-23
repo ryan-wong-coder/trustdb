@@ -9,6 +9,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/receipt"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 func TestComputeBatchPlanOnlyAndMaterialized(t *testing.T) {
@@ -16,7 +17,7 @@ func TestComputeBatchPlanOnlyAndMaterialized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := LocalEngine{ServerID: "server-1", LogID: "log-1", ServerKeyID: "server-key", ServerPrivateKey: privateKey, ProofWorkers: 2}
+	engine := LocalEngine{ServerID: "server-1", LogID: "log-1", ServerKeyID: "server-key", ServerSigner: trustcrypto.MustNewEd25519Signer("server-key", privateKey), ProofWorkers: 2}
 	signed, records, accepted := syntheticCommitBatchInputs(8)
 	closedAt := time.Unix(123, 0).UTC()
 

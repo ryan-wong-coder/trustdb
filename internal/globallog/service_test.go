@@ -48,11 +48,10 @@ func newTestServiceForStore(t testing.TB, store Store) *Service {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	svc, err := New(Options{
-		Store:      store,
-		LogID:      "test-log",
-		KeyID:      "test-key",
-		PrivateKey: priv,
-		Clock:      func() time.Time { return time.Unix(100, 0).UTC() },
+		Store:  store,
+		LogID:  "test-log",
+		Signer: trustcrypto.MustNewEd25519Signer("test-key", priv),
+		Clock:  func() time.Time { return time.Unix(100, 0).UTC() },
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -186,7 +185,7 @@ func TestEvidenceUsesConfiguredAnchorSinkStream(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	svc, err := New(Options{
-		Store: store, LogID: "test-log", KeyID: "test-key", PrivateKey: priv,
+		Store: store, LogID: "test-log", Signer: trustcrypto.MustNewEd25519Signer("test-key", priv),
 		AnchorSinkName: anchor.NoopSinkName,
 		Clock:          func() time.Time { return time.Unix(100, 0).UTC() },
 	})
@@ -303,7 +302,7 @@ func TestAppendBatchRootSameIdentityReplayKeepsOriginalSigner(t *testing.T) {
 			t.Fatalf("GenerateEd25519Key(%s): %v", keyID, err)
 		}
 		svc, err := New(Options{
-			Store: store, NodeID: "stable-node", LogID: "stable-log", KeyID: keyID, PrivateKey: privateKey,
+			Store: store, NodeID: "stable-node", LogID: "stable-log", Signer: trustcrypto.MustNewEd25519Signer(keyID, privateKey),
 			Clock: func() time.Time { return time.Unix(100, 0).UTC() },
 		})
 		if err != nil {
@@ -362,11 +361,10 @@ func TestAppendBatchRootReplansAfterConcurrentWriterAdvancesTree(t *testing.T) {
 	}
 	newService := func(store Store) *Service {
 		svc, err := New(Options{
-			Store:      store,
-			LogID:      "test-log",
-			KeyID:      "test-key",
-			PrivateKey: privateKey,
-			Clock:      func() time.Time { return time.Unix(100, 0).UTC() },
+			Store:  store,
+			LogID:  "test-log",
+			Signer: trustcrypto.MustNewEd25519Signer("test-key", privateKey),
+			Clock:  func() time.Time { return time.Unix(100, 0).UTC() },
 		})
 		if err != nil {
 			t.Fatalf("New: %v", err)

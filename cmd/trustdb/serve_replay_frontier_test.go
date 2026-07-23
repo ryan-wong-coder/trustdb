@@ -16,6 +16,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	pebblestore "github.com/wowtrust/trustdb/internal/proofstore/pebble"
 	"github.com/wowtrust/trustdb/internal/receipt"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -152,7 +153,7 @@ func TestPebbleCheckpointedRestartUsesDurableIdempotencyWithoutWALAppend(t *test
 		t.Fatalf("GenerateKey(rotated restart server) error = %v", err)
 	}
 	restarted.ServerKeyID = "rotated-server-key"
-	restarted.ServerPrivateKey = rotatedPrivate
+	restarted.ServerSigner = trustcrypto.MustNewEd25519Signer("rotated-server-key", rotatedPrivate)
 	restarted.WAL = reopenedWAL
 	restarted.Idempotency = app.NewIdempotencyIndex()
 	restarted.DurableIdempotency = store

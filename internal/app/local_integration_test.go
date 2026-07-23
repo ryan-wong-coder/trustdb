@@ -57,12 +57,12 @@ func TestLocalEngineSubmitCommitVerify(t *testing.T) {
 	defer w.Close()
 
 	engine := LocalEngine{
-		ServerID:         "server-a",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              w,
-		Now:              func() time.Time { return time.Unix(200, 0) },
+		ServerID:        "server-a",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             w,
+		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
 	record, accepted, _, err := engine.Submit(context.Background(), signed)
 	if err != nil {
@@ -73,8 +73,8 @@ func TestLocalEngineSubmitCommitVerify(t *testing.T) {
 		t.Fatalf("CommitBatch() error = %v", err)
 	}
 	result, err := verify.ProofBundle(bytes.NewReader(raw), bundles[0], verify.TrustedKeys{
-		ClientPublicKey: clientPub,
-		ServerPublicKey: serverPub,
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerPublicKey: trustcrypto.MustNewEd25519PublicKey("", serverPub),
 	})
 	if err != nil {
 		t.Fatalf("VerifyProofBundle() error = %v", err)
@@ -99,11 +99,11 @@ func TestLocalEngineUsesKeyRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate server key error = %v", err)
 	}
-	reg, err := keystore.Open(filepath.Join(t.TempDir(), "keys.tdkeys"), "registry-key", regPriv, regPub)
+	reg, err := keystore.Open(filepath.Join(t.TempDir(), "keys.tdkeys"), trustcrypto.MustNewEd25519Signer("registry-key", regPriv), trustcrypto.MustNewEd25519PublicKey("registry-key", regPub))
 	if err != nil {
 		t.Fatalf("keystore.Open() error = %v", err)
 	}
-	if _, err := reg.RegisterClientKey("tenant-a", "client-a", "client-key", clientPub, time.Unix(50, 0), time.Time{}); err != nil {
+	if _, err := reg.RegisterClientKey("tenant-a", "client-a", "client-key", trustcrypto.MustNewEd25519PublicKey("client-key", clientPub), time.Unix(50, 0), time.Time{}); err != nil {
 		t.Fatalf("RegisterClientKey() error = %v", err)
 	}
 
@@ -135,12 +135,12 @@ func TestLocalEngineUsesKeyRegistry(t *testing.T) {
 	}
 	defer w.Close()
 	engine := LocalEngine{
-		ServerID:         "server-a",
-		ServerKeyID:      "server-key",
-		ClientKeys:       reg,
-		ServerPrivateKey: serverPriv,
-		WAL:              w,
-		Now:              func() time.Time { return time.Unix(200, 0) },
+		ServerID:     "server-a",
+		ServerKeyID:  "server-key",
+		ClientKeys:   reg,
+		ServerSigner: trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:          w,
+		Now:          func() time.Time { return time.Unix(200, 0) },
 	}
 	record, accepted, _, err := engine.Submit(context.Background(), signed)
 	if err != nil {
@@ -154,8 +154,8 @@ func TestLocalEngineUsesKeyRegistry(t *testing.T) {
 		t.Fatalf("CommitBatch() error = %v", err)
 	}
 	result, err := verify.ProofBundle(bytes.NewReader(raw), bundles[0], verify.TrustedKeys{
-		ClientPublicKey: clientPub,
-		ServerPublicKey: serverPub,
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerPublicKey: trustcrypto.MustNewEd25519PublicKey("", serverPub),
 	})
 	if err != nil {
 		t.Fatalf("VerifyProofBundle() error = %v", err)

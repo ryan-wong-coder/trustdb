@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/ed25519"
 	"fmt"
 	"runtime"
 	"sort"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/receipt"
@@ -22,14 +22,15 @@ import (
 type LocalEngine struct {
 	ServerID string
 	// LogID scopes batch and transparency-log identifiers for this compute node (shared proofstore).
-	LogID            string
-	ServerKeyID      string
-	ClientPublicKey  ed25519.PublicKey
-	ClientKeys       ClientKeyResolver
-	ServerPrivateKey ed25519.PrivateKey
-	ProofWorkers     int
-	WAL              *wal.Writer
-	Idempotency      *IdempotencyIndex
+	LogID           string
+	ServerKeyID     string
+	ClientPublicKey trustcrypto.PublicKeyDescriptor
+	ClientKeys      ClientKeyResolver
+	ServerSigner    trustcrypto.Signer
+	CryptoProvider  trustcrypto.Provider
+	ProofWorkers    int
+	WAL             *wal.Writer
+	Idempotency     *IdempotencyIndex
 	// DurableIdempotency resolves committed keys whose accepted WAL records
 	// were skipped below a trusted checkpoint. Nil preserves the WAL-only path.
 	DurableIdempotency DurableIdempotencyReader
@@ -61,7 +62,7 @@ func (e LocalEngine) Submit(ctx context.Context, signed model.SignedClaim) (mode
 		return model.ServerRecord{}, model.AcceptedReceipt{}, false, fmt.Errorf("app: WAL writer is nil")
 	}
 	now := e.now()
-	verified, keyStatus, claimHash, sigHash, err := e.validateSigned(signed, now)
+	verified, keyStatus, claimHash, sigHash, err := e.validateSigned(ctx, signed, now)
 	if err != nil {
 		return model.ServerRecord{}, model.AcceptedReceipt{}, false, err
 	}
@@ -80,7 +81,7 @@ func (e LocalEngine) Submit(ctx context.Context, signed model.SignedClaim) (mode
 		if err != nil {
 			return model.ServerRecord{}, model.AcceptedReceipt{}, err
 		}
-		return e.buildAccepted(signed, verified, keyStatus, claimHash, sigHash, pos, now)
+		return e.buildAccepted(ctx, signed, verified, keyStatus, claimHash, sigHash, pos, now)
 	}
 	if e.Idempotency == nil {
 		record, accepted, err := build()
@@ -147,17 +148,18 @@ func (e LocalEngine) MarkIdempotencyCommitted(identity model.IdempotencyIdentity
 	)
 }
 
-func (e LocalEngine) ReplayAccepted(record wal.Record) (ReplayedAccepted, error) {
+func (e LocalEngine) ReplayAccepted(ctx context.Context, record wal.Record) (ReplayedAccepted, error) {
 	var signed model.SignedClaim
 	if err := cborx.UnmarshalLimit(record.Payload, &signed, len(record.Payload)); err != nil {
 		return ReplayedAccepted{}, err
 	}
 	receivedAt := time.Unix(0, record.UnixNano).UTC()
-	verified, keyStatus, claimHash, sigHash, err := e.validateSigned(signed, receivedAt)
+	verified, keyStatus, claimHash, sigHash, err := e.validateSigned(ctx, signed, receivedAt)
 	if err != nil {
 		return ReplayedAccepted{}, err
 	}
 	serverRecord, accepted, err := e.buildAccepted(
+		ctx,
 		signed,
 		verified,
 		keyStatus,
@@ -176,20 +178,25 @@ func (e LocalEngine) ReplayAccepted(record wal.Record) (ReplayedAccepted, error)
 	}, nil
 }
 
-func (e LocalEngine) validateSigned(signed model.SignedClaim, receivedAt time.Time) (claim.Verified, string, []byte, []byte, error) {
+func (e LocalEngine) validateSigned(ctx context.Context, signed model.SignedClaim, receivedAt time.Time) (claim.Verified, string, []byte, []byte, error) {
+	provider := e.cryptoProvider()
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return claim.Verified{}, "", nil, nil, err
+	}
 	clientPub, keyStatus, err := e.resolveClientKey(signed, receivedAt)
 	if err != nil {
 		return claim.Verified{}, "", nil, nil, err
 	}
-	verified, err := claim.Verify(signed, clientPub)
+	verified, err := claim.VerifyWithProvider(ctx, signed, clientPub, provider)
 	if err != nil {
 		return claim.Verified{}, "", nil, nil, err
 	}
-	claimHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, verified.ClaimCBOR)
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, verified.ClaimCBOR)
 	if err != nil {
 		return claim.Verified{}, "", nil, nil, err
 	}
-	sigHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, signed.Signature.Signature)
+	sigHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
 	if err != nil {
 		return claim.Verified{}, "", nil, nil, err
 	}
@@ -197,6 +204,7 @@ func (e LocalEngine) validateSigned(signed model.SignedClaim, receivedAt time.Ti
 }
 
 func (e LocalEngine) buildAccepted(
+	ctx context.Context,
 	signed model.SignedClaim,
 	verified claim.Verified,
 	keyStatus string,
@@ -230,14 +238,18 @@ func (e LocalEngine) buildAccepted(
 		ReceivedAtUnixN: receivedAt.UnixNano(),
 		WAL:             pos,
 	}
-	accepted, err := receipt.SignAccepted(accepted, e.ServerKeyID, e.ServerPrivateKey)
+	signer, err := e.serverSigner()
+	if err != nil {
+		return model.ServerRecord{}, model.AcceptedReceipt{}, err
+	}
+	accepted, err = receipt.SignAcceptedWithProvider(ctx, e.cryptoProvider(), accepted, signer)
 	if err != nil {
 		return model.ServerRecord{}, model.AcceptedReceipt{}, err
 	}
 	return record, accepted, nil
 }
 
-func (e LocalEngine) resolveClientKey(signed model.SignedClaim, receivedAt time.Time) (ed25519.PublicKey, string, error) {
+func (e LocalEngine) resolveClientKey(signed model.SignedClaim, receivedAt time.Time) (trustcrypto.PublicKeyDescriptor, string, error) {
 	if e.ClientKeys != nil {
 		key, err := e.ClientKeys.LookupClientKeyAt(
 			signed.Claim.TenantID,
@@ -246,20 +258,27 @@ func (e LocalEngine) resolveClientKey(signed model.SignedClaim, receivedAt time.
 			receivedAt,
 		)
 		if err != nil {
-			return nil, "", err
+			return trustcrypto.PublicKeyDescriptor{}, "", err
 		}
-		if key.Alg != model.DefaultSignatureAlg {
-			return nil, "", fmt.Errorf("app: unsupported client key alg: %s", key.Alg)
+		descriptor := trustcrypto.PublicKeyDescriptor{
+			Suite:     cryptosuite.INTLV1,
+			KeyID:     key.KeyID,
+			Algorithm: key.Alg,
+			Encoding:  cryptosuite.Ed25519PublicKeyEncoding,
+			Bytes:     append([]byte(nil), key.PublicKey...),
 		}
-		if len(key.PublicKey) != ed25519.PublicKeySize {
-			return nil, "", fmt.Errorf("app: invalid resolved client public key size: %d", len(key.PublicKey))
+		if err := trustcrypto.ValidatePublicKey(e.cryptoProvider(), descriptor); err != nil {
+			return trustcrypto.PublicKeyDescriptor{}, "", fmt.Errorf("app: invalid resolved client public key: %w", err)
 		}
-		return ed25519.PublicKey(key.PublicKey), key.Status, nil
+		return descriptor, key.Status, nil
 	}
-	if len(e.ClientPublicKey) != ed25519.PublicKeySize {
-		return nil, "", fmt.Errorf("app: client public key or key resolver required")
+	if len(e.ClientPublicKey.Bytes) == 0 {
+		return trustcrypto.PublicKeyDescriptor{}, "", fmt.Errorf("app: client public key or key resolver required")
 	}
-	return e.ClientPublicKey, model.KeyStatusValid, nil
+	if err := trustcrypto.ValidatePublicKey(e.cryptoProvider(), e.ClientPublicKey); err != nil {
+		return trustcrypto.PublicKeyDescriptor{}, "", fmt.Errorf("app: invalid client public key: %w", err)
+	}
+	return e.ClientPublicKey.Clone(), model.KeyStatusValid, nil
 }
 
 func (e LocalEngine) CommitBatch(batchID string, closedAt time.Time, signed []model.SignedClaim, records []model.ServerRecord, accepted []model.AcceptedReceipt) ([]model.ProofBundle, error) {
@@ -321,6 +340,10 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 	if !materialized {
 		return result, nil
 	}
+	signer, err := e.serverSigner()
+	if err != nil {
+		return model.BatchCommit{}, err
+	}
 
 	result.Bundles = make([]model.ProofBundle, len(records))
 	errs := make([]error, len(records))
@@ -358,7 +381,7 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 					NodeID:        e.ServerID,
 					LogID:         e.LogID,
 				}
-				committed, err = receipt.SignCommitted(committed, e.ServerKeyID, e.ServerPrivateKey)
+				committed, err = receipt.SignCommittedWithProvider(ctx, e.cryptoProvider(), committed, signer)
 				if err != nil {
 					errs[i] = err
 					continue
@@ -454,4 +477,21 @@ func (e LocalEngine) now() time.Time {
 		return e.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (e LocalEngine) cryptoProvider() trustcrypto.Provider {
+	if e.CryptoProvider != nil {
+		return e.CryptoProvider
+	}
+	return trustcrypto.DefaultProvider()
+}
+
+func (e LocalEngine) serverSigner() (trustcrypto.Signer, error) {
+	if err := trustcrypto.ValidateSignerHandle(e.cryptoProvider().Suite(), e.ServerSigner); err != nil {
+		return nil, fmt.Errorf("app: invalid server signer: %w", err)
+	}
+	if e.ServerKeyID != "" && e.ServerSigner.Handle().KeyID != e.ServerKeyID {
+		return nil, fmt.Errorf("app: server signer key_id %q does not match configured key_id %q", e.ServerSigner.Handle().KeyID, e.ServerKeyID)
+	}
+	return e.ServerSigner, nil
 }

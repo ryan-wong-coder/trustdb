@@ -2,8 +2,8 @@ package claim
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base32"
 	"errors"
 	"fmt"
@@ -12,13 +12,13 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 const (
 	signingDomain                 = "trustdb.client-claim.v1"
-	recordDomain                  = "trustdb.record-id.v1"
 	maxSigningInputBufferCapacity = 1 << 20
 )
 
@@ -83,15 +83,33 @@ func SigningInput(claimCBOR []byte) []byte {
 }
 
 func Sign(claim model.ClientClaim, privateKey ed25519.PrivateKey) (model.SignedClaim, error) {
+	signer, err := trustcrypto.NewEd25519Signer(claim.KeyID, privateKey)
+	if err != nil {
+		return model.SignedClaim{}, err
+	}
+	return SignWithSigner(context.Background(), claim, signer)
+}
+
+func SignWithSigner(ctx context.Context, claim model.ClientClaim, signer trustcrypto.Signer) (model.SignedClaim, error) {
+	return SignWithProvider(ctx, trustcrypto.DefaultProvider(), claim, signer)
+}
+
+func SignWithProvider(ctx context.Context, provider trustcrypto.Provider, claim model.ClientClaim, signer trustcrypto.Signer) (model.SignedClaim, error) {
+	if provider == nil {
+		return model.SignedClaim{}, errors.New("crypto provider is required")
+	}
 	if claim.SchemaVersion != model.SchemaClientClaim {
 		return model.SignedClaim{}, fmt.Errorf("unexpected claim schema: %s", claim.SchemaVersion)
+	}
+	if signer == nil || signer.Handle().KeyID != claim.KeyID {
+		return model.SignedClaim{}, errors.New("signer key_id does not match claim key_id")
 	}
 	input, buf, err := pooledClaimSigningInput(claim)
 	if err != nil {
 		return model.SignedClaim{}, err
 	}
 	defer releaseSigningInputBuffer(buf)
-	sig, err := trustcrypto.SignEd25519(claim.KeyID, privateKey, input)
+	sig, err := trustcrypto.Sign(ctx, provider.Suite(), signer, input)
 	if err != nil {
 		return model.SignedClaim{}, err
 	}
@@ -103,6 +121,14 @@ func Sign(claim model.ClientClaim, privateKey ed25519.PrivateKey) (model.SignedC
 }
 
 func Verify(signed model.SignedClaim, publicKey ed25519.PublicKey) (Verified, error) {
+	descriptor, err := trustcrypto.NewEd25519PublicKey(signed.Claim.KeyID, publicKey)
+	if err != nil {
+		return Verified{}, err
+	}
+	return VerifyWithProvider(context.Background(), signed, descriptor, trustcrypto.DefaultProvider())
+}
+
+func VerifyWithProvider(ctx context.Context, signed model.SignedClaim, publicKey trustcrypto.PublicKeyDescriptor, provider trustcrypto.Provider) (Verified, error) {
 	if signed.SchemaVersion != model.SchemaSignedClaim {
 		return Verified{}, fmt.Errorf("unexpected signed claim schema: %s", signed.SchemaVersion)
 	}
@@ -115,14 +141,18 @@ func Verify(signed model.SignedClaim, publicKey ed25519.PublicKey) (Verified, er
 	}
 	input, buf := pooledSigningInput(claimCBOR)
 	defer releaseSigningInputBuffer(buf)
-	if err := trustcrypto.VerifyEd25519(publicKey, input, signed.Signature); err != nil {
+	if err := trustcrypto.Verify(ctx, provider, publicKey, input, signed.Signature); err != nil {
+		return Verified{}, err
+	}
+	recordID, err := RecordIDWithProvider(provider, claimCBOR, signed.Signature)
+	if err != nil {
 		return Verified{}, err
 	}
 	return Verified{
 		Claim:     signed.Claim,
 		ClaimCBOR: claimCBOR,
 		Signature: signed.Signature,
-		RecordID:  RecordID(claimCBOR, signed.Signature),
+		RecordID:  recordID,
 	}, nil
 }
 
@@ -157,12 +187,35 @@ func releaseSigningInputBuffer(buf *bytes.Buffer) {
 }
 
 func RecordID(claimCBOR []byte, sig model.Signature) string {
-	h := sha256.New()
-	h.Write([]byte(recordDomain))
+	return mustRecordIDWithProvider(trustcrypto.DefaultProvider(), claimCBOR, sig)
+}
+
+func RecordIDWithProvider(provider trustcrypto.Provider, claimCBOR []byte, sig model.Signature) (string, error) {
+	if provider == nil {
+		return "", errors.New("crypto provider is required")
+	}
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return "", err
+	}
+	factory, err := provider.HashFactory(suite.RecordIDHash.Algorithm)
+	if err != nil {
+		return "", err
+	}
+	h := factory.New()
+	h.Write([]byte(suite.Domains.RecordID))
 	h.Write([]byte{0})
 	h.Write(claimCBOR)
 	h.Write(sig.Signature)
 	sum := h.Sum(nil)
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum)
-	return "tr1" + strings.ToLower(enc)
+	return "tr1" + strings.ToLower(enc), nil
+}
+
+func mustRecordIDWithProvider(provider trustcrypto.Provider, claimCBOR []byte, sig model.Signature) string {
+	recordID, err := RecordIDWithProvider(provider, claimCBOR, sig)
+	if err != nil {
+		panic(err)
+	}
+	return recordID
 }

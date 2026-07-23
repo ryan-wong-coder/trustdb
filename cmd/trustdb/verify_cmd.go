@@ -18,6 +18,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/sproof"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/verify"
 )
 
@@ -174,9 +175,17 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 				opts = append(opts, verify.WithAnchorVerifier(pluginSink))
 			}
 
+			clientDescriptor, err := trustcrypto.NewEd25519PublicKey(bundle.SignedClaim.Claim.KeyID, clientPub)
+			if err != nil {
+				return err
+			}
+			serverDescriptor, err := trustcrypto.NewEd25519PublicKey("", serverPub)
+			if err != nil {
+				return err
+			}
 			result, err := verify.ProofBundle(f, bundle, verify.TrustedKeys{
-				ClientPublicKey: clientPub,
-				ServerPublicKey: serverPub,
+				ClientPublicKey: clientDescriptor,
+				ServerPublicKey: serverDescriptor,
 			}, opts...)
 			if err != nil {
 				return err
@@ -441,7 +450,14 @@ func resolveVerifyClientPub(bundle model.ProofBundle, clientPubPath, registryPat
 				return nil, err
 			}
 		}
-		reg, err := keystore.Open(registryPath, "", nil, registryPub)
+		registryDescriptor := trustcrypto.PublicKeyDescriptor{}
+		if len(registryPub) != 0 {
+			registryDescriptor, err = trustcrypto.NewEd25519PublicKey("", registryPub)
+			if err != nil {
+				return nil, err
+			}
+		}
+		reg, err := keystore.Open(registryPath, nil, registryDescriptor)
 		if err != nil {
 			return nil, err
 		}

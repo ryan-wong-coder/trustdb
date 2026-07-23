@@ -67,14 +67,14 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	defer writer.Close()
 
 	engine := app.LocalEngine{
-		ServerID:         "server-anchor-e2e",
-		LogID:            "server-anchor-e2e",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Idempotency:      app.NewIdempotencyIndex(),
-		Now:              func() time.Time { return time.Unix(300, 0) },
+		ServerID:        "server-anchor-e2e",
+		LogID:           "server-anchor-e2e",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Idempotency:     app.NewIdempotencyIndex(),
+		Now:             func() time.Time { return time.Unix(300, 0) },
 	}
 	proofStore := proofstore.LocalStore{Root: proofDir}
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 8, Workers: 2}, metrics)
@@ -102,11 +102,10 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 
 	rt := &runtimeConfig{logger: silentLogger()}
 	globalSvc, err := globallog.New(globallog.Options{
-		Store:      proofStore,
-		NodeID:     engine.ServerID,
-		LogID:      engine.ServerID,
-		KeyID:      engine.ServerKeyID,
-		PrivateKey: serverPriv,
+		Store:  proofStore,
+		NodeID: engine.ServerID,
+		LogID:  engine.ServerID,
+		Signer: trustcrypto.MustNewEd25519Signer(engine.ServerKeyID, serverPriv),
 	})
 	if err != nil {
 		t.Fatalf("globallog.New: %v", err)
@@ -309,11 +308,10 @@ func TestBackfillGlobalLog(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key server: %v", err)
 	}
 	globalSvc, err := globallog.New(globallog.Options{
-		Store:      proofStore,
-		NodeID:     "test-node",
-		LogID:      "test-global",
-		KeyID:      "test-key",
-		PrivateKey: serverPriv,
+		Store:  proofStore,
+		NodeID: "test-node",
+		LogID:  "test-global",
+		Signer: trustcrypto.MustNewEd25519Signer("test-key", serverPriv),
 	})
 	if err != nil {
 		t.Fatalf("globallog.New: %v", err)

@@ -6,7 +6,6 @@ package globallog
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"math/bits"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
@@ -62,23 +62,23 @@ type BatchAppendStore interface {
 }
 
 type Service struct {
-	mu         sync.Mutex
-	store      Store
-	nodeID     string
-	logID      string
-	keyID      string
-	privateKey ed25519.PrivateKey
-	clock      func() time.Time
-	anchorKey  *model.STHAnchorScheduleKey
+	mu        sync.Mutex
+	store     Store
+	nodeID    string
+	logID     string
+	signer    trustcrypto.Signer
+	provider  trustcrypto.Provider
+	clock     func() time.Time
+	anchorKey *model.STHAnchorScheduleKey
 }
 
 type Options struct {
-	Store      Store
-	NodeID     string
-	LogID      string
-	KeyID      string
-	PrivateKey ed25519.PrivateKey
-	Clock      func() time.Time
+	Store          Store
+	NodeID         string
+	LogID          string
+	Signer         trustcrypto.Signer
+	CryptoProvider trustcrypto.Provider
+	Clock          func() time.Time
 	// AnchorSinkName binds GlobalEvidence to the configured provider stream.
 	// Empty preserves the generic aggregate lookup used by standalone tools.
 	AnchorSinkName string
@@ -88,11 +88,12 @@ func New(opts Options) (*Service, error) {
 	if opts.Store == nil {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log store is required")
 	}
-	if len(opts.PrivateKey) != ed25519.PrivateKeySize {
-		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log signer private key is required")
+	provider := opts.CryptoProvider
+	if provider == nil {
+		provider = trustcrypto.DefaultProvider()
 	}
-	if opts.KeyID == "" {
-		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log signer key_id is required")
+	if err := trustcrypto.ValidateSignerWithProvider(context.Background(), provider, opts.Signer); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "global log signer is invalid", err)
 	}
 	clock := opts.Clock
 	if clock == nil {
@@ -104,12 +105,12 @@ func New(opts Options) (*Service, error) {
 	}
 	nodeID := strings.TrimSpace(opts.NodeID)
 	service := &Service{
-		store:      opts.Store,
-		nodeID:     nodeID,
-		logID:      logID,
-		keyID:      opts.KeyID,
-		privateKey: opts.PrivateKey,
-		clock:      clock,
+		store:    opts.Store,
+		nodeID:   nodeID,
+		logID:    logID,
+		signer:   opts.Signer,
+		provider: provider,
+		clock:    clock,
 	}
 	if sinkName := strings.TrimSpace(opts.AnchorSinkName); sinkName != "" {
 		service.anchorKey = &model.STHAnchorScheduleKey{NodeID: nodeID, LogID: logID, SinkName: sinkName}
@@ -125,8 +126,9 @@ func NewReader(store Store) (*Service, error) {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log store is required")
 	}
 	return &Service{
-		store: store,
-		clock: func() time.Time { return time.Now().UTC() },
+		store:    store,
+		provider: trustcrypto.DefaultProvider(),
+		clock:    func() time.Time { return time.Now().UTC() },
 	}, nil
 }
 
@@ -152,7 +154,7 @@ func (s *Service) AppendBatchRoots(ctx context.Context, roots []model.BatchRoot)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(s.privateKey) != ed25519.PrivateKeySize || s.keyID == "" {
+	if s.signer == nil {
 		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "global log signer is not configured")
 	}
 	if len(roots) == 0 {
@@ -249,7 +251,7 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 			LeafIndex:          state.TreeSize,
 			AppendedAtUnixN:    s.clock().UTC().UnixNano(),
 		}
-		hash, err := HashLeaf(leaf)
+		hash, err := HashLeafWithProvider(s.provider, leaf)
 		if err != nil {
 			return nil, false, trusterr.Wrap(trusterr.CodeInternal, "hash global log leaf", err)
 		}
@@ -258,7 +260,7 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 		if err != nil {
 			return nil, false, err
 		}
-		sth, err := s.signSTHFromState(nextState)
+		sth, err := s.signSTHFromState(ctx, nextState)
 		if err != nil {
 			return nil, false, err
 		}
@@ -497,28 +499,51 @@ func (s *Service) CompactHistory(ctx context.Context, tileSize uint64) (int, err
 }
 
 func HashLeaf(leaf model.GlobalLogLeaf) ([]byte, error) {
+	return HashLeafWithProvider(trustcrypto.DefaultProvider(), leaf)
+}
+
+func HashLeafWithProvider(provider trustcrypto.Provider, leaf model.GlobalLogLeaf) ([]byte, error) {
+	if provider == nil {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log crypto provider is required")
+	}
 	leaf.LeafHash = nil
 	leaf.AppendedAtUnixN = 0
 	payload, err := cborx.Marshal(leaf)
 	if err != nil {
 		return nil, err
 	}
-	h := sha256.New()
-	h.Write([]byte{0})
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return nil, err
+	}
+	factory, err := provider.HashFactory(suite.Merkle.Hash.Algorithm)
+	if err != nil {
+		return nil, err
+	}
+	h := factory.New()
+	h.Write([]byte{suite.Merkle.LeafPrefix})
 	h.Write([]byte(model.SchemaGlobalLogLeaf))
 	h.Write([]byte{0})
 	h.Write(payload)
 	return h.Sum(nil), nil
 }
 
-func VerifySTH(sth model.SignedTreeHead, publicKey ed25519.PublicKey) error {
+func VerifySTH(sth model.SignedTreeHead, publicKey []byte) error {
+	descriptor, err := trustcrypto.NewEd25519PublicKey("", publicKey)
+	if err != nil {
+		return err
+	}
+	return VerifySTHWithProvider(context.Background(), sth, descriptor, trustcrypto.DefaultProvider())
+}
+
+func VerifySTHWithProvider(ctx context.Context, sth model.SignedTreeHead, publicKey trustcrypto.PublicKeyDescriptor, provider trustcrypto.Provider) error {
 	sig := sth.Signature
 	sth.Signature = model.Signature{}
 	payload, err := cborx.Marshal(sth)
 	if err != nil {
 		return err
 	}
-	if err := trustcrypto.VerifyEd25519(publicKey, domainInput(sthDomain, payload), sig); err != nil {
+	if err := trustcrypto.Verify(ctx, provider, publicKey, domainInput(sthDomain, payload), sig); err != nil {
 		return fmt.Errorf("verify signed tree head: %w", err)
 	}
 	return nil
@@ -540,7 +565,7 @@ func VerifyInclusion(proof model.GlobalLogProof) bool {
 	)
 }
 
-func (s *Service) signSTH(leaves []model.GlobalLogLeaf) (model.SignedTreeHead, error) {
+func (s *Service) signSTH(ctx context.Context, leaves []model.GlobalLogLeaf) (model.SignedTreeHead, error) {
 	hashes := make([][]byte, len(leaves))
 	for i := range leaves {
 		hashes[i] = append([]byte(nil), leaves[i].LeafHash...)
@@ -564,7 +589,7 @@ func (s *Service) signSTH(leaves []model.GlobalLogLeaf) (model.SignedTreeHead, e
 	if err != nil {
 		return model.SignedTreeHead{}, err
 	}
-	sig, err := trustcrypto.SignEd25519(s.keyID, s.privateKey, domainInput(sthDomain, payload))
+	sig, err := trustcrypto.Sign(ctx, s.provider.Suite(), s.signer, domainInput(sthDomain, payload))
 	if err != nil {
 		return model.SignedTreeHead{}, err
 	}
@@ -572,7 +597,7 @@ func (s *Service) signSTH(leaves []model.GlobalLogLeaf) (model.SignedTreeHead, e
 	return sth, nil
 }
 
-func (s *Service) signSTHFromState(state model.GlobalLogState) (model.SignedTreeHead, error) {
+func (s *Service) signSTHFromState(ctx context.Context, state model.GlobalLogState) (model.SignedTreeHead, error) {
 	if state.TreeSize == 0 {
 		return model.SignedTreeHead{}, trusterr.New(trusterr.CodeInvalidArgument, "cannot sign empty global log")
 	}
@@ -594,7 +619,7 @@ func (s *Service) signSTHFromState(state model.GlobalLogState) (model.SignedTree
 	if err != nil {
 		return model.SignedTreeHead{}, err
 	}
-	sig, err := trustcrypto.SignEd25519(s.keyID, s.privateKey, domainInput(sthDomain, payload))
+	sig, err := trustcrypto.Sign(ctx, s.provider.Suite(), s.signer, domainInput(sthDomain, payload))
 	if err != nil {
 		return model.SignedTreeHead{}, err
 	}

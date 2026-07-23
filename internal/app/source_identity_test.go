@@ -53,13 +53,13 @@ func TestLocalEnginePropagatesSourceIdentity(t *testing.T) {
 	defer w.Close()
 
 	engine := LocalEngine{
-		ServerID:         "node-a",
-		LogID:            "log-a",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              w,
-		Now:              func() time.Time { return time.Unix(200, 0) },
+		ServerID:        "node-a",
+		LogID:           "log-a",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             w,
+		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
 	record, accepted, _, err := engine.Submit(context.Background(), signed)
 	if err != nil {

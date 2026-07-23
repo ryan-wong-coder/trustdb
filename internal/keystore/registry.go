@@ -2,8 +2,7 @@ package keystore
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/sha256"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,13 +14,13 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 const (
 	signDomain = "trustdb.key-event.v1"
-	hashDomain = "trustdb.key-event-hash.v1"
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -29,9 +28,9 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 type Registry struct {
 	mu       sync.RWMutex
 	path     string
-	keyID    string
-	priv     ed25519.PrivateKey
-	pub      ed25519.PublicKey
+	signer   trustcrypto.Signer
+	pub      trustcrypto.PublicKeyDescriptor
+	provider trustcrypto.Provider
 	events   []model.KeyEvent
 	byKey    map[string]keyTimeline
 	lastHash []byte
@@ -43,19 +42,36 @@ type keyTimeline struct {
 	compromised *model.KeyEvent
 }
 
-func Open(path, registryKeyID string, registryPriv ed25519.PrivateKey, registryPub ed25519.PublicKey) (*Registry, error) {
-	if registryPriv != nil && len(registryPriv) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("keystore: invalid registry private key size: %d", len(registryPriv))
+func Open(path string, registrySigner trustcrypto.Signer, registryPub trustcrypto.PublicKeyDescriptor) (*Registry, error) {
+	provider := trustcrypto.DefaultProvider()
+	if registrySigner != nil {
+		if err := trustcrypto.ValidateSignerHandle(provider.Suite(), registrySigner); err != nil {
+			return nil, fmt.Errorf("keystore: invalid registry signer: %w", err)
+		}
+		signerPub, err := registrySigner.PublicKey(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("keystore: read registry public key: %w", err)
+		}
+		if err := trustcrypto.ValidatePublicKey(provider, signerPub); err != nil {
+			return nil, fmt.Errorf("keystore: invalid signer public key: %w", err)
+		}
+		if len(registryPub.Bytes) == 0 {
+			registryPub = signerPub
+		} else if !samePublicKey(registryPub, signerPub) {
+			return nil, errors.New("keystore: registry signer public key does not match configured registry public key")
+		}
 	}
-	if registryPub != nil && len(registryPub) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("keystore: invalid registry public key size: %d", len(registryPub))
+	if len(registryPub.Bytes) != 0 {
+		if err := trustcrypto.ValidatePublicKey(provider, registryPub); err != nil {
+			return nil, fmt.Errorf("keystore: invalid registry public key: %w", err)
+		}
 	}
 	r := &Registry{
-		path:  path,
-		keyID: registryKeyID,
-		priv:  registryPriv,
-		pub:   registryPub,
-		byKey: make(map[string]keyTimeline),
+		path:     path,
+		signer:   registrySigner,
+		pub:      registryPub.Clone(),
+		provider: provider,
+		byKey:    make(map[string]keyTimeline),
 	}
 	if err := r.load(); err != nil {
 		return nil, err
@@ -63,15 +79,26 @@ func Open(path, registryKeyID string, registryPriv ed25519.PrivateKey, registryP
 	return r, nil
 }
 
-func (r *Registry) RegisterClientKey(tenantID, clientID, keyID string, publicKey ed25519.PublicKey, validFrom, validUntil time.Time) (model.KeyEvent, error) {
-	if len(r.priv) != ed25519.PrivateKeySize {
+func samePublicKey(a, b trustcrypto.PublicKeyDescriptor) bool {
+	return a.Suite == b.Suite &&
+		a.Algorithm == b.Algorithm &&
+		a.Encoding == b.Encoding &&
+		(a.KeyID == "" || b.KeyID == "" || a.KeyID == b.KeyID) &&
+		bytes.Equal(a.Bytes, b.Bytes)
+}
+
+func (r *Registry) RegisterClientKey(tenantID, clientID, keyID string, publicKey trustcrypto.PublicKeyDescriptor, validFrom, validUntil time.Time) (model.KeyEvent, error) {
+	if r.signer == nil {
 		return model.KeyEvent{}, errors.New("keystore: registry private key required")
 	}
 	if tenantID == "" || clientID == "" || keyID == "" {
 		return model.KeyEvent{}, errors.New("keystore: tenant_id, client_id, and key_id are required")
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return model.KeyEvent{}, fmt.Errorf("keystore: invalid client public key size: %d", len(publicKey))
+	if publicKey.KeyID != "" && publicKey.KeyID != keyID {
+		return model.KeyEvent{}, fmt.Errorf("keystore: public key key_id %q does not match registration key_id %q", publicKey.KeyID, keyID)
+	}
+	if err := trustcrypto.ValidatePublicKey(r.provider, publicKey); err != nil {
+		return model.KeyEvent{}, fmt.Errorf("keystore: invalid client public key: %w", err)
 	}
 	if !validUntil.IsZero() && !validUntil.After(validFrom) {
 		return model.KeyEvent{}, errors.New("keystore: valid_until must be after valid_from")
@@ -82,8 +109,8 @@ func (r *Registry) RegisterClientKey(tenantID, clientID, keyID string, publicKey
 		TenantID:        tenantID,
 		ClientID:        clientID,
 		KeyID:           keyID,
-		Alg:             model.DefaultSignatureAlg,
-		PublicKey:       append([]byte(nil), publicKey...),
+		Alg:             publicKey.Algorithm,
+		PublicKey:       append([]byte(nil), publicKey.Bytes...),
 		ValidFromUnixN:  validFrom.UTC().UnixNano(),
 		ValidUntilUnixN: unixNanoOrZero(validUntil),
 	}
@@ -91,7 +118,7 @@ func (r *Registry) RegisterClientKey(tenantID, clientID, keyID string, publicKey
 }
 
 func (r *Registry) RevokeClientKey(tenantID, clientID, keyID string, revokedAt time.Time, reason string) (model.KeyEvent, error) {
-	if len(r.priv) != ed25519.PrivateKeySize {
+	if r.signer == nil {
 		return model.KeyEvent{}, errors.New("keystore: registry private key required")
 	}
 	if tenantID == "" || clientID == "" || keyID == "" {
@@ -111,7 +138,7 @@ func (r *Registry) RevokeClientKey(tenantID, clientID, keyID string, revokedAt t
 }
 
 func (r *Registry) MarkClientKeyCompromised(tenantID, clientID, keyID string, compromisedAt time.Time, reason string) (model.KeyEvent, error) {
-	if len(r.priv) != ed25519.PrivateKeySize {
+	if r.signer == nil {
 		return model.KeyEvent{}, errors.New("keystore: registry private key required")
 	}
 	if tenantID == "" || clientID == "" || keyID == "" {
@@ -200,11 +227,11 @@ func (r *Registry) appendEvent(ev model.KeyEvent) (model.KeyEvent, error) {
 	ev.Sequence = uint64(len(r.events) + 1)
 	ev.PrevEventHash = append([]byte(nil), r.lastHash...)
 	var err error
-	ev.RegistrySignature, err = signEvent(ev, r.keyID, r.priv)
+	ev.RegistrySignature, err = signEvent(ev, r.provider, r.signer)
 	if err != nil {
 		return model.KeyEvent{}, err
 	}
-	ev.EventHash, err = hashEvent(ev)
+	ev.EventHash, err = hashEventWithProvider(r.provider, ev)
 	if err != nil {
 		return model.KeyEvent{}, err
 	}
@@ -267,12 +294,12 @@ func (r *Registry) load() error {
 		if !bytes.Equal(ev.PrevEventHash, r.lastHash) {
 			return fmt.Errorf("keystore: hash chain mismatch at event %d", i)
 		}
-		if len(r.pub) == ed25519.PublicKeySize {
-			if err := verifyEvent(ev, r.pub); err != nil {
+		if len(r.pub.Bytes) != 0 {
+			if err := verifyEvent(ev, r.pub, r.provider); err != nil {
 				return fmt.Errorf("keystore: event %d signature: %w", i, err)
 			}
 		}
-		eventHash, err := hashEvent(ev)
+		eventHash, err := hashEventWithProvider(r.provider, ev)
 		if err != nil {
 			return err
 		}
@@ -334,17 +361,17 @@ func (r *Registry) applyLocked(ev model.KeyEvent) error {
 	return nil
 }
 
-func signEvent(ev model.KeyEvent, keyID string, priv ed25519.PrivateKey) (model.Signature, error) {
+func signEvent(ev model.KeyEvent, provider trustcrypto.Provider, signer trustcrypto.Signer) (model.Signature, error) {
 	ev.RegistrySignature = model.Signature{}
 	ev.EventHash = nil
 	payload, err := cborx.Marshal(ev)
 	if err != nil {
 		return model.Signature{}, err
 	}
-	return trustcrypto.SignEd25519(keyID, priv, domainInput(signDomain, payload))
+	return trustcrypto.Sign(context.Background(), provider.Suite(), signer, domainInput(signDomain, payload))
 }
 
-func verifyEvent(ev model.KeyEvent, pub ed25519.PublicKey) error {
+func verifyEvent(ev model.KeyEvent, pub trustcrypto.PublicKeyDescriptor, provider trustcrypto.Provider) error {
 	sig := ev.RegistrySignature
 	ev.RegistrySignature = model.Signature{}
 	ev.EventHash = nil
@@ -352,17 +379,31 @@ func verifyEvent(ev model.KeyEvent, pub ed25519.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	return trustcrypto.VerifyEd25519(pub, domainInput(signDomain, payload), sig)
+	return trustcrypto.Verify(context.Background(), provider, pub, domainInput(signDomain, payload), sig)
 }
 
 func hashEvent(ev model.KeyEvent) ([]byte, error) {
+	return hashEventWithProvider(trustcrypto.DefaultProvider(), ev)
+}
+
+func hashEventWithProvider(provider trustcrypto.Provider, ev model.KeyEvent) ([]byte, error) {
+	if provider == nil {
+		return nil, errors.New("keystore: crypto provider is required")
+	}
 	ev.EventHash = nil
 	payload, err := cborx.Marshal(ev)
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(domainInput(hashDomain, payload))
-	return sum[:], nil
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return nil, err
+	}
+	factory, err := provider.HashFactory(suite.KeyEventHash.Algorithm)
+	if err != nil {
+		return nil, err
+	}
+	return factory.Sum(domainInput(suite.Domains.KeyEventHash, payload)), nil
 }
 
 func appendFrame(path string, payload []byte) error {

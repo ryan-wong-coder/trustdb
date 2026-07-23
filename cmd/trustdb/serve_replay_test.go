@@ -65,12 +65,12 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
 	engine := app.LocalEngine{
-		ServerID:         "server-replay",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Now:              func() time.Time { return time.Unix(200, 123) },
+		ServerID:        "server-replay",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Now:             func() time.Time { return time.Unix(200, 123) },
 	}
 	wantRecord, wantAccepted, _, err := engine.Submit(context.Background(), signed)
 	if err != nil {
@@ -86,12 +86,12 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 	}
 	defer reopened.Close()
 	restartedEngine := app.LocalEngine{
-		ServerID:         "server-replay",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              reopened,
-		Now:              func() time.Time { return time.Unix(300, 0) },
+		ServerID:        "server-replay",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             reopened,
+		Now:             func() time.Time { return time.Unix(300, 0) },
 	}
 	store := proofstore.LocalStore{Root: filepath.Join(dir, "proofs")}
 	batchSvc := batch.New(
@@ -289,12 +289,12 @@ func newRecoveryEnv(t *testing.T, numClaims int) *recoveryEnv {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
 	engine := app.LocalEngine{
-		ServerID:         "server-recovery",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Now:              func() time.Time { return time.Unix(400, 500) },
+		ServerID:        "server-recovery",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Now:             func() time.Time { return time.Unix(400, 500) },
 	}
 
 	items := make([]batch.Accepted, 0, numClaims)
@@ -580,13 +580,13 @@ func newIdempotencyEnv(t *testing.T) *idempotencyEnv {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
 	engine := app.LocalEngine{
-		ServerID:         "server-idem",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Idempotency:      app.NewIdempotencyIndex(),
-		Now:              func() time.Time { return time.Unix(500, 0) },
+		ServerID:        "server-idem",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Idempotency:     app.NewIdempotencyIndex(),
+		Now:             func() time.Time { return time.Unix(500, 0) },
 	}
 	return &idempotencyEnv{
 		dir:       dir,
@@ -1116,12 +1116,12 @@ func TestReplayDirectoryModeRestoresRecord(t *testing.T) {
 		t.Fatalf("mode = %q, want directory", mode)
 	}
 	engine := app.LocalEngine{
-		ServerID:         "server-dir-replay",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Now:              func() time.Time { return time.Unix(200, 123) },
+		ServerID:        "server-dir-replay",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Now:             func() time.Time { return time.Unix(200, 123) },
 	}
 
 	wantRecords := make([]model.ServerRecord, 0, 4)
@@ -1177,13 +1177,13 @@ func TestReplayDirectoryModeRestoresRecord(t *testing.T) {
 	defer reopened.Close()
 
 	restarted := app.LocalEngine{
-		ServerID:         "server-dir-replay",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              reopened,
-		Idempotency:      app.NewIdempotencyIndex(),
-		Now:              func() time.Time { return time.Unix(300, 0) },
+		ServerID:        "server-dir-replay",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             reopened,
+		Idempotency:     app.NewIdempotencyIndex(),
+		Now:             func() time.Time { return time.Unix(300, 0) },
 	}
 	store := proofstore.LocalStore{Root: filepath.Join(dir, "proofs")}
 	svc := batch.New(
@@ -1244,12 +1244,12 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 		t.Fatalf("openWALWriter() error = %v", err)
 	}
 	engine := app.LocalEngine{
-		ServerID:         "server-skip-seg",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Now:              func() time.Time { return time.Unix(400, 0) },
+		ServerID:        "server-skip-seg",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Now:             func() time.Time { return time.Unix(400, 0) },
 	}
 
 	const totalRecords = 6
@@ -1354,12 +1354,12 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 	}
 	defer reopened.Close()
 	restarted := app.LocalEngine{
-		ServerID:         "server-skip-seg",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              reopened,
-		Now:              func() time.Time { return time.Unix(600, 0) },
+		ServerID:        "server-skip-seg",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             reopened,
+		Now:             func() time.Time { return time.Unix(600, 0) },
 	}
 	svc := batch.New(
 		restarted,

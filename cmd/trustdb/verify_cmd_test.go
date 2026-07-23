@@ -379,14 +379,14 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 	t.Cleanup(func() { _ = writer.Close() })
 
 	engine := app.LocalEngine{
-		ServerID:         "server-verify",
-		LogID:            "server-verify",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Idempotency:      app.NewIdempotencyIndex(),
-		Now:              func() time.Time { return time.Unix(500, 0) },
+		ServerID:        "server-verify",
+		LogID:           "server-verify",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Idempotency:     app.NewIdempotencyIndex(),
+		Now:             func() time.Time { return time.Unix(500, 0) },
 	}
 	proofStore := proofstore.LocalStore{Root: proofDir}
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 4, Workers: 1}, metrics)
@@ -414,11 +414,10 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 
 	rt := &runtimeConfig{logger: silentLogger()}
 	globalSvc, err := globallog.New(globallog.Options{
-		Store:      proofStore,
-		NodeID:     engine.ServerID,
-		LogID:      engine.ServerID,
-		KeyID:      engine.ServerKeyID,
-		PrivateKey: serverPriv,
+		Store:  proofStore,
+		NodeID: engine.ServerID,
+		LogID:  engine.ServerID,
+		Signer: trustcrypto.MustNewEd25519Signer(engine.ServerKeyID, serverPriv),
 	})
 	if err != nil {
 		t.Fatalf("globallog.New: %v", err)
