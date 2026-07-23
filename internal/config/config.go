@@ -62,6 +62,12 @@ nats:
   stream: "TRUSTDB_INGRESS"
   subject: "trustdb.ingress.v1.claims"
   durable: "trustdb-ingress"
+  provision: true
+  stream_storage: "file"
+  stream_replicas: 1
+  stream_max_bytes: 10737418240
+  stream_max_age: "0s"
+  duplicate_window: "2m"
   workers: 0
   fetch_batch: 256
   fetch_wait: "1s"
@@ -217,6 +223,12 @@ type NATS struct {
 	Stream          string   `mapstructure:"stream" json:"stream"`
 	Subject         string   `mapstructure:"subject" json:"subject"`
 	Durable         string   `mapstructure:"durable" json:"durable"`
+	Provision       bool     `mapstructure:"provision" json:"provision"`
+	StreamStorage   string   `mapstructure:"stream_storage" json:"stream_storage"`
+	StreamReplicas  int      `mapstructure:"stream_replicas" json:"stream_replicas"`
+	StreamMaxBytes  int64    `mapstructure:"stream_max_bytes" json:"stream_max_bytes"`
+	StreamMaxAge    string   `mapstructure:"stream_max_age" json:"stream_max_age"`
+	DuplicateWindow string   `mapstructure:"duplicate_window" json:"duplicate_window"`
 	Workers         int      `mapstructure:"workers" json:"workers"`
 	FetchBatch      int      `mapstructure:"fetch_batch" json:"fetch_batch"`
 	FetchWait       string   `mapstructure:"fetch_wait" json:"fetch_wait"`
@@ -347,20 +359,26 @@ func Default() Config {
 			ShutdownTimeout:   "10s",
 		},
 		NATS: NATS{
-			URLs:           []string{"nats://127.0.0.1:4222"},
-			Stream:         "TRUSTDB_INGRESS",
-			Subject:        "trustdb.ingress.v1.claims",
-			Durable:        "trustdb-ingress",
-			Workers:        0,
-			FetchBatch:     256,
-			FetchWait:      "1s",
-			AckWait:        "30s",
-			MaxAckPending:  2048,
-			MaxDeliver:     10,
-			ConnectTimeout: "5s",
-			ReconnectWait:  "1s",
-			MaxReconnects:  -1,
-			DrainTimeout:   "10s",
+			URLs:            []string{"nats://127.0.0.1:4222"},
+			Stream:          "TRUSTDB_INGRESS",
+			Subject:         "trustdb.ingress.v1.claims",
+			Durable:         "trustdb-ingress",
+			Provision:       true,
+			StreamStorage:   "file",
+			StreamReplicas:  1,
+			StreamMaxBytes:  10 << 30,
+			StreamMaxAge:    "0s",
+			DuplicateWindow: "2m",
+			Workers:         0,
+			FetchBatch:      256,
+			FetchWait:       "1s",
+			AckWait:         "30s",
+			MaxAckPending:   2048,
+			MaxDeliver:      10,
+			ConnectTimeout:  "5s",
+			ReconnectWait:   "1s",
+			MaxReconnects:   -1,
+			DrainTimeout:    "10s",
 		},
 		Registry: Registry{
 			KeyID: "registry-key",
@@ -613,6 +631,23 @@ func validateNATS(n NATS) error {
 	if err := validateNATSName("nats.durable", n.Durable); err != nil {
 		return err
 	}
+	switch strings.ToLower(strings.TrimSpace(n.StreamStorage)) {
+	case "file", "memory":
+	default:
+		return fmt.Errorf("nats.stream_storage must be file or memory")
+	}
+	if n.StreamReplicas < 1 || n.StreamReplicas > 5 {
+		return fmt.Errorf("nats.stream_replicas must be between 1 and 5")
+	}
+	if n.StreamMaxBytes <= 0 {
+		return fmt.Errorf("nats.stream_max_bytes must be greater than 0")
+	}
+	if err := validateNonNegativeDuration("nats.stream_max_age", n.StreamMaxAge); err != nil {
+		return err
+	}
+	if err := validatePositiveDuration("nats.duplicate_window", n.DuplicateWindow); err != nil {
+		return err
+	}
 	if n.Workers < 0 {
 		return fmt.Errorf("nats.workers must be zero or greater")
 	}
@@ -652,6 +687,11 @@ func validateNATS(n NATS) error {
 		return fmt.Errorf("nats.tls.cert_file and nats.tls.key_file must be configured together")
 	}
 	return nil
+}
+
+// Validate checks the optional NATS ingress configuration in isolation.
+func (n NATS) Validate() error {
+	return validateNATS(n)
 }
 
 func validateNATSURL(raw string) error {

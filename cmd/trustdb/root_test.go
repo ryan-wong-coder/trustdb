@@ -68,6 +68,8 @@ func TestConfigEnvOverride(t *testing.T) {
 	t.Setenv("TRUSTDB_NATS_ENABLED", "true")
 	t.Setenv("TRUSTDB_NATS_URLS", "nats://10.0.0.1:4222,tls://10.0.0.2:4222")
 	t.Setenv("TRUSTDB_NATS_WORKERS", "24")
+	t.Setenv("TRUSTDB_NATS_PROVISION", "false")
+	t.Setenv("TRUSTDB_NATS_STREAM_MAX_BYTES", "536870912")
 	t.Setenv("TRUSTDB_NATS_TOKEN", "nats-secret")
 
 	var out, errOut bytes.Buffer
@@ -121,6 +123,9 @@ func TestConfigEnvOverride(t *testing.T) {
 	}
 	if nats["enabled"] != true || nats["workers"] != float64(24) {
 		t.Fatalf("nats enabled/workers = %#v", nats)
+	}
+	if nats["provision"] != false || nats["stream_max_bytes"] != float64(536870912) {
+		t.Fatalf("nats topology env overrides = %#v", nats)
 	}
 	natsURLs, ok := nats["urls"].([]any)
 	if !ok || len(natsURLs) != 2 || natsURLs[1] != "tls://10.0.0.2:4222" {
