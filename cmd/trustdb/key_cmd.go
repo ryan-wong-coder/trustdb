@@ -37,6 +37,7 @@ func newKeygenCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer clear(priv)
 			if err := ensureDir(outDir); err != nil {
 				return err
 			}

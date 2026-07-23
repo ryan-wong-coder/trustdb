@@ -179,6 +179,9 @@ func (SoftwareProvider) ResolveSigner(ctx context.Context, descriptor Descriptor
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := descriptor.Validate(); err != nil {
+		return nil, err
+	}
 	if descriptor.Provider != ProviderSoftware || descriptor.Software == nil {
 		return nil, invalid("software provider requires software reference")
 	}
