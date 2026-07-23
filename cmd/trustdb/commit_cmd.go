@@ -7,12 +7,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/prooflevel"
-	"github.com/spf13/cobra"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 func newCommitCommand(rt *runtimeConfig) *cobra.Command {
@@ -51,13 +52,17 @@ func newCommitCommand(rt *runtimeConfig) *cobra.Command {
 				return err
 			}
 			defer writer.Close()
+			serverSigner, err := trustcrypto.NewEd25519Signer(serverKeyID, serverPriv)
+			if err != nil {
+				return err
+			}
 			engine := app.LocalEngine{
-				ServerID:         serverID,
-				ServerKeyID:      serverKeyID,
-				ClientPublicKey:  clientPub,
-				ClientKeys:       clientKeys,
-				ServerPrivateKey: serverPriv,
-				WAL:              writer,
+				ServerID:        serverID,
+				ServerKeyID:     serverKeyID,
+				ClientPublicKey: clientPub,
+				ClientKeys:      clientKeys,
+				ServerSigner:    serverSigner,
+				WAL:             writer,
 			}
 			record, accepted, _, err := engine.Submit(context.Background(), signed)
 			if err != nil {
@@ -135,13 +140,17 @@ func newCommitBatchCommand(rt *runtimeConfig) *cobra.Command {
 				return err
 			}
 			defer writer.Close()
+			serverSigner, err := trustcrypto.NewEd25519Signer(serverKeyID, serverPriv)
+			if err != nil {
+				return err
+			}
 			engine := app.LocalEngine{
-				ServerID:         serverID,
-				ServerKeyID:      serverKeyID,
-				ClientPublicKey:  clientPub,
-				ClientKeys:       clientKeys,
-				ServerPrivateKey: serverPriv,
-				WAL:              writer,
+				ServerID:        serverID,
+				ServerKeyID:     serverKeyID,
+				ClientPublicKey: clientPub,
+				ClientKeys:      clientKeys,
+				ServerSigner:    serverSigner,
+				WAL:             writer,
 			}
 			records := make([]model.ServerRecord, len(signed))
 			accepted := make([]model.AcceptedReceipt, len(signed))
@@ -210,7 +219,7 @@ func newCommitBatchCommand(rt *runtimeConfig) *cobra.Command {
 //     deployments that rely on the default registry location.
 //  4. If none of the above is satisfied the caller must already have bailed
 //     out via the "requires either client-public-key or key-registry" check.
-func resolveClientKeys(clientPubPath, registryPath, registryPubPath string, registryExplicit bool) (ed25519.PublicKey, app.ClientKeyResolver, error) {
+func resolveClientKeys(clientPubPath, registryPath, registryPubPath string, registryExplicit bool) (trustcrypto.PublicKeyDescriptor, app.ClientKeyResolver, error) {
 	useRegistry := registryPath != "" && (registryExplicit || clientPubPath == "")
 	if useRegistry {
 		var registryPub ed25519.PublicKey
@@ -218,12 +227,23 @@ func resolveClientKeys(clientPubPath, registryPath, registryPubPath string, regi
 		if registryPubPath != "" {
 			registryPub, err = readPublicKey(registryPubPath)
 			if err != nil {
-				return nil, nil, err
+				return trustcrypto.PublicKeyDescriptor{}, nil, err
 			}
 		}
-		clientKeys, err := keystore.Open(registryPath, "", nil, registryPub)
-		return nil, clientKeys, err
+		registryDescriptor := trustcrypto.PublicKeyDescriptor{}
+		if len(registryPub) != 0 {
+			registryDescriptor, err = trustcrypto.NewEd25519PublicKey("", registryPub)
+			if err != nil {
+				return trustcrypto.PublicKeyDescriptor{}, nil, err
+			}
+		}
+		clientKeys, err := keystore.Open(registryPath, nil, registryDescriptor)
+		return trustcrypto.PublicKeyDescriptor{}, clientKeys, err
 	}
 	clientPub, err := readPublicKey(clientPubPath)
-	return clientPub, nil, err
+	if err != nil {
+		return trustcrypto.PublicKeyDescriptor{}, nil, err
+	}
+	descriptor, err := trustcrypto.NewEd25519PublicKey("", clientPub)
+	return descriptor, nil, err
 }

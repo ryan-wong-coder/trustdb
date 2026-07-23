@@ -16,12 +16,12 @@ func TestRegistryRegisterLookupAndReload(t *testing.T) {
 	regPub, regPriv := mustKey(t)
 	clientPub, _ := mustKey(t)
 	path := filepath.Join(t.TempDir(), "keys.tdkeys")
-	reg, err := Open(path, "registry-key", regPriv, regPub)
+	reg, err := Open(path, trustcrypto.MustNewEd25519Signer("registry-key", regPriv), trustcrypto.MustNewEd25519PublicKey("registry-key", regPub))
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	validFrom := time.Unix(100, 0)
-	ev, err := reg.RegisterClientKey("tenant", "client", "key", clientPub, validFrom, time.Time{})
+	ev, err := reg.RegisterClientKey("tenant", "client", "key", trustcrypto.MustNewEd25519PublicKey("key", clientPub), validFrom, time.Time{})
 	if err != nil {
 		t.Fatalf("RegisterClientKey() error = %v", err)
 	}
@@ -36,7 +36,7 @@ func TestRegistryRegisterLookupAndReload(t *testing.T) {
 		t.Fatalf("LookupClientKeyAt() = %+v", got)
 	}
 
-	reloaded, err := Open(path, "registry-key", nil, regPub)
+	reloaded, err := Open(path, nil, trustcrypto.MustNewEd25519PublicKey("registry-key", regPub))
 	if err != nil {
 		t.Fatalf("Open(reload) error = %v", err)
 	}
@@ -54,11 +54,11 @@ func TestRegistryRejectsRevokedKeyAtLookupTime(t *testing.T) {
 
 	regPub, regPriv := mustKey(t)
 	clientPub, _ := mustKey(t)
-	reg, err := Open(filepath.Join(t.TempDir(), "keys.tdkeys"), "registry-key", regPriv, regPub)
+	reg, err := Open(filepath.Join(t.TempDir(), "keys.tdkeys"), trustcrypto.MustNewEd25519Signer("registry-key", regPriv), trustcrypto.MustNewEd25519PublicKey("registry-key", regPub))
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if _, err := reg.RegisterClientKey("tenant", "client", "key", clientPub, time.Unix(100, 0), time.Time{}); err != nil {
+	if _, err := reg.RegisterClientKey("tenant", "client", "key", trustcrypto.MustNewEd25519PublicKey("key", clientPub), time.Unix(100, 0), time.Time{}); err != nil {
 		t.Fatalf("RegisterClientKey() error = %v", err)
 	}
 	if _, err := reg.RevokeClientKey("tenant", "client", "key", time.Unix(200, 0), "rotation"); err != nil {
@@ -77,15 +77,30 @@ func TestRegistryRejectsDuplicateRegister(t *testing.T) {
 
 	regPub, regPriv := mustKey(t)
 	clientPub, _ := mustKey(t)
-	reg, err := Open(filepath.Join(t.TempDir(), "keys.tdkeys"), "registry-key", regPriv, regPub)
+	reg, err := Open(filepath.Join(t.TempDir(), "keys.tdkeys"), trustcrypto.MustNewEd25519Signer("registry-key", regPriv), trustcrypto.MustNewEd25519PublicKey("registry-key", regPub))
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if _, err := reg.RegisterClientKey("tenant", "client", "key", clientPub, time.Unix(100, 0), time.Time{}); err != nil {
+	if _, err := reg.RegisterClientKey("tenant", "client", "key", trustcrypto.MustNewEd25519PublicKey("key", clientPub), time.Unix(100, 0), time.Time{}); err != nil {
 		t.Fatalf("RegisterClientKey() error = %v", err)
 	}
-	if _, err := reg.RegisterClientKey("tenant", "client", "key", clientPub, time.Unix(101, 0), time.Time{}); err == nil {
+	if _, err := reg.RegisterClientKey("tenant", "client", "key", trustcrypto.MustNewEd25519PublicKey("key", clientPub), time.Unix(101, 0), time.Time{}); err == nil {
 		t.Fatal("RegisterClientKey duplicate error = nil, want error")
+	}
+}
+
+func TestRegistryRejectsSignerPublicKeyMismatch(t *testing.T) {
+	t.Parallel()
+
+	_, registryPrivate := mustKey(t)
+	otherPublic, _ := mustKey(t)
+	_, err := Open(
+		filepath.Join(t.TempDir(), "keys.tdkeys"),
+		trustcrypto.MustNewEd25519Signer("registry-key", registryPrivate),
+		trustcrypto.MustNewEd25519PublicKey("registry-key", otherPublic),
+	)
+	if err == nil {
+		t.Fatal("Open() error = nil, want signer/public-key mismatch")
 	}
 }
 

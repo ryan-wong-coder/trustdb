@@ -82,13 +82,13 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	}
 
 	engine := app.LocalEngine{
-		ServerID:         "server-e2e-dir",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Idempotency:      app.NewIdempotencyIndex(),
-		Now:              func() time.Time { return time.Unix(200, 0) },
+		ServerID:        "server-e2e-dir",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Idempotency:     app.NewIdempotencyIndex(),
+		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
 	proofStore := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: proofDir}}
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 16, Workers: 2}, metrics)

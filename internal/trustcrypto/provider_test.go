@@ -1,0 +1,227 @@
+package trustcrypto
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/model"
+)
+
+type fakeProviderSigner struct {
+	handle       KeyHandle
+	capabilities CapabilitySet
+	publicKey    PublicKeyDescriptor
+	privateKey   ed25519.PrivateKey
+	mutate       func(model.Signature) model.Signature
+}
+
+func (s *fakeProviderSigner) Handle() KeyHandle { return s.handle }
+
+func (s *fakeProviderSigner) Capabilities() CapabilitySet { return s.capabilities }
+
+func (s *fakeProviderSigner) PublicKey(ctx context.Context) (PublicKeyDescriptor, error) {
+	if err := ctx.Err(); err != nil {
+		return PublicKeyDescriptor{}, err
+	}
+	return s.publicKey.Clone(), nil
+}
+
+func (s *fakeProviderSigner) Sign(ctx context.Context, message []byte) (model.Signature, error) {
+	if err := ctx.Err(); err != nil {
+		return model.Signature{}, err
+	}
+	sig := model.Signature{
+		Alg:       s.handle.Algorithm,
+		KeyID:     s.handle.KeyID,
+		Signature: ed25519.Sign(s.privateKey, message),
+	}
+	if s.mutate != nil {
+		sig = s.mutate(sig)
+	}
+	return sig, nil
+}
+
+func newFakeProviderSigner(t *testing.T, providerName string) *fakeProviderSigner {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &fakeProviderSigner{
+		handle: KeyHandle{
+			Provider:  providerName,
+			KeyID:     "contract-key",
+			Algorithm: cryptosuite.SignatureEd25519,
+		},
+		capabilities: CapabilitySet(CapabilitySign | CapabilityPublicKey),
+		publicKey: PublicKeyDescriptor{
+			Suite:     cryptosuite.INTLV1,
+			KeyID:     "contract-key",
+			Algorithm: cryptosuite.SignatureEd25519,
+			Encoding:  cryptosuite.Ed25519PublicKeyEncoding,
+			Bytes:     publicKey,
+		},
+		privateKey: privateKey,
+	}
+}
+
+func TestSignerProviderContract(t *testing.T) {
+	message := []byte("provider-neutral trustdb signing contract")
+	for _, providerName := range []string{"software", "remote", "pkcs11", "sdf"} {
+		providerName := providerName
+		t.Run(providerName, func(t *testing.T) {
+			t.Parallel()
+			signer := newFakeProviderSigner(t, providerName)
+			if err := ValidateSigner(context.Background(), cryptosuite.INTLV1, signer); err != nil {
+				t.Fatalf("ValidateSigner() error = %v", err)
+			}
+			sig, err := Sign(context.Background(), cryptosuite.INTLV1, signer, message)
+			if err != nil {
+				t.Fatalf("Sign() error = %v", err)
+			}
+			publicKey, err := signer.PublicKey(context.Background())
+			if err != nil {
+				t.Fatalf("PublicKey() error = %v", err)
+			}
+			if err := Verify(context.Background(), DefaultProvider(), publicKey, message, sig); err != nil {
+				t.Fatalf("Verify() error = %v", err)
+			}
+			want := ed25519.Sign(signer.privateKey, message)
+			if !bytes.Equal(sig.Signature, want) {
+				t.Fatalf("signature changed across provider boundary: got %x want %x", sig.Signature, want)
+			}
+
+			// Providers used by batch workers must tolerate concurrent Sign calls.
+			var wg sync.WaitGroup
+			errs := make(chan error, 32)
+			for i := 0; i < cap(errs); i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					input := []byte(fmt.Sprintf("%s-%d", providerName, i))
+					sig, err := Sign(context.Background(), cryptosuite.INTLV1, signer, input)
+					if err == nil {
+						err = Verify(context.Background(), DefaultProvider(), publicKey, input, sig)
+					}
+					errs <- err
+				}(i)
+			}
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				if err != nil {
+					t.Fatalf("concurrent provider contract: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestProviderContractsFailClosed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reserved suite", func(t *testing.T) {
+		if _, err := ProviderForSuite(cryptosuite.CNSMV1); !errors.Is(err, cryptosuite.ErrUnavailableSuite) {
+			t.Fatalf("ProviderForSuite(CN_SM_V1) error = %v, want unavailable suite", err)
+		}
+	})
+
+	t.Run("missing sign capability", func(t *testing.T) {
+		signer := newFakeProviderSigner(t, "remote")
+		signer.capabilities = CapabilitySet(CapabilityPublicKey)
+		if _, err := Sign(context.Background(), cryptosuite.INTLV1, signer, nil); !errors.Is(err, ErrUnsupportedCapability) {
+			t.Fatalf("Sign() error = %v, want unsupported capability", err)
+		}
+	})
+
+	t.Run("missing public key capability", func(t *testing.T) {
+		signer := newFakeProviderSigner(t, "pkcs11")
+		signer.capabilities = CapabilitySet(CapabilitySign)
+		if err := ValidateSigner(context.Background(), cryptosuite.INTLV1, signer); !errors.Is(err, ErrUnsupportedCapability) {
+			t.Fatalf("ValidateSigner() error = %v, want unsupported capability", err)
+		}
+	})
+
+	t.Run("wrong signer algorithm", func(t *testing.T) {
+		signer := newFakeProviderSigner(t, "sdf")
+		signer.handle.Algorithm = cryptosuite.SignatureSM2SM3
+		if _, err := Sign(context.Background(), cryptosuite.INTLV1, signer, nil); !errors.Is(err, ErrUnsupportedAlgorithm) {
+			t.Fatalf("Sign() error = %v, want unsupported algorithm", err)
+		}
+	})
+
+	t.Run("provider output metadata", func(t *testing.T) {
+		for name, mutate := range map[string]func(model.Signature) model.Signature{
+			"algorithm": func(sig model.Signature) model.Signature { sig.Alg = "rsa"; return sig },
+			"key id":    func(sig model.Signature) model.Signature { sig.KeyID = "other"; return sig },
+			"encoding":  func(sig model.Signature) model.Signature { sig.Signature = sig.Signature[:63]; return sig },
+		} {
+			name, mutate := name, mutate
+			t.Run(name, func(t *testing.T) {
+				signer := newFakeProviderSigner(t, "remote")
+				signer.mutate = mutate
+				if _, err := Sign(context.Background(), cryptosuite.INTLV1, signer, nil); err == nil {
+					t.Fatal("Sign() error = nil, want fail-closed provider output rejection")
+				}
+			})
+		}
+	})
+
+	t.Run("public key descriptor", func(t *testing.T) {
+		signer := newFakeProviderSigner(t, "software")
+		descriptor := signer.publicKey
+		cases := map[string]func(*PublicKeyDescriptor){
+			"suite":     func(d *PublicKeyDescriptor) { d.Suite = cryptosuite.CNSMV1 },
+			"algorithm": func(d *PublicKeyDescriptor) { d.Algorithm = cryptosuite.SignatureSM2SM3 },
+			"encoding":  func(d *PublicKeyDescriptor) { d.Encoding = cryptosuite.SM2PublicKeyEncoding },
+			"length":    func(d *PublicKeyDescriptor) { d.Bytes = d.Bytes[:31] },
+		}
+		for name, mutate := range cases {
+			name, mutate := name, mutate
+			t.Run(name, func(t *testing.T) {
+				invalid := descriptor.Clone()
+				mutate(&invalid)
+				if err := ValidatePublicKey(DefaultProvider(), invalid); err == nil {
+					t.Fatal("ValidatePublicKey() error = nil, want rejection")
+				}
+			})
+		}
+	})
+
+	t.Run("cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		signer := newFakeProviderSigner(t, "remote")
+		if _, err := Sign(ctx, cryptosuite.INTLV1, signer, nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Sign() error = %v, want context cancellation", err)
+		}
+	})
+}
+
+func TestINTLV1HashFactoryMatchesGoldenSHA256(t *testing.T) {
+	t.Parallel()
+	provider := DefaultProvider()
+	factory, err := provider.HashFactory(cryptosuite.HashSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := factory.Sum([]byte("abc"))
+	want := []byte{
+		0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+		0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+		0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+		0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("SHA-256(abc) = %x, want %x", got, want)
+	}
+	if _, err := provider.HashFactory(cryptosuite.HashSM3); !errors.Is(err, ErrUnsupportedAlgorithm) {
+		t.Fatalf("HashFactory(sm3) error = %v, want unsupported algorithm", err)
+	}
+}

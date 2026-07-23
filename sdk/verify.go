@@ -7,6 +7,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/sproof"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/verify"
 	"github.com/wowtrust/trustdb/sdk/anchorplugin"
 )
@@ -86,9 +87,17 @@ func anchorPluginSTH(sth model.SignedTreeHead) anchorplugin.SignedTreeHead {
 }
 
 func verifyProofBundle(raw io.Reader, bundle ProofBundle, keys TrustedKeys, opts ...verify.Option) (VerifyResult, error) {
+	clientKey, err := trustcrypto.NewEd25519PublicKey(bundle.SignedClaim.Claim.KeyID, keys.ClientPublicKey)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	serverKey, err := trustcrypto.NewEd25519PublicKey("", keys.ServerPublicKey)
+	if err != nil {
+		return VerifyResult{}, err
+	}
 	result, err := verify.ProofBundle(raw, bundle, verify.TrustedKeys{
-		ClientPublicKey: keys.ClientPublicKey,
-		ServerPublicKey: keys.ServerPublicKey,
+		ClientPublicKey: clientKey,
+		ServerPublicKey: serverKey,
 	}, opts...)
 	if err != nil {
 		return VerifyResult{}, err

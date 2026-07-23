@@ -68,12 +68,12 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
 	engine := app.LocalEngine{
-		ServerID:         "server-http",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Now:              func() time.Time { return time.Unix(200, 0) },
+		ServerID:        "server-http",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
 	svc := ingest.New(engine, ingest.Options{QueueSize: 8, Workers: 2}, nil)
 	batchSvc := batch.New(engine, proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "proofs")}, batch.Options{QueueSize: 8, MaxRecords: 1, MaxDelay: time.Hour}, nil)

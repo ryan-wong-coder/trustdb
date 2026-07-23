@@ -37,8 +37,8 @@ func TestResolveClientKeysPrefersExplicitPubKey(t *testing.T) {
 	if resolver != nil {
 		t.Fatalf("resolveClientKeys() resolver = %v, want nil (pub-key branch)", resolver)
 	}
-	if len(got) != ed25519.PublicKeySize || !got.Equal(pub) {
-		t.Fatalf("resolveClientKeys() pub key mismatch: %x vs %x", got, pub)
+	if len(got.Bytes) != ed25519.PublicKeySize || !ed25519.PublicKey(got.Bytes).Equal(pub) {
+		t.Fatalf("resolveClientKeys() pub key mismatch: %x vs %x", got.Bytes, pub)
 	}
 }
 
@@ -63,8 +63,8 @@ func TestResolveClientKeysExplicitRegistryWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveClientKeys() error = %v", err)
 	}
-	if gotPub != nil {
-		t.Fatalf("resolveClientKeys() pub = %x, want nil (registry branch)", gotPub)
+	if len(gotPub.Bytes) != 0 {
+		t.Fatalf("resolveClientKeys() pub = %x, want empty (registry branch)", gotPub.Bytes)
 	}
 	if resolver == nil {
 		t.Fatalf("resolveClientKeys() resolver = nil, want registry-backed resolver")
@@ -84,8 +84,8 @@ func TestResolveClientKeysRegistryFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveClientKeys() error = %v", err)
 	}
-	if gotPub != nil {
-		t.Fatalf("resolveClientKeys() pub = %x, want nil", gotPub)
+	if len(gotPub.Bytes) != 0 {
+		t.Fatalf("resolveClientKeys() pub = %x, want empty", gotPub.Bytes)
 	}
 	if resolver == nil {
 		t.Fatalf("resolveClientKeys() resolver = nil, want registry-backed resolver")

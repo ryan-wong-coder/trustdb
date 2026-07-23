@@ -2,7 +2,7 @@ package verify
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
@@ -19,8 +20,9 @@ import (
 )
 
 type TrustedKeys struct {
-	ClientPublicKey ed25519.PublicKey
-	ServerPublicKey ed25519.PublicKey
+	ClientPublicKey trustcrypto.PublicKeyDescriptor
+	ServerPublicKey trustcrypto.PublicKeyDescriptor
+	CryptoProvider  trustcrypto.Provider
 }
 
 // Result is the outcome of ProofBundle. ProofLevel follows the centralized
@@ -70,6 +72,10 @@ func WithAnchorVerifier(verifier AnchorVerifier) Option {
 }
 
 func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts ...Option) (Result, error) {
+	provider := keys.CryptoProvider
+	if provider == nil {
+		provider = trustcrypto.DefaultProvider()
+	}
 	var o options
 	for _, apply := range opts {
 		apply(&o)
@@ -77,7 +83,7 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	if bundle.SchemaVersion != model.SchemaProofBundle {
 		return Result{}, fmt.Errorf("verify: unexpected proof bundle schema: %s", bundle.SchemaVersion)
 	}
-	sum, n, err := trustcrypto.HashReader(bundle.SignedClaim.Claim.Content.HashAlg, raw)
+	sum, n, err := trustcrypto.HashReaderWithProvider(provider, bundle.SignedClaim.Claim.Content.HashAlg, raw)
 	if err != nil {
 		return Result{}, err
 	}
@@ -87,20 +93,20 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	if !bytes.Equal(sum, bundle.SignedClaim.Claim.Content.ContentHash) {
 		return Result{}, fmt.Errorf("verify: content hash mismatch")
 	}
-	verified, err := claim.Verify(bundle.SignedClaim, keys.ClientPublicKey)
+	verified, err := claim.VerifyWithProvider(context.Background(), bundle.SignedClaim, keys.ClientPublicKey, provider)
 	if err != nil {
 		return Result{}, err
 	}
 	if verified.RecordID != bundle.RecordID || verified.RecordID != bundle.ServerRecord.RecordID {
 		return Result{}, fmt.Errorf("verify: record id mismatch")
 	}
-	if err := validateBundleBindings(bundle, verified); err != nil {
+	if err := validateBundleBindings(bundle, verified, provider); err != nil {
 		return Result{}, err
 	}
-	if err := receipt.VerifyAccepted(bundle.AcceptedReceipt, keys.ServerPublicKey); err != nil {
+	if err := receipt.VerifyAcceptedWithProvider(context.Background(), bundle.AcceptedReceipt, keys.ServerPublicKey, provider); err != nil {
 		return Result{}, err
 	}
-	if err := receipt.VerifyCommitted(bundle.CommittedReceipt, keys.ServerPublicKey); err != nil {
+	if err := receipt.VerifyCommittedWithProvider(context.Background(), bundle.CommittedReceipt, keys.ServerPublicKey, provider); err != nil {
 		return Result{}, err
 	}
 	leaf, err := merkle.HashLeaf(bundle.ServerRecord)
@@ -126,7 +132,7 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		ProofLevel: prooflevel.Evaluate(evidence).String(),
 	}
 	if o.global != nil {
-		if err := VerifyGlobalLogProof(bundle, *o.global, keys.ServerPublicKey); err != nil {
+		if err := VerifyGlobalLogProof(bundle, *o.global, keys.ServerPublicKey, provider); err != nil {
 			return Result{}, err
 		}
 		evidence.GlobalLogProof = true
@@ -147,7 +153,11 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	return result, nil
 }
 
-func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified) error {
+func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified, provider trustcrypto.Provider) error {
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return err
+	}
 	if bundle.ServerRecord.TenantID != bundle.SignedClaim.Claim.TenantID {
 		return fmt.Errorf("verify: server record tenant_id mismatch")
 	}
@@ -157,14 +167,14 @@ func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified) e
 	if bundle.ServerRecord.KeyID != bundle.SignedClaim.Claim.KeyID {
 		return fmt.Errorf("verify: server record key_id mismatch")
 	}
-	claimHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, verified.ClaimCBOR)
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, verified.ClaimCBOR)
 	if err != nil {
 		return err
 	}
 	if !bytes.Equal(bundle.ServerRecord.ClaimHash, claimHash) {
 		return fmt.Errorf("verify: server record claim_hash mismatch")
 	}
-	sigHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, bundle.SignedClaim.Signature.Signature)
+	sigHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, bundle.SignedClaim.Signature.Signature)
 	if err != nil {
 		return err
 	}
@@ -204,17 +214,21 @@ func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified) e
 	return nil
 }
 
-func VerifyGlobalLogProof(bundle model.ProofBundle, proof model.GlobalLogProof, publicKey ed25519.PublicKey) error {
-	if err := GlobalLogConsistency(bundle, proof); err != nil {
+func VerifyGlobalLogProof(bundle model.ProofBundle, proof model.GlobalLogProof, publicKey trustcrypto.PublicKeyDescriptor, provider trustcrypto.Provider) error {
+	if err := globalLogConsistencyWithProvider(bundle, proof, provider); err != nil {
 		return err
 	}
-	if err := globallog.VerifySTH(proof.STH, publicKey); err != nil {
+	if err := globallog.VerifySTHWithProvider(context.Background(), proof.STH, publicKey, provider); err != nil {
 		return err
 	}
 	return nil
 }
 
 func GlobalLogConsistency(bundle model.ProofBundle, proof model.GlobalLogProof) error {
+	return globalLogConsistencyWithProvider(bundle, proof, trustcrypto.DefaultProvider())
+}
+
+func globalLogConsistencyWithProvider(bundle model.ProofBundle, proof model.GlobalLogProof, provider trustcrypto.Provider) error {
 	if proof.SchemaVersion != model.SchemaGlobalLogProof {
 		return fmt.Errorf("verify: unexpected global log proof schema: %s", proof.SchemaVersion)
 	}
@@ -258,7 +272,7 @@ func GlobalLogConsistency(bundle model.ProofBundle, proof model.GlobalLogProof) 
 		BatchClosedAtUnixN: bundle.CommittedReceipt.ClosedAtUnixN,
 		LeafIndex:          proof.LeafIndex,
 	}
-	hash, err := globallog.HashLeaf(leaf)
+	hash, err := globallog.HashLeafWithProvider(provider, leaf)
 	if err != nil {
 		return err
 	}

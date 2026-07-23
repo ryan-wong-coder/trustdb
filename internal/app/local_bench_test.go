@@ -16,9 +16,9 @@ func BenchmarkCommitBatchSynthetic1024(b *testing.B) {
 		b.Fatal(err)
 	}
 	engine := LocalEngine{
-		ServerID:         "bench-server",
-		ServerKeyID:      "bench-server-key",
-		ServerPrivateKey: serverPriv,
+		ServerID:     "bench-server",
+		ServerKeyID:  "bench-server-key",
+		ServerSigner: trustcrypto.MustNewEd25519Signer("bench-server-key", serverPriv),
 	}
 	signed, records, accepted := syntheticCommitBatchInputs(1024)
 	closedAt := time.Unix(200, 0)
@@ -40,7 +40,7 @@ func BenchmarkCommitBatchIndexesSynthetic1024(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	engine := LocalEngine{ServerID: "bench-server", ServerKeyID: "bench-server-key", ServerPrivateKey: serverPriv}
+	engine := LocalEngine{ServerID: "bench-server", ServerKeyID: "bench-server-key", ServerSigner: trustcrypto.MustNewEd25519Signer("bench-server-key", serverPriv)}
 	signed, records, accepted := syntheticCommitBatchInputs(1024)
 	closedAt := time.Unix(200, 0)
 	b.ReportAllocs()

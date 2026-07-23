@@ -138,11 +138,10 @@ func TestOutboxWorkerPublishesBatch(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	svc, err := New(Options{
-		Store:      store,
-		LogID:      "outbox-test",
-		KeyID:      "outbox-key",
-		PrivateKey: priv,
-		Clock:      func() time.Time { return time.Unix(200, 0).UTC() },
+		Store:  store,
+		LogID:  "outbox-test",
+		Signer: trustcrypto.MustNewEd25519Signer("outbox-key", priv),
+		Clock:  func() time.Time { return time.Unix(200, 0).UTC() },
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -188,11 +187,10 @@ func TestOutboxWorkerAtomicallyStoresOnlyFinalAnchorCandidate(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	svc, err := New(Options{
-		Store:      store,
-		LogID:      "outbox-anchor-test",
-		KeyID:      "outbox-anchor-key",
-		PrivateKey: priv,
-		Clock:      func() time.Time { return time.Unix(300, 0).UTC() },
+		Store:  store,
+		LogID:  "outbox-anchor-test",
+		Signer: trustcrypto.MustNewEd25519Signer("outbox-anchor-key", priv),
+		Clock:  func() time.Time { return time.Unix(300, 0).UTC() },
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -266,7 +264,7 @@ func TestOutboxWorkerRetryPreservesOriginalFixedAnchorWindow(t *testing.T) {
 	}
 	appendTime := time.Unix(100, 0).UTC()
 	svc, err := New(Options{
-		Store: store, LogID: "outbox-anchor-replay", KeyID: "key", PrivateKey: priv,
+		Store: store, LogID: "outbox-anchor-replay", Signer: trustcrypto.MustNewEd25519Signer("key", priv),
 		Clock: func() time.Time { return appendTime },
 	})
 	if err != nil {
@@ -331,7 +329,7 @@ func TestOutboxWorkerNonMonotonicCoveredRetryUsesHighestNewSTH(t *testing.T) {
 	}
 	now := time.Unix(100, 0).UTC()
 	svc, err := New(Options{
-		Store: store, NodeID: oldRoot.NodeID, LogID: oldRoot.LogID, KeyID: "key", PrivateKey: priv,
+		Store: store, NodeID: oldRoot.NodeID, LogID: oldRoot.LogID, Signer: trustcrypto.MustNewEd25519Signer("key", priv),
 		Clock: func() time.Time { return now },
 	})
 	if err != nil {
@@ -437,7 +435,7 @@ func TestOutboxWorkerReplayPastInFlightStartsWindowAtFirstLaterSTH(t *testing.T)
 	}
 	now := time.Unix(100, 0).UTC()
 	svc, err := New(Options{
-		Store: store, NodeID: key.NodeID, LogID: key.LogID, KeyID: "key", PrivateKey: priv,
+		Store: store, NodeID: key.NodeID, LogID: key.LogID, Signer: trustcrypto.MustNewEd25519Signer("key", priv),
 		Clock: func() time.Time { return now },
 	})
 	if err != nil {
@@ -509,7 +507,7 @@ func TestOutboxWorkerAnchorPathFailsClosedWithoutDurableMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
-	svc, err := New(Options{Store: store, LogID: "unsupported-anchor", KeyID: "key", PrivateKey: priv})
+	svc, err := New(Options{Store: store, LogID: "unsupported-anchor", Signer: trustcrypto.MustNewEd25519Signer("key", priv)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

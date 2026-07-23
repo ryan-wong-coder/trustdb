@@ -9,6 +9,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -58,9 +59,9 @@ func benchmarkLocalEngine(b *testing.B) app.LocalEngine {
 		b.Fatal(err)
 	}
 	return app.LocalEngine{
-		ServerID:         "bench-server",
-		ServerKeyID:      "bench-server-key",
-		ServerPrivateKey: private,
+		ServerID:     "bench-server",
+		ServerKeyID:  "bench-server-key",
+		ServerSigner: trustcrypto.MustNewEd25519Signer("bench-server-key", private),
 		Now: func() time.Time {
 			return time.Unix(1_900, 0).UTC()
 		},

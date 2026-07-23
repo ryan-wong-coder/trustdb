@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
-	"github.com/spf13/cobra"
 )
 
 func newKeyCommand(rt *runtimeConfig) *cobra.Command {
@@ -131,7 +131,15 @@ func newKeyRegisterCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			reg, err := keystore.Open(registryPath, registryKeyID, regPriv, regPriv.Public().(ed25519.PublicKey))
+			registrySigner, err := trustcrypto.NewEd25519Signer(registryKeyID, regPriv)
+			if err != nil {
+				return err
+			}
+			registryPub, err := registrySigner.PublicKey(cmd.Context())
+			if err != nil {
+				return err
+			}
+			reg, err := keystore.Open(registryPath, registrySigner, registryPub)
 			if err != nil {
 				return err
 			}
@@ -139,7 +147,11 @@ func newKeyRegisterCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 			if validUntilUnix != 0 {
 				validUntil = time.Unix(validUntilUnix, 0).UTC()
 			}
-			ev, err := reg.RegisterClientKey(tenantID, clientID, keyID, clientPub, time.Unix(validFromUnix, 0).UTC(), validUntil)
+			clientDescriptor, err := trustcrypto.NewEd25519PublicKey(keyID, clientPub)
+			if err != nil {
+				return err
+			}
+			ev, err := reg.RegisterClientKey(tenantID, clientID, keyID, clientDescriptor, time.Unix(validFromUnix, 0).UTC(), validUntil)
 			if err != nil {
 				return err
 			}
@@ -195,7 +207,15 @@ func newKeyRevokeCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 					return err
 				}
 			}
-			reg, err := keystore.Open(registryPath, registryKeyID, regPriv, regPub)
+			registrySigner, err := trustcrypto.NewEd25519Signer(registryKeyID, regPriv)
+			if err != nil {
+				return err
+			}
+			registryDescriptor, err := trustcrypto.NewEd25519PublicKey(registryKeyID, regPub)
+			if err != nil {
+				return err
+			}
+			reg, err := keystore.Open(registryPath, registrySigner, registryDescriptor)
 			if err != nil {
 				return err
 			}
@@ -241,7 +261,14 @@ func newKeyListCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 					return err
 				}
 			}
-			reg, err := keystore.Open(registryPath, "", nil, regPub)
+			registryDescriptor := trustcrypto.PublicKeyDescriptor{}
+			if len(regPub) != 0 {
+				registryDescriptor, err = trustcrypto.NewEd25519PublicKey("", regPub)
+				if err != nil {
+					return err
+				}
+			}
+			reg, err := keystore.Open(registryPath, nil, registryDescriptor)
 			if err != nil {
 				return err
 			}

@@ -72,12 +72,11 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	globalSvc, err := globallog.New(globallog.Options{
-		Store:      src,
-		NodeID:     "node-1",
-		LogID:      "backup-test",
-		KeyID:      "backup-key",
-		PrivateKey: priv,
-		Clock:      func() time.Time { return time.Unix(10, 0).UTC() },
+		Store:  src,
+		NodeID: "node-1",
+		LogID:  "backup-test",
+		Signer: trustcrypto.MustNewEd25519Signer("backup-key", priv),
+		Clock:  func() time.Time { return time.Unix(10, 0).UTC() },
 	})
 	if err != nil {
 		t.Fatalf("globallog.New: %v", err)

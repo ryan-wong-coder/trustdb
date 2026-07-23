@@ -1,14 +1,14 @@
 package trustcrypto
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -37,20 +37,49 @@ func NewNonce(size int) ([]byte, error) {
 }
 
 func HashBytes(alg string, data []byte) ([]byte, error) {
-	switch alg {
-	case model.DefaultHashAlg:
-		sum := sha256.Sum256(data)
-		return sum[:], nil
-	default:
-		return nil, fmt.Errorf("unsupported hash alg: %s", alg)
+	return HashBytesWithProvider(DefaultProvider(), alg, data)
+}
+
+func HashBytesForSuite(suiteID cryptosuite.ID, alg string, data []byte) ([]byte, error) {
+	provider, err := ProviderForSuite(suiteID)
+	if err != nil {
+		return nil, err
 	}
+	return HashBytesWithProvider(provider, alg, data)
+}
+
+func HashBytesWithProvider(provider Provider, alg string, data []byte) ([]byte, error) {
+	if provider == nil {
+		return nil, errors.New("crypto provider is required")
+	}
+	factory, err := provider.HashFactory(alg)
+	if err != nil {
+		return nil, err
+	}
+	return factory.Sum(data), nil
 }
 
 func HashReader(alg string, r io.Reader) (sum []byte, bytesRead int64, err error) {
-	h, err := newHash(alg)
+	return HashReaderWithProvider(DefaultProvider(), alg, r)
+}
+
+func HashReaderForSuite(suiteID cryptosuite.ID, alg string, r io.Reader) (sum []byte, bytesRead int64, err error) {
+	provider, err := ProviderForSuite(suiteID)
 	if err != nil {
 		return nil, 0, err
 	}
+	return HashReaderWithProvider(provider, alg, r)
+}
+
+func HashReaderWithProvider(provider Provider, alg string, r io.Reader) (sum []byte, bytesRead int64, err error) {
+	if provider == nil {
+		return nil, 0, errors.New("crypto provider is required")
+	}
+	factory, err := provider.HashFactory(alg)
+	if err != nil {
+		return nil, 0, err
+	}
+	h := factory.New()
 	n, err := io.Copy(h, r)
 	if err != nil {
 		return nil, n, fmt.Errorf("hash reader: %w", err)
@@ -59,34 +88,17 @@ func HashReader(alg string, r io.Reader) (sum []byte, bytesRead int64, err error
 }
 
 func SignEd25519(keyID string, privateKey ed25519.PrivateKey, message []byte) (model.Signature, error) {
-	if len(privateKey) != ed25519.PrivateKeySize {
-		return model.Signature{}, fmt.Errorf("invalid ed25519 private key size: %d", len(privateKey))
+	signer, err := NewEd25519Signer(keyID, privateKey)
+	if err != nil {
+		return model.Signature{}, err
 	}
-	return model.Signature{
-		Alg:       model.DefaultSignatureAlg,
-		KeyID:     keyID,
-		Signature: ed25519.Sign(privateKey, message),
-	}, nil
+	return Sign(context.Background(), cryptosuite.INTLV1, signer, message)
 }
 
 func VerifyEd25519(publicKey ed25519.PublicKey, message []byte, sig model.Signature) error {
-	if sig.Alg != model.DefaultSignatureAlg {
-		return fmt.Errorf("unsupported signature alg: %s", sig.Alg)
+	descriptor, err := NewEd25519PublicKey("", publicKey)
+	if err != nil {
+		return err
 	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid ed25519 public key size: %d", len(publicKey))
-	}
-	if !ed25519.Verify(publicKey, message, sig.Signature) {
-		return errors.New("ed25519 signature verification failed")
-	}
-	return nil
-}
-
-func newHash(alg string) (hash.Hash, error) {
-	switch alg {
-	case model.DefaultHashAlg:
-		return sha256.New(), nil
-	default:
-		return nil, fmt.Errorf("unsupported hash alg: %s", alg)
-	}
+	return Verify(context.Background(), DefaultProvider(), descriptor, message, sig)
 }

@@ -359,11 +359,10 @@ func TestTiKVGlobalLogConcurrentServicesRetryConflicts(t *testing.T) {
 	}
 	newService := func(store globallog.Store, nodeID string) *globallog.Service {
 		svc, err := globallog.New(globallog.Options{
-			Store:      store,
-			NodeID:     nodeID,
-			LogID:      "integration-log",
-			KeyID:      "integration-key",
-			PrivateKey: privateKey,
+			Store:  store,
+			NodeID: nodeID,
+			LogID:  "integration-log",
+			Signer: trustcrypto.MustNewEd25519Signer("integration-key", privateKey),
 		})
 		if err != nil {
 			t.Fatalf("globallog.New(%s): %v", nodeID, err)

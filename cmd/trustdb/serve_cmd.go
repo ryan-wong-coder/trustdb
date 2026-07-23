@@ -343,16 +343,21 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if logID == "" {
 				logID = nodeID
 			}
+			serverKeyID := stringValue(cmd, rt, "server-key-id", "server_key_id")
+			serverSigner, err := trustcrypto.NewEd25519Signer(serverKeyID, serverPriv)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "build server signer", err)
+			}
 			engine := app.LocalEngine{
-				ServerID:         nodeID,
-				LogID:            logID,
-				ServerKeyID:      stringValue(cmd, rt, "server-key-id", "server_key_id"),
-				ClientPublicKey:  clientPub,
-				ClientKeys:       clientKeys,
-				ServerPrivateKey: serverPriv,
-				ProofWorkers:     batchProofWorkers,
-				WAL:              writer,
-				Idempotency:      idempotency,
+				ServerID:        nodeID,
+				LogID:           logID,
+				ServerKeyID:     serverKeyID,
+				ClientPublicKey: clientPub,
+				ClientKeys:      clientKeys,
+				ServerSigner:    serverSigner,
+				ProofWorkers:    batchProofWorkers,
+				WAL:             writer,
+				Idempotency:     idempotency,
 			}
 			// Pick the proof store backend from the CLI/config, defaulting
 			// to the file backend rooted at --proof-dir so existing
@@ -530,8 +535,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 					Store:          proofStore,
 					NodeID:         nodeID,
 					LogID:          logID,
-					KeyID:          rt.cfg.Server.KeyID,
-					PrivateKey:     serverPriv,
+					Signer:         serverSigner,
 					AnchorSinkName: anchorSinkName,
 				})
 				if err != nil {
@@ -1508,7 +1512,7 @@ func validateTrustedCheckpointBoundaryRecord(ctx context.Context, engine app.Loc
 		record.Position.Offset != checkpoint.LastOffset {
 		return trusterr.New(trusterr.CodeDataLoss, "contiguous wal checkpoint does not match the retained wal boundary")
 	}
-	item, err := engine.ReplayAccepted(record)
+	item, err := engine.ReplayAccepted(ctx, record)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "decode contiguous wal checkpoint boundary", err)
 	}
@@ -1654,7 +1658,7 @@ func loadManifestItemsFromWAL(ctx context.Context, walPath string, engine app.Lo
 		if manifest.WALRange.To.Sequence > 0 && record.Position.Sequence > manifest.WALRange.To.Sequence {
 			return errStopManifestScan
 		}
-		replayed, err := engine.ReplayAccepted(record)
+		replayed, err := engine.ReplayAccepted(ctx, record)
 		if err != nil {
 			return err
 		}
@@ -1851,7 +1855,7 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 		if !checkpointBoundaryValidated {
 			return trusterr.New(trusterr.CodeDataLoss, "contiguous wal checkpoint boundary is missing from the retained wal")
 		}
-		item, err := engine.ReplayAccepted(record)
+		item, err := engine.ReplayAccepted(ctx, record)
 		if err != nil {
 			return err
 		}

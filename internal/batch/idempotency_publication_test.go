@@ -14,6 +14,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/idempotency"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
 
@@ -168,13 +169,13 @@ func validIdempotencyAccepted(t *testing.T, idempotencyKey string) Accepted {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
 	engine := app.LocalEngine{
-		ServerID:         "server-a",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPublic,
-		ServerPrivateKey: serverPrivate,
-		WAL:              writer,
-		Idempotency:      app.NewIdempotencyIndex(),
-		Now:              func() time.Time { return createdAt },
+		ServerID:        "server-a",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPublic),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPrivate),
+		WAL:             writer,
+		Idempotency:     app.NewIdempotencyIndex(),
+		Now:             func() time.Time { return createdAt },
 	}
 	record, accepted, _, err := engine.Submit(context.Background(), signed)
 	if closeErr := writer.Close(); err == nil && closeErr != nil {

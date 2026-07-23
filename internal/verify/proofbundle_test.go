@@ -64,13 +64,13 @@ func newProofBundleFixture(t *testing.T) proofBundleFixture {
 	t.Cleanup(func() { _ = w.Close() })
 
 	engine := app.LocalEngine{
-		ServerID:         "server-a",
-		LogID:            "log-a",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              w,
-		Now:              func() time.Time { return time.Unix(200, 0) },
+		ServerID:        "server-a",
+		LogID:           "log-a",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             w,
+		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
 	record, accepted, _, err := engine.Submit(context.Background(), signed)
 	if err != nil {
@@ -90,8 +90,8 @@ func newProofBundleFixture(t *testing.T) proofBundleFixture {
 		raw:    raw,
 		bundle: bundles[0],
 		keys: TrustedKeys{
-			ClientPublicKey: clientPub,
-			ServerPublicKey: serverPub,
+			ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+			ServerPublicKey: trustcrypto.MustNewEd25519PublicKey("", serverPub),
 		},
 		serverPriv: serverPriv,
 	}
@@ -102,12 +102,11 @@ func globalProofForBundle(t *testing.T, f proofBundleFixture) model.GlobalLogPro
 	ctx := context.Background()
 	store := proofstore.LocalStore{Root: t.TempDir()}
 	svc, err := globallog.New(globallog.Options{
-		Store:      store,
-		NodeID:     f.bundle.NodeID,
-		LogID:      f.bundle.LogID,
-		KeyID:      "server-key",
-		PrivateKey: f.serverPriv,
-		Clock:      func() time.Time { return time.Unix(400, 0).UTC() },
+		Store:  store,
+		NodeID: f.bundle.NodeID,
+		LogID:  f.bundle.LogID,
+		Signer: trustcrypto.MustNewEd25519Signer("server-key", f.serverPriv),
+		Clock:  func() time.Time { return time.Unix(400, 0).UTC() },
 	})
 	if err != nil {
 		t.Fatalf("globallog.New: %v", err)

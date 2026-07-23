@@ -386,14 +386,14 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 
 	reg, metrics := observability.NewRegistry()
 	engine := app.LocalEngine{
-		ServerID:         "server-bench-pebble-e2e",
-		LogID:            "server-bench-pebble-e2e",
-		ServerKeyID:      "server-key",
-		ClientPublicKey:  clientPub,
-		ServerPrivateKey: serverPriv,
-		WAL:              writer,
-		Idempotency:      app.NewIdempotencyIndex(),
-		Now:              func() time.Time { return time.Now().UTC() },
+		ServerID:        "server-bench-pebble-e2e",
+		LogID:           "server-bench-pebble-e2e",
+		ServerKeyID:     "server-key",
+		ClientPublicKey: trustcrypto.MustNewEd25519PublicKey("", clientPub),
+		ServerSigner:    trustcrypto.MustNewEd25519Signer("server-key", serverPriv),
+		WAL:             writer,
+		Idempotency:     app.NewIdempotencyIndex(),
+		Now:             func() time.Time { return time.Now().UTC() },
 	}
 	store, err := proofstore.Open(proofstore.Config{
 		Kind: proofstore.BackendPebble,
@@ -430,11 +430,10 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 
 	rt := &runtimeConfig{logger: silentLogger()}
 	globalSvc, err := globallog.New(globallog.Options{
-		Store:      store,
-		NodeID:     engine.ServerID,
-		LogID:      engine.ServerID,
-		KeyID:      engine.ServerKeyID,
-		PrivateKey: serverPriv,
+		Store:  store,
+		NodeID: engine.ServerID,
+		LogID:  engine.ServerID,
+		Signer: trustcrypto.MustNewEd25519Signer(engine.ServerKeyID, serverPriv),
 	})
 	if err != nil {
 		t.Fatalf("globallog.New: %v", err)
