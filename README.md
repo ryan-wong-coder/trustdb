@@ -76,10 +76,24 @@ The multi-architecture Docker image is published with both immutable and stable-
 
 ```bash
 docker pull wsy19990317/trustdb:1.0.0
-docker run -d --name trustdb -p 127.0.0.1:8080:8080 -v trustdb-data:/var/lib/trustdb wsy19990317/trustdb:1.0.0
+read -r -s -p 'Development key passphrase: ' TRUSTDB_DEV_KEY_PASSPHRASE
+export TRUSTDB_DEV_KEY_PASSPHRASE
+printf '\n'
+docker run -d --name trustdb \
+  -e TRUSTDB_DEV_KEY_PASSPHRASE \
+  -p 127.0.0.1:8080:8080 \
+  -v trustdb-data:/var/lib/trustdb \
+  wsy19990317/trustdb:1.0.0
+unset TRUSTDB_DEV_KEY_PASSPHRASE
 docker logs trustdb
 curl --fail http://127.0.0.1:8080/healthz
 ```
+
+The value is forwarded from the shell without appearing in the `docker run`
+arguments. For a long-running service, prefer
+`TRUSTDB_DEV_KEY_PASSPHRASE_FILE` pointing to an owner-only secret-manager
+mount outside `/var/lib/trustdb`; configure exactly one passphrase source and
+never store the KEK beside the envelope or in the same backup volume.
 
 Desktop packages carry a release-specific self-signed certificate and its public `.cer` file. The certificate lets you inspect the signer used for this release, but does not establish Apple or Microsoft trust, so Gatekeeper or SmartScreen may still show an unknown-developer warning. Verify the downloaded file against `SHA256SUMS` before installing.
 
@@ -158,13 +172,24 @@ mkdir -p .trustdb-dev
 Generate one-time client and server identities. Each command writes a signer
 descriptor (`.key`), a public verifier descriptor (`.pub`), and separate
 development software material (`.material`). The descriptor files are
-canonical CBOR, not raw private keys. `key generate` replaces same-name files, so do
-not rerun it for an identity that has already issued evidence:
+canonical CBOR, not raw private keys. The default material is an authenticated
+SM4-GCM envelope; provide its development passphrase through the standard
+environment variable, never an argv flag. Encrypted generation refuses to
+replace existing material, so rotate deliberately instead of regenerating an
+identity that has already issued evidence:
 
 ```bash
+read -r -s -p 'Development key passphrase: ' TRUSTDB_DEV_KEY_PASSPHRASE
+export TRUSTDB_DEV_KEY_PASSPHRASE
+printf '\n'
 ./bin/trustdb key generate --out .trustdb-dev --prefix client
 ./bin/trustdb key generate --out .trustdb-dev --prefix server
 ```
+
+For unattended development services, set
+`TRUSTDB_DEV_KEY_PASSPHRASE_FILE` instead. It must name an owner-only regular
+file, and `TRUSTDB_DEV_KEY_PASSPHRASE` must then be unset. Keep that secret file
+outside the key directory and its backups.
 
 For a development SM2 identity, select the suite explicitly. This enables key
 provisioning and registry lifecycle testing; CN_SM_V1 server evidence generation
@@ -177,11 +202,33 @@ remains gated until the V2 server cutover in #454:
   --prefix client
 ```
 
-The generated `plaintext-dev-v1` material is protected by owner-only file
-permissions and is intended for local evaluation. Production deployments
-should provision a versioned PKCS#11, SDF, or remote-provider descriptor; the
-SM4 encrypted software envelope is tracked by #451. TrustDB does not read or
-fall back to legacy raw-base64 key files.
+The generated `sm4-envelope-v1` material uses a random DEK and nonce, with that
+DEK wrapped by the development-only `passphrase-dev-v1` provider. The legacy
+owner-permissions-only path remains available only when explicitly requested
+with `--protection plaintext-dev-v1`. Production deployments should provision a
+versioned PKCS#11, SDF, HSM/KMS, or remote-provider descriptor. A software SM4
+envelope is not production HSM custody. TrustDB does not read or fall back to
+legacy raw-base64 key files. See
+[`formats/SM4_KEY_ENVELOPE_V1.md`](formats/SM4_KEY_ENVELOPE_V1.md).
+Encrypted software-envelope persistence currently fails closed on Windows
+until TrustDB continuously runtime-qualifies an owner-only DACL. Windows
+deployments should use an approved external signer; explicit
+`plaintext-dev-v1` is only for disposable evaluation.
+
+Rotate the development KEK without changing the signing key or public identity:
+
+```bash
+read -r -s -p 'Replacement key passphrase: ' TRUSTDB_DEV_KEY_PASSPHRASE_NEW
+export TRUSTDB_DEV_KEY_PASSPHRASE_NEW
+printf '\n'
+./bin/trustdb key rewrap --descriptor .trustdb-dev/client.key
+export TRUSTDB_DEV_KEY_PASSPHRASE="$TRUSTDB_DEV_KEY_PASSPHRASE_NEW"
+unset TRUSTDB_DEV_KEY_PASSPHRASE_NEW
+```
+
+File-based rotation uses `TRUSTDB_DEV_KEY_PASSPHRASE_FILE` for the current KEK
+and `TRUSTDB_DEV_KEY_PASSPHRASE_FILE_NEW` for the replacement. Configure
+exactly one direct or file source for each KEK.
 
 Create and sign a local file claim:
 
@@ -289,6 +336,7 @@ The screenshot below is rendered directly from the current desktop client code:
 - [docs/compliance/ADR-0007-CANONICAL-SM2-SM3-SIGNATURES.zh-CN.md](docs/compliance/ADR-0007-CANONICAL-SM2-SM3-SIGNATURES.zh-CN.md): canonical SM2-SM3 signing, strict DER/public-key validation, fixed user ID, suite-bound signature inputs, and production enablement boundaries (Chinese).
 - [docs/compliance/ADR-0008-VERSIONED-KEY-DESCRIPTORS.zh-CN.md](docs/compliance/ADR-0008-VERSIONED-KEY-DESCRIPTORS.zh-CN.md): canonical software, PKCS#11, SDF, remote, certificate, resolver, redaction, and destructive migration rules (Chinese).
 - [docs/compliance/ADR-0009-SUITE-AWARE-KEY-REGISTRY-V2.zh-CN.md](docs/compliance/ADR-0009-SUITE-AWARE-KEY-REGISTRY-V2.zh-CN.md): suite-bound V2 registry manifest, SM2/INTL lifecycle, atomic rotation, crash recovery, and external trust-root rules (Chinese).
+- [docs/compliance/ADR-0010-AUTHENTICATED-SM4-SOFTWARE-KEY-ENVELOPES.zh-CN.md](docs/compliance/ADR-0010-AUTHENTICATED-SM4-SOFTWARE-KEY-ENVELOPES.zh-CN.md): authenticated SM4-GCM software-key envelopes, KEK provider boundary, atomic rewrap, and production custody limitations (Chinese).
 - [COMMUNITY.md](COMMUNITY.md): support, discussion, and first-contribution entry points.
 - [ROADMAP.md](ROADMAP.md): public product direction and ways to influence it.
 - [SECURITY.md](SECURITY.md): private vulnerability reporting and supported-version policy.
@@ -299,6 +347,7 @@ The screenshot below is rendered directly from the current desktop client code:
 - [CONTRIBUTING.md](CONTRIBUTING.md): issue, PR, commit, validation, and review standards.
 - [formats/SPROOF_V1.md](formats/SPROOF_V1.md): stable `.sproof` v1 exchange format.
 - [formats/KEY_DESCRIPTOR_V1.md](formats/KEY_DESCRIPTOR_V1.md): canonical key descriptor schema, provider union, resolution contract, redaction, and migration rules.
+- [formats/SM4_KEY_ENVELOPE_V1.md](formats/SM4_KEY_ENVELOPE_V1.md): canonical authenticated software-private-key envelope, passphrase KDF profile, and atomic persistence contract.
 - [formats/KEY_REGISTRY_V2.md](formats/KEY_REGISTRY_V2.md): byte-level V2 registry framing, manifest, event-chain, lifecycle, recovery, and compatibility contract.
 - [formats/DISTRIBUTED_ARCHITECTURE.md](formats/DISTRIBUTED_ARCHITECTURE.md): distributed/storage-compute separation notes.
 - [docs/performance/trustdb-sustained-stream-persistence-assessment-2026-07-23.zh-CN.md](docs/performance/trustdb-sustained-stream-persistence-assessment-2026-07-23.zh-CN.md): the single performance reference for L2-L5, HTTP/gRPC, backpressure, persistence, and configuration semantics (Chinese).

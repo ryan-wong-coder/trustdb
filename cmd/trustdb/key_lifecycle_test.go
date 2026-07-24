@@ -24,6 +24,7 @@ func TestKeyGenerateSM2ProducesLifecycleResolvableDescriptors(t *testing.T) {
 		"--suite", string(cryptosuite.CNSMV1),
 		"--out", dir,
 		"--prefix", "sm2-client",
+		"--protection", keydescriptor.SoftwareProtectionPlaintextDev,
 	})
 	if err := command.Execute(); err != nil {
 		t.Fatalf("key generate SM2 error = %v stderr=%s", err, stderr.String())
@@ -49,7 +50,7 @@ func TestKeyLifecycleCLIImportRotateCompromiseAndList(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	for _, prefix := range []string{"registry", "old", "new"} {
-		executeKeyCommand(t, []string{"key", "generate", "--out", dir, "--prefix", prefix})
+		executeKeyCommand(t, []string{"key", "generate", "--out", dir, "--prefix", prefix, "--protection", keydescriptor.SoftwareProtectionPlaintextDev})
 	}
 	registryPath := filepath.Join(dir, "keys.tdkeys")
 	common := []string{

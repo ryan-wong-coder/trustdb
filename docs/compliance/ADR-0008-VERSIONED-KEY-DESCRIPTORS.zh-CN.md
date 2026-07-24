@@ -38,7 +38,7 @@ TrustDB 使用唯一的 `trustdb.key-descriptor.v1` 作为 CLI、Server 和 prov
 
 ### 3.1 Software
 
-Software 描述符只保存相对路径、私钥编码和 protection ID。当前 `keygen` 生成：
+Software 描述符只保存相对路径、私钥编码和 protection ID。当前 `key generate` 默认生成：
 
 ```text
 client.key       signer descriptor
@@ -46,7 +46,7 @@ client.pub       verifier descriptor
 client.material  独立的 private material
 ```
 
-`client.key` 和 `client.pub` 都是 canonical CBOR，不是私钥 bytes。`client.material` 使用 `plaintext-dev-v1`，只用于开发和参考实现，并要求 Unix 下不得授予 group/other 权限。#451 将实现 `sm4-envelope-v1`；当前 resolver 识别该 ID 但明确返回 unsupported，绝不降级为 plaintext。
+`client.key` 和 `client.pub` 都是 canonical CBOR，不是私钥 bytes。`client.material` 默认使用 [`sm4-envelope-v1`](../../formats/SM4_KEY_ENVELOPE_V1.md)，resolver 从可信 descriptor 重建 AAD 并通过 KEK provider fail-closed 打开；错误版本、认证失败或 provider 缺失绝不降级为 plaintext。`plaintext-dev-v1` 只保留为显式开发兼容选项，并要求 Unix 下不得授予 group/other 权限。
 
 Software resolver 还拒绝绝对路径、`..` 穿越、symlink、非普通文件、非 canonical raw URL-base64、错误长度以及私钥派生公钥与描述符不一致。
 
@@ -133,7 +133,7 @@ CLI 的 claim、commit、serve、verify、registry 和 benchmark 入口都通过
 
 ## 10. 后续工作
 
-- #451：实现 authenticated `sm4-envelope-v1`，停止新路径持久化 plaintext private material；
+- #451：authenticated `sm4-envelope-v1`、开发 passphrase KEK provider 和 atomic rewrap 已完成，见 [`ADR-0010`](ADR-0010-AUTHENTICATED-SM4-SOFTWARE-KEY-ENVELOPES.zh-CN.md)；
 - #450：suite-aware Registry V2、SM2/INTL 注册、原子轮换、撤销、失陷和证书有效期约束已完成，见 [`ADR-0009`](ADR-0009-SUITE-AWARE-KEY-REGISTRY-V2.zh-CN.md)；
 - #452：PKCS#11 provider；
 - #453：SDF/HSM provider；
@@ -141,4 +141,4 @@ CLI 的 claim、commit、serve、verify、registry 和 benchmark 入口都通过
 - #455：`.sproof v2` 的 suite/certificate/trust material；
 - #456/#457：Go SDK 与 Desktop 的 suite-aware identity 和非导出 signer 接口。
 
-在 #451–#454 完成前，可以准确声明“TrustDB 已完成版本化、不可歧义、provider-neutral 的密钥配置、解析和 Registry V2 生命周期边界”，不能声明当前 `key generate` 的 `plaintext-dev-v1` 已达到生产 HSM 或国密密钥存储要求。
+在 #452–#454 完成前，可以准确声明“TrustDB 已完成版本化、不可歧义、provider-neutral 的 descriptor、Registry V2 和软件 SM4 envelope 边界”，不能声明 passphrase 软件 envelope 或显式 `plaintext-dev-v1` 已达到生产 HSM、SDF、KMS 托管或商用密码产品认证要求。

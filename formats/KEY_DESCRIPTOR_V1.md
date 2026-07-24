@@ -47,13 +47,16 @@ software.protection     plaintext-dev-v1 or sm4-envelope-v1
 ```
 
 The descriptor never contains private material. `plaintext-dev-v1` points to
-a separate owner-readable raw-URL-base64 file and is only a development and
-reference path. `sm4-envelope-v1` is recognized without plaintext fallback;
-opening that envelope is implemented by #451.
+a separate owner-readable raw-URL-base64 file, must be requested explicitly,
+and is only a development/reference path. `sm4-envelope-v1` points to the
+available authenticated format defined by
+[`SM4_KEY_ENVELOPE_V1.md`](SM4_KEY_ENVELOPE_V1.md); resolvers never fall back to
+plaintext after an invalid, unavailable, or wrong-key envelope.
 
 The software resolver rejects absolute paths, traversal, symlinks,
-non-regular files, group/other-readable material on Unix, padded or
-non-canonical base64, wrong key sizes, and public/private key mismatch.
+non-regular files, group/other-readable material on Unix, invalid canonical
+envelopes, padded or non-canonical plaintext base64, wrong key sizes, and
+public/private key mismatch.
 
 ### PKCS#11
 

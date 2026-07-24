@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/keyenvelope"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
@@ -46,6 +48,133 @@ func TestSoftwareResolverLoadsDescriptorRelativeMaterial(t *testing.T) {
 	}
 	if !ed25519.Verify(publicKey, message, signature.Signature) {
 		t.Fatal("resolved signer produced invalid signature")
+	}
+}
+
+func TestSoftwareResolverOpensAuthenticatedEnvelope(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows envelope storage intentionally fails closed")
+	}
+	t.Parallel()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	descriptor := softwareDescriptor(publicKey, "client.material")
+	descriptor.Software.Protection = SoftwareProtectionSM4Envelope
+	provider := keyenvelope.NewPassphraseKEKProvider(func(ctx context.Context) ([]byte, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return []byte("correct horse battery staple"), nil
+	})
+	encrypted, err := keyenvelope.Seal(context.Background(), softwareEnvelopeMetadata(descriptor), privateKey, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyenvelope.WriteFile(filepath.Join(dir, descriptor.Software.MaterialPath), encrypted); err != nil {
+		t.Fatal(err)
+	}
+	software, err := NewSoftwareProvider(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewResolver(software)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := resolver.ResolveSigner(context.Background(), descriptor, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := []byte("authenticated envelope signer")
+	signature, err := signer.Sign(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(publicKey, message, signature.Signature) {
+		t.Fatal("encrypted software signer produced invalid signature")
+	}
+}
+
+func TestSoftwareEnvelopeConcurrentAndStaleRewrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows envelope storage intentionally fails closed")
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	descriptor := softwareDescriptor(publicKey, "client.material")
+	descriptor.Software.Protection = SoftwareProtectionSM4Envelope
+	descriptorPath := filepath.Join(dir, "client.key")
+	if err := WriteFile(descriptorPath, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	oldProvider := resolverTestPassphraseProvider("correct horse battery staple")
+	encrypted, err := keyenvelope.Seal(context.Background(), softwareEnvelopeMetadata(descriptor), privateKey, oldProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialPath := filepath.Join(dir, descriptor.Software.MaterialPath)
+	if err := keyenvelope.WriteFile(materialPath, encrypted); err != nil {
+		t.Fatal(err)
+	}
+
+	newProviders := []*keyenvelope.PassphraseKEKProvider{
+		resolverTestPassphraseProvider("replacement horse battery staple A"),
+		resolverTestPassphraseProvider("replacement horse battery staple B"),
+	}
+	start := make(chan struct{})
+	errorsOut := make(chan error, len(newProviders))
+	var wait sync.WaitGroup
+	for _, provider := range newProviders {
+		provider := provider
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			errorsOut <- RewrapSoftwareEnvelopeFile(context.Background(), descriptorPath, oldProvider, provider)
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsOut)
+	succeeded := 0
+	failedAuthentication := 0
+	for err := range errorsOut {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, keyenvelope.ErrAuthenticationFailed):
+			failedAuthentication++
+		default:
+			t.Fatalf("concurrent rewrap error = %v", err)
+		}
+	}
+	if succeeded != 1 || failedAuthentication != 1 {
+		t.Fatalf("concurrent rewrap results: success=%d authentication_failure=%d", succeeded, failedAuthentication)
+	}
+
+	current, err := keyenvelope.ReadFile(materialPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStale := append([]byte(nil), current...)
+	if err := RewrapSoftwareEnvelopeFile(
+		context.Background(), descriptorPath, oldProvider,
+		resolverTestPassphraseProvider("stale overwrite passphrase"),
+	); !errors.Is(err, keyenvelope.ErrAuthenticationFailed) {
+		t.Fatalf("stale rewrap error = %v, want authentication failure", err)
+	}
+	afterStale, err := keyenvelope.ReadFile(materialPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeStale, afterStale) {
+		t.Fatal("stale rewrap overwrote the winning envelope")
 	}
 }
 
@@ -290,6 +419,15 @@ func writeMaterial(t *testing.T, path string, material []byte, mode os.FileMode)
 	if err := os.Chmod(path, mode); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func resolverTestPassphraseProvider(passphrase string) *keyenvelope.PassphraseKEKProvider {
+	return keyenvelope.NewPassphraseKEKProvider(func(ctx context.Context) ([]byte, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return []byte(passphrase), nil
+	})
 }
 
 func TestReadFileRejectsRawLegacyKey(t *testing.T) {
