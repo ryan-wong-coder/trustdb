@@ -70,7 +70,9 @@ and mechanism validation are implemented by the isolated provider tracked in
 
 `sdf.device_ref`, non-zero `sdf.key_index`, and optional
 `sdf.credential_ref` identify an SDF-managed private key without exporting it.
-The SDF provider is implemented by #453.
+The isolated SDF signer sidecar, deployment-owned adapter ABI, stable identity
+checks, configuration, and device qualification procedure are documented in
+[`docs/integrations/SDF_SIGNER.md`](../docs/integrations/SDF_SIGNER.md).
 
 ### Remote
 

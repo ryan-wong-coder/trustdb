@@ -138,3 +138,10 @@ documented in
 [`docs/integrations/PKCS11_SIGNER.md`](../docs/integrations/PKCS11_SIGNER.md).
 Its native Cryptoki dependency is confined to a build-tagged standalone
 sidecar and is not linked into TrustDB core.
+
+The optional SDF implementation uses the same supervised protocol and confines
+the stable TrustDB adapter ABI plus every deployment/vendor native dependency
+to a build-tagged standalone sidecar. Its exact SM2 digest contract, SM4 KEK
+boundary, configuration, and real-device qualification procedure are
+documented in
+[`docs/integrations/SDF_SIGNER.md`](../docs/integrations/SDF_SIGNER.md).
