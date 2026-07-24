@@ -127,8 +127,8 @@ type transportE2EEnv struct {
 	httpURL    string
 	grpcTarget string
 	identity   sdk.Identity
-	clientPub  []byte
-	serverPub  []byte
+	clientPub  sdk.KeyDescriptor
+	serverPub  sdk.KeyDescriptor
 }
 
 func newTransportE2EEnv(t *testing.T) transportE2EEnv {
@@ -141,6 +141,23 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 	serverPub, serverPriv, err := trustcrypto.GenerateEd25519Key()
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key server: %v", err)
+	}
+	identity, err := sdk.NewINTLV1Identity(
+		"tenant-transport",
+		"client-transport",
+		"client-key",
+		clientPriv,
+	)
+	if err != nil {
+		t.Fatalf("NewINTLV1Identity: %v", err)
+	}
+	clientDescriptor, err := sdk.NewINTLV1PublicKey("client-key", clientPub)
+	if err != nil {
+		t.Fatalf("NewINTLV1PublicKey client: %v", err)
+	}
+	serverDescriptor, err := sdk.NewINTLV1PublicKey("server-key", serverPub)
+	if err != nil {
+		t.Fatalf("NewINTLV1PublicKey server: %v", err)
 	}
 
 	tmp := t.TempDir()
@@ -244,14 +261,9 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 	return transportE2EEnv{
 		httpURL:    httpServer.URL,
 		grpcTarget: grpcListener.Addr().String(),
-		identity: sdk.Identity{
-			TenantID:   "tenant-transport",
-			ClientID:   "client-transport",
-			KeyID:      "client-key",
-			PrivateKey: clientPriv,
-		},
-		clientPub: clientPub,
-		serverPub: serverPub,
+		identity:   identity,
+		clientPub:  clientDescriptor,
+		serverPub:  serverDescriptor,
 	}
 }
 
