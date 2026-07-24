@@ -1,0 +1,134 @@
+# ADR-0012: FISCO BCOS 3.x compatibility baseline
+
+- Status: Accepted as a compatibility candidate; no production profile admitted
+- Date: 2026-07-24
+- Issue: [#461](https://github.com/wowtrust/trustdb/issues/461)
+- Machine-readable contract: [`configs/compatibility/fisco-bcos-v3.16.3.json`](../../configs/compatibility/fisco-bcos-v3.16.3.json)
+
+## Decision
+
+TrustDB pins FISCO BCOS `v3.16.3`, Go SDK `v3.0.2`, the Go SDK's exact C SDK module commit `a278b4749e34`, C SDK native release `v3.6.0`, and FISCO's Solidity compiler `v0.8.11` as one indivisible candidate baseline. Version-number similarity is not compatibility evidence.
+
+The default compatibility gate requires `runtime_status=verified`. At this ADR's acceptance date every production row therefore fails closed. Air has pinned native artifacts and can enter runtime validation. Pro and Max cannot: the `v3.16.3` release does not contain the service archives that its pinned BcosBuilder code requests. Container execution also cannot enter validation because the `v3.16.3` image is absent and has no digest.
+
+This decision is intentionally narrower than “FISCO BCOS 3.x support.” Later work in #462–#471 may promote an exact row only by committing complete smoke evidence for that row; it must not broaden the version range or copy evidence across deployment, crypto, OS, or CPU boundaries.
+
+## Evidence language
+
+Compatibility reports and CI use three distinct levels:
+
+| Level | Meaning | What it does not mean |
+| --- | --- | --- |
+| `documented` | An official FISCO source describes the feature or topology. | The pinned artifacts exist or work together. |
+| `artifact` | Every native artifact needed by the row has an exact SHA-256 and passed byte/size verification. | A node network or SDK operation succeeded. |
+| `runtime` | The exact row completed all required operations and produced reviewable evidence. | Other rows, patches, architectures, or release tags are compatible. |
+
+The validator defaults to `runtime`. A partial smoke is recorded as `partial`, never `verified`.
+
+## Exact pins and provenance
+
+| Component | Pin | Commit | Provenance and qualification |
+| --- | --- | --- | --- |
+| Node | `v3.16.3` | `274f864e7725fef5b8ed4c6b7a3363ee5396f104` | [Latest non-prerelease GitHub release](https://github.com/FISCO-BCOS/FISCO-BCOS/releases/tag/v3.16.3). The newer `v3.16.4` release is marked prerelease and is excluded. GitHub supplies SHA-256 digests for all four node archives. |
+| Go SDK | `v3.0.2` | `a9dbab29132d9e6a1cd5919dd993e4186c0703ff` | [Official Go SDK release](https://github.com/FISCO-BCOS/go-sdk/releases/tag/v3.0.2). Its README requires Go 1.21+, FISCO BCOS 3.2+, cgo, C SDK, and solc 0.8.11. |
+| Go SDK C dependency | pseudo-version `v0.0.0-20240726021820-a278b4749e34` | `a278b4749e342d2b111d736045db9ed98a63224d` | Pinned by the Go SDK's [exact `v3/go.mod`](https://github.com/FISCO-BCOS/go-sdk/blob/a9dbab29132d9e6a1cd5919dd993e4186c0703ff/v3/go.mod). This post-release source commit is not assumed byte-equivalent to the native `v3.6.0` assets. |
+| C SDK native library | `v3.6.0` | `53240138c396c10cb0e1a2b7b4d5c0cdaa0ac539` | [Official C SDK release](https://github.com/FISCO-BCOS/bcos-c-sdk/releases/tag/v3.6.0), which is the native library release named by the Go SDK README. GitHub did not expose asset digests; TrustDB downloaded and SHA-256 hashed every published asset on 2026-07-24. |
+| Solidity/compiler | `v0.8.11` | `415673533ae8ae4e9da5af544822499d04f69a52` | [FISCO Solidity release](https://github.com/FISCO-BCOS/solidity/releases/tag/v0.8.11). Standard and GM variants are independently pinned; one must never substitute for the other. |
+| TASSL certificate tool | `V_1.4` / `1.1.1b` | `fe885b939c13c715633e4c05df8811a1ea7ca079` | [Official TASSL release](https://github.com/FISCO-BCOS/TASSL/releases/tag/V_1.4). The pinned `build_chain.sh` invokes this tool for standard and GM certificate/key generation, so every platform archive is independently hashed. |
+| Official docs | `release-3` | `3e6b003778e076d0cdd5c5a99497299aebf0c89d` | Documentation claims are linked to this exact commit, not the moving Read the Docs `latest` alias. |
+
+The JSON file is authoritative for artifact names, URLs, byte sizes, and SHA-256 values. `scripts/fisco-bcos/compatibility.py verify-artifacts` re-downloads or checks a cache and rejects any byte mismatch.
+
+## Deployment, crypto, and architecture matrix
+
+The official docs describe [Air, Pro, and Max](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/introduction/key_feature.md): Air is all-in-one, Pro separates access and node services, and Max adds executor horizontal scaling, TiKV, and failover. The hardware guide documents [x86_64 and aarch64 CPUs](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/quick_start/hardware_requirements.md). The feature overview documents both [national cryptography algorithms and GM TLS](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/introduction/function_overview.md). These are documented capabilities, not results for the pinned baseline.
+
+| Deployment | Standard amd64/arm64 | Guomi amd64/arm64 | Admission decision |
+| --- | --- | --- | --- |
+| Air | Native Linux node, C SDK, and compiler artifacts are hash-verified for both CPUs. | The same node archive is paired with an independently pinned GM compiler and GM-configured certificates/ledger. | Artifact candidate only. Full runtime smoke is still required per row. |
+| Pro | The pinned BcosBuilder requests `BcosRpcService`, `BcosGatewayService`, and `BcosNodeService` archives, but the `v3.16.3` release returns 404 for them. | Same artifact gap, before any GM test can start. | Unsupported and fail closed. Building locally would define a different, separately attestable baseline. |
+| Max | The release also lacks `BcosMaxNodeService` and `BcosExecutorService`; TiKV/Tars was not provisioned. | Same artifact gap plus no GM Max execution. | Unsupported and fail closed. |
+
+Darwin archives are pinned to enable developer spikes. Windows has C SDK and compiler assets but no `v3.16.3` node release, so it is not a node runtime row. The official node Docker workflow targets only `linux/amd64`; both `v3.16.3` image runs were [cancelled](https://github.com/FISCO-BCOS/FISCO-BCOS/actions/runs/19784679576), and `docker.io/fiscoorg/fiscobcos:v3.16.3` returned `manifest unknown` on 2026-07-24. A mutable or older image tag is not an allowed substitute.
+
+## Required API surface and current Go SDK gaps
+
+Source inspection at the exact Go SDK commit establishes API presence. It does not establish runtime correctness.
+
+| Requirement | Exact Go SDK surface | Baseline state |
+| --- | --- | --- |
+| Transaction submission | `SendTransaction`, `SendEncodedTransaction`, async variants | Present; runtime validation incomplete. |
+| Receipt and transaction proof retrieval | `GetTransactionReceipt(..., true)` yields `txReceiptProof`; `GetTransactionByHash(..., true)` yields `txProof` | Present; non-empty proof and root binding must be demonstrated. The official JSON-RPC docs describe [`getTransactionReceipt` with proof](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/develop/api.md#L441-L487). |
+| Blocks and PBFT metadata | `GetBlockByNumber`, `GetBlockHashByNumber`, `GetPBFTView`, `GetConsensusStatus`, `GetSealerList` | Present. A local Darwin/arm64 standard spike observed four connected sealers, quorum 3, and one tolerated fault; full transaction-bound block evidence is incomplete. |
+| Events | `SubscribeEventLogs` / `UnSubscribeEventLogs` | Present; exact-tag runtime event delivery remains unverified. The official Go SDK docs describe [asynchronous event push](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/sdk/go_sdk/event_sub.md). |
+| Certificates | Standard CA/key/cert and GM CA/signing/encryption key/cert fields in `client.Config` | Present. The Go SDK README documents the two certificate sets and `IsSMCrypto`. Chain verification and the negotiated mode must be captured separately. |
+| `blockLimit` | Explicit input to `CreateEncodedTransactionDataV1`; receipt status `10001` is `BlockLimitCheckFail` | Present but no convenience getter in the main Go client. The smoke must derive current height, submit a valid `height+600` transaction, then demonstrate rejection of a deliberately stale limit. Official C SDK docs state [current height + 600](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/sdk/c_sdk/transaction_data_struct.md#L74-L80). |
+| Offline proof verification | No verifier for `txProof` or `txReceiptProof` | Missing. Retrieval is not verification. TrustDB must implement proof decoding, hashing, and binding to the exact finalized block `transactionsRoot`/`receiptsRoot`; accepting SDK booleans or strings would violate the fail-closed proof model. |
+
+PBFT consensus metadata is supporting evidence, not finality by itself. The later anchor implementation must bind the exact transaction and receipt roots to a finalized block and then independently validate the TrustDB payload. BCOS inclusion, PBFT finality, TrustDB proof validity, and exact anchor binding remain separate gates.
+
+## C SDK adapter and sidecar decision
+
+The Go SDK is already a cgo wrapper over `bcos-c-sdk`; adding another in-process C binding would duplicate ABI, memory-lifetime, and native-library risk without adding an isolation boundary. It is rejected.
+
+The approved fallback for a future Go SDK gap is a narrow, supervised C SDK sidecar with these constraints:
+
+1. It is compiled from the pinned C SDK source dependency and loads only a SHA-256-pinned native library for the exact platform.
+2. Its protocol is versioned and exposes only the missing operation, request/response bytes, node/group identity, negotiated crypto mode, and native SDK protocol version. It never returns “verified”; it only returns raw BCOS evidence plus transport status.
+3. Private transaction keys and GM TLS material are passed by reference or mounted with least privilege. They are not serialized into TrustDB proof objects or logs.
+4. Startup fails if the library digest, SDK protocol, group, crypto mode, or certificate set differs from configuration. Crash/restart is supervised and bounded; no fallback to the Go path or a different native library occurs silently.
+5. TrustDB performs proof and finality verification in Go after the sidecar returns raw bytes.
+
+No sidecar is introduced by #461 because all required retrieval/submission operations have a Go SDK API. The known missing operation—offline proof verification—must not be delegated to either SDK.
+
+## Reproducible validation
+
+Static and artifact gates:
+
+```bash
+python3 scripts/fisco-bcos/compatibility.py validate
+python3 scripts/fisco-bcos/test_compatibility.py
+
+# Downloads the exact Linux/amd64 node, C SDK, and both compiler variants,
+# then verifies size and SHA-256.
+python3 scripts/fisco-bcos/compatibility.py verify-artifacts \
+  --platform linux/amd64 \
+  --cache-dir .cache/fisco-bcos-compat
+
+# Artifact admission succeeds for the Air candidate.
+python3 scripts/fisco-bcos/compatibility.py check \
+  --deployment air --crypto standard --platform linux/amd64 --level artifact
+
+# Default/runtime admission intentionally fails until complete evidence lands.
+python3 scripts/fisco-bcos/compatibility.py check \
+  --deployment air --crypto standard --platform linux/amd64
+
+# These also intentionally fail: missing Pro artifacts and missing image digest.
+python3 scripts/fisco-bcos/compatibility.py check \
+  --deployment pro --crypto guomi --platform linux/arm64 --level artifact
+python3 scripts/fisco-bcos/compatibility.py check \
+  --deployment air --crypto standard --platform linux/amd64 \
+  --level documented --distribution container
+```
+
+The pinned Air smoke runner is `scripts/fisco-bcos/smoke-air.sh`. It generates an isolated four-node network with the tag-pinned `build_chain.sh`, explicit version and admin address, validates certificate material, and requires the Go SDK smoke client to emit a complete evidence JSON before a matrix row can be promoted. Standard and Guomi are separate invocations; generated files or results are never reused across modes.
+
+## Evidence obtained on 2026-07-24
+
+The following developer spike is partial evidence only:
+
+- Host: macOS 26.1, arm64.
+- Downloaded `fisco-bcos-macOS-arm.tar.gz`; SHA-256 matched `b6f60379...eb2f9ebf` and `fisco-bcos --version` reported version 3.16.3 / commit `274f864e...`.
+- The exact tag's `build_chain.sh` generated four standard Air nodes. All four processes started; `getConsensusStatus` reported four connected consensus nodes, quorum 3, and maximum faulty quorum 1. The generated SDK leaf certificate verified against its generated CA, and mTLS JSON-RPC returned block number 0 and the expected genesis hash.
+- This did not submit a transaction, retrieve proofs, deliver an event, or exercise stale `blockLimit`, so `darwin/arm64` standard remains `partial`.
+- No Guomi result is claimed until the pinned C SDK/Go SDK client completes GM TLS and transaction operations.
+
+Runtime evidence must include exact commands, host/CPU, every artifact digest, node `--version`, four node identities, certificate mode, submitted transaction hash, receipt and transaction proof arrays, containing block roots/signatures/sealer list, event payload, successful fresh `blockLimit`, rejected stale `blockLimit`, and raw client output. If any item is absent, the row remains non-admissible.
+
+## Consequences and follow-up boundary
+
+- #462 may define the BCOS anchor payload against this candidate but cannot call it a supported runtime profile.
+- #463–#471 must consume the JSON gate and add evidence without relaxing it.
+- Publishing new upstream assets or an image later does not mutate this ADR. Their hashes and provenance require a reviewed baseline update.
+- Pro/Max enablement requires a complete, pinned service artifact set (or a separately attested source build), plus Tars/TiKV deployment evidence. Air results cannot be copied to those architectures.
+- Guomi is a ledger, TLS, account/signature, compiler, hash, proof, and certificate mode. Enabling only one layer is a compatibility failure.
