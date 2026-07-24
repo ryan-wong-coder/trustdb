@@ -57,12 +57,12 @@ Source inspection at the exact Go SDK commit establishes API presence. It does n
 
 | Requirement | Exact Go SDK surface | Baseline state |
 | --- | --- | --- |
-| Transaction submission | `SendTransaction`, `SendEncodedTransaction`, async variants | Present; runtime validation incomplete. |
-| Receipt and transaction proof retrieval | `GetTransactionReceipt(..., true)` yields `txReceiptProof`; `GetTransactionByHash(..., true)` yields `txProof` | Present; non-empty proof and root binding must be demonstrated. The official JSON-RPC docs describe [`getTransactionReceipt` with proof](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/develop/api.md#L441-L487). |
-| Blocks and PBFT metadata | `GetBlockByNumber`, `GetBlockHashByNumber`, `GetPBFTView`, `GetConsensusStatus`, `GetSealerList` | Present. A local Darwin/arm64 standard spike observed four connected sealers, quorum 3, and one tolerated fault; full transaction-bound block evidence is incomplete. |
-| Events | `SubscribeEventLogs` / `UnSubscribeEventLogs` | Present; exact-tag runtime event delivery remains unverified. The official Go SDK docs describe [asynchronous event push](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/sdk/go_sdk/event_sub.md). |
-| Certificates | Standard CA/key/cert and GM CA/signing/encryption key/cert fields in `client.Config` | Present. The Go SDK README documents the two certificate sets and `IsSMCrypto`. Chain verification and the negotiated mode must be captured separately. |
-| `blockLimit` | Explicit input to `CreateEncodedTransactionDataV1`; receipt status `10001` is `BlockLimitCheckFail` | Present but no convenience getter in the main Go client. The smoke must derive current height, submit a valid `height+600` transaction, then demonstrate rejection of a deliberately stale limit. Official C SDK docs state [current height + 600](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/sdk/c_sdk/transaction_data_struct.md#L74-L80). |
+| Transaction submission | `SendTransaction`, `SendEncodedTransaction`, async variants | Present. The Darwin/arm64 raw-EVM diagnostics submitted successful deployment and call transactions in both modes. |
+| Receipt and transaction proof retrieval | `GetTransactionReceipt(..., true)` yields `txReceiptProof`; `GetTransactionByHash(..., true)` yields `txProof` | Present. Both diagnostics returned non-empty arrays, but retrieval is not independent proof verification. The official JSON-RPC docs describe [`getTransactionReceipt` with proof](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/develop/api.md#L441-L487). |
+| Blocks and PBFT metadata | `GetBlockByNumber`, `GetBlockHashByNumber`, `GetPBFTView`, `GetConsensusStatus`, `GetSealerList` | Present. Both diagnostics bound the event transaction to a block response with transaction/receipt roots, three signatures, four connected sealers, quorum 3, and one tolerated fault. |
+| Events | `SubscribeEventLogs` / `UnSubscribeEventLogs` | Present. Both diagnostics received a subscribed `LOG0` whose transaction hash matched the submitted call. The official Go SDK docs describe [asynchronous event push](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/sdk/go_sdk/event_sub.md). |
+| Certificates | Standard CA/key/cert and GM CA/signing/encryption key/cert fields in `client.Config` | Present. The standard leaf and both GM signing/encryption leaves verified against their generated CAs; the Go client reported the expected negotiated mode. |
+| `blockLimit` | Explicit input to `CreateEncodedTransactionDataV1`; receipt status `10001` is `BlockLimitCheckFail` | Present but no convenience getter in the main Go client. Both diagnostics accepted `height+600` and rejected a deliberately stale limit with `BlockLimitCheckFail`. Official C SDK docs state [current height + 600](https://github.com/FISCO-BCOS/FISCO-BCOS-DOC/blob/3e6b003778e076d0cdd5c5a99497299aebf0c89d/3.x/zh_CN/docs/sdk/c_sdk/transaction_data_struct.md#L74-L80). |
 | Offline proof verification | No verifier for `txProof` or `txReceiptProof` | Missing. Retrieval is not verification. TrustDB must implement proof decoding, hashing, and binding to the exact finalized block `transactionsRoot`/`receiptsRoot`; accepting SDK booleans or strings would violate the fail-closed proof model. |
 
 PBFT consensus metadata is supporting evidence, not finality by itself. The later anchor implementation must bind the exact transaction and receipt roots to a finalized block and then independently validate the TrustDB payload. BCOS inclusion, PBFT finality, TrustDB proof validity, and exact anchor binding remain separate gates.
@@ -111,17 +111,28 @@ python3 scripts/fisco-bcos/compatibility.py check \
   --level documented --distribution container
 ```
 
-The pinned Air smoke runner is `scripts/fisco-bcos/smoke-air.sh`. It generates an isolated four-node network with the tag-pinned `build_chain.sh`, explicit version and admin address, validates certificate material, and requires the Go SDK smoke client to emit a complete evidence JSON before a matrix row can be promoted. Standard and Guomi are separate invocations; generated files or results are never reused across modes.
+The pinned Air smoke runner is `scripts/fisco-bcos/smoke-air.sh`. It generates an isolated four-node network with the tag-pinned `build_chain.sh`, explicit version and admin address, validates certificate material, creates an ephemeral in-memory transaction key, and requires the Go SDK smoke client to emit an evidence JSON. Standard and Guomi are separate, sequential invocations; generated networks, certificates, keys, or results are never reused across modes. The runner fails closed if another same-platform smoke owns its host lock. An external `--cache-dir` may reuse only hash-verified release bytes.
+
+The default path compiles `CompatibilityProbe.sol` with the exact standard or GM compiler and fails if the compiler cannot execute. `--raw-evm-fixture` is a deliberately weaker diagnostic: it deploys fixed creation bytecode whose runtime emits `LOG0`, allowing node/SDK/TLS/proof/event/blockLimit investigation when the compiler is blocked. Evidence from that flag can never by itself promote a row to `runtime_status=verified`.
+
+```bash
+scripts/fisco-bcos/smoke-air.sh \
+  --mode standard --work-dir /tmp/fisco-standard
+scripts/fisco-bcos/smoke-air.sh \
+  --mode guomi --work-dir /tmp/fisco-guomi
+
+# Diagnostic only; never sufficient for admission.
+scripts/fisco-bcos/smoke-air.sh \
+  --mode standard --raw-evm-fixture --work-dir /tmp/fisco-standard-raw
+```
 
 ## Evidence obtained on 2026-07-24
 
-The following developer spike is partial evidence only:
+Two developer diagnostics were completed on macOS 26.1 arm64. They are recorded as [standard evidence](evidence/fisco-bcos/2026-07-24-darwin-arm64-standard-diagnostic.json) and [Guomi evidence](evidence/fisco-bcos/2026-07-24-darwin-arm64-guomi-diagnostic.json). Both verified the exact node, C SDK, compiler archive, and TASSL hashes; reported node version 3.16.3 / commit `274f864e...`; generated independent four-node networks; verified the relevant certificate chains; negotiated the expected standard or GM mode; submitted two transactions; retrieved transaction and receipt proof arrays; received the subscribed event; fetched its block roots and three signatures; observed four sealers with quorum 3; and rejected a stale `blockLimit`.
 
-- Host: macOS 26.1, arm64.
-- Downloaded `fisco-bcos-macOS-arm.tar.gz`; SHA-256 matched `b6f60379...eb2f9ebf` and `fisco-bcos --version` reported version 3.16.3 / commit `274f864e...`.
-- The exact tag's `build_chain.sh` generated four standard Air nodes. All four processes started; `getConsensusStatus` reported four connected consensus nodes, quorum 3, and maximum faulty quorum 1. The generated SDK leaf certificate verified against its generated CA, and mTLS JSON-RPC returned block number 0 and the expected genesis hash.
-- This did not submit a transaction, retrieve proofs, deliver an event, or exercise stale `blockLimit`, so `darwin/arm64` standard remains `partial`.
-- No Guomi result is claimed until the pinned C SDK/Go SDK client completes GM TLS and transaction operations.
+Neither row is promoted. Both exact Darwin/arm64 compiler binaries abort before reporting a version because they are dynamically linked to the absolute path `/opt/homebrew/opt/z3/lib/libz3.dylib`, which was absent on the test host. The diagnostics therefore used the compiler-independent raw-EVM fixture. This establishes useful node/Go SDK/C SDK behavior but does not establish the pinned compiler-backed workflow. The evidence also records that proof arrays were retrieved, not independently verified.
+
+Two repeat standard diagnostics completed every client operation and wrote valid JSON, then segfaulted in the native `bcos_sdk_destroy` call reached by immediate `Client.Close()` after event unsubscription. Its cause is not established; in particular, the known distinction between the Go module's `a278b474...` source pin and the `v3.6.0` native library must be investigated rather than assumed causal. The current smoke client explicitly unsubscribes, gives native callback work a one-second bounded drain, closes the client, and emits evidence only after clean teardown. Subsequent standard and Guomi runs completed that path with empty client stderr. A separate Guomi attempt with only five seconds of node readiness hit a websocket handshake timeout, so the runner now gives node RPC initialization a fixed ten-second window rather than retrying a failed native SDK creation. A Guomi run launched concurrently with a standard run reported `sm_crypto=false`; the existing negotiated-mode assertion rejected it before submission, and the runner now serializes same-platform smoke processes. These lifecycle constraints remain compatibility risks and are recorded rather than hidden.
 
 Runtime evidence must include exact commands, host/CPU, every artifact digest, node `--version`, four node identities, certificate mode, submitted transaction hash, receipt and transaction proof arrays, containing block roots/signatures/sealer list, event payload, successful fresh `blockLimit`, rejected stale `blockLimit`, and raw client output. If any item is absent, the row remains non-admissible.
 

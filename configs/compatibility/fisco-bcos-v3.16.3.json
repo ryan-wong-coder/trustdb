@@ -395,15 +395,17 @@
       "platform": "darwin/arm64",
       "artifact_status": "verified",
       "runtime_status": "partial",
-      "reason": "A local four-node network reached four connected PBFT sealers and served mTLS JSON-RPC on 2026-07-24; transaction/proof/event/blockLimit checks remain incomplete."
+      "reason": "Raw-EVM diagnostics completed mTLS, transaction, proof retrieval, event, block metadata, four-sealer PBFT and stale blockLimit checks on 2026-07-24. The pinned compiler cannot execute without its absolute Z3 dependency; two immediate teardown repeats crashed in bcos_sdk_destroy, while the bounded-unsubscribe-drain harness exited cleanly.",
+      "evidence": "docs/integrations/evidence/fisco-bcos/2026-07-24-darwin-arm64-standard-diagnostic.json"
     },
     {
       "deployment": "air",
       "crypto": "guomi",
       "platform": "darwin/arm64",
       "artifact_status": "verified",
-      "runtime_status": "unverified",
-      "reason": "Pinned native node, C SDK and GM compiler artifacts exist; the full Guomi smoke was not completed."
+      "runtime_status": "partial",
+      "reason": "Raw-EVM diagnostics completed GM TLS, transaction, proof retrieval, event, block metadata, four-sealer PBFT and stale blockLimit checks on 2026-07-24. The pinned GM compiler cannot execute without its absolute Z3 dependency; the current bounded-readiness and bounded-unsubscribe-drain harness exited cleanly.",
+      "evidence": "docs/integrations/evidence/fisco-bcos/2026-07-24-darwin-arm64-guomi-diagnostic.json"
     },
     {
       "deployment": "pro",

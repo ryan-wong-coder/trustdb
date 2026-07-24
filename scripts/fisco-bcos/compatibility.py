@@ -67,6 +67,43 @@ def validate_artifact(component: str, artifact: dict[str, Any]) -> None:
         require(artifact.get("crypto") in CRYPTO_MODES, f"{prefix}: invalid crypto mode")
 
 
+def validate_evidence(
+    baseline_id: str, row: dict[str, Any], evidence_reference: str
+) -> None:
+    relative = Path(evidence_reference)
+    require(
+        not relative.is_absolute() and ".." not in relative.parts,
+        f"matrix evidence path must be repository-relative: {evidence_reference}",
+    )
+    evidence_path = REPO_ROOT / relative
+    try:
+        evidence = load_baseline(evidence_path)
+    except BaselineError as exc:
+        raise BaselineError(f"invalid matrix evidence {evidence_reference}: {exc}") from exc
+    key = (row["deployment"], row["crypto"], row["platform"])
+    require(evidence.get("baseline_id") == baseline_id, f"evidence {key} baseline mismatch")
+    require(
+        evidence.get("profile")
+        == {
+            "deployment": row["deployment"],
+            "crypto": row["crypto"],
+            "platform": row["platform"],
+        },
+        f"evidence {key} profile mismatch",
+    )
+    admitted = evidence.get("admitted")
+    require(isinstance(admitted, bool), f"evidence {key} requires boolean admitted")
+    if evidence.get("probe_source") == "compiler-independent-raw-evm-log0":
+        require(
+            row["runtime_status"] != "verified",
+            f"raw-EVM diagnostic cannot verify runtime row {key}",
+        )
+    require(
+        admitted == (row["runtime_status"] == "verified"),
+        f"evidence {key} admission disagrees with runtime_status",
+    )
+
+
 def validate_baseline(value: dict[str, Any]) -> None:
     require(value.get("schema_version") == 1, "unsupported schema_version")
     policy = value.get("policy")
@@ -122,6 +159,13 @@ def validate_baseline(value: dict[str, Any]) -> None:
             require(row["artifact_status"] == "verified", f"runtime row {key} lacks verified artifacts")
         if row["artifact_status"] == "unavailable":
             require(row["runtime_status"] == "unsupported", f"unavailable row {key} must be unsupported")
+        evidence_reference = row.get("evidence")
+        if evidence_reference is not None:
+            require(
+                isinstance(evidence_reference, str) and evidence_reference,
+                f"matrix evidence reference {key} must be a non-empty string",
+            )
+            validate_evidence(value["baseline_id"], row, evidence_reference)
 
     for deployment in DEPLOYMENTS:
         for crypto in CRYPTO_MODES:
@@ -229,11 +273,20 @@ def verify_artifacts(
         raise BaselineError("no artifacts match the requested platform/crypto filters")
     for component, artifact in selected:
         path = cache_dir / component / artifact["name"]
-        if not path.exists():
+        if path.exists():
+            try:
+                verify_file(path, artifact)
+            except BaselineError:
+                if no_download:
+                    raise
+                path.unlink()
+                download(artifact["url"], path)
+                verify_file(path, artifact)
+        else:
             if no_download:
                 raise BaselineError(f"artifact is not cached: {path}")
             download(artifact["url"], path)
-        verify_file(path, artifact)
+            verify_file(path, artifact)
         results.append(
             {
                 "component": component,

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("compatibility.py")
@@ -52,6 +55,56 @@ class CompatibilityBaselineTest(unittest.TestCase):
         row["runtime_status"] = "partial"
         with self.assertRaisesRegex(compatibility.BaselineError, "must be unsupported"):
             compatibility.validate_baseline(invalid)
+
+    def test_raw_evm_diagnostic_cannot_promote_runtime(self) -> None:
+        invalid = copy.deepcopy(self.baseline)
+        row = next(
+            item
+            for item in invalid["matrix"]
+            if item["deployment"] == "air"
+            and item["crypto"] == "standard"
+            and item["platform"] == "darwin/arm64"
+        )
+        row["runtime_status"] = "verified"
+        with self.assertRaisesRegex(compatibility.BaselineError, "raw-EVM diagnostic"):
+            compatibility.validate_baseline(invalid)
+
+    def test_corrupt_cache_is_replaced_only_when_downloads_are_allowed(self) -> None:
+        expected = b"pinned artifact bytes"
+        artifact = {
+            "platform": "linux/amd64",
+            "name": "artifact.bin",
+            "url": "https://example.invalid/artifact.bin",
+            "size": len(expected),
+            "sha256": hashlib.sha256(expected).hexdigest(),
+        }
+        baseline = {
+            "components": {
+                "node": {"artifacts": [artifact]},
+                "c_sdk": {"artifacts": []},
+                "solidity": {"artifacts": []},
+                "tassl": {"artifacts": []},
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            cached = cache / "node" / artifact["name"]
+            cached.parent.mkdir(parents=True)
+            cached.write_bytes(b"truncated")
+            with self.assertRaisesRegex(compatibility.BaselineError, "size mismatch"):
+                compatibility.verify_artifacts(
+                    baseline, cache, "linux/amd64", None, no_download=True
+                )
+
+            def replace(_url: str, destination: Path) -> None:
+                destination.write_bytes(expected)
+
+            with mock.patch.object(compatibility, "download", side_effect=replace):
+                result = compatibility.verify_artifacts(
+                    baseline, cache, "linux/amd64", None, no_download=False
+                )
+            self.assertEqual(cached.read_bytes(), expected)
+            self.assertEqual(result[0]["status"], "verified")
 
 
 if __name__ == "__main__":
