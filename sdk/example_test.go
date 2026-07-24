@@ -16,10 +16,59 @@ import (
 func TestPublicModelAliasesCompile(t *testing.T) {
 	t.Parallel()
 
-	proof := sdk.ProofBundle{SchemaVersion: "trustdb.proof-bundle.v1", RecordID: "tr1example"}
-	single := sdk.SingleProof{SchemaVersion: "trustdb.sproof.v1", RecordID: proof.RecordID, ProofBundle: proof}
+	proof := sdk.ProofBundle{SchemaVersion: "trustdb.proof-bundle.v2", CryptoSuite: sdk.CryptoSuiteINTLV1, RecordID: "tr1example"}
+	single := sdk.SingleProof{SchemaVersion: "trustdb.sproof.v2", FormatVersion: 2, CryptoSuite: sdk.CryptoSuiteINTLV1, RecordID: proof.RecordID, ProofBundle: proof}
 	if single.ProofBundle.RecordID != "tr1example" {
 		t.Fatalf("single proof = %+v", single)
+	}
+}
+
+func ExampleNewCNSMV1Identity() {
+	_, privateKey, err := sdk.GenerateCNSMV1SoftwareKey()
+	if err != nil {
+		panic(err)
+	}
+	identity, err := sdk.NewCNSMV1Identity("tenant-cn", "client-cn", "client-sm2", privateKey)
+	if err != nil {
+		panic(err)
+	}
+	signed, err := sdk.BuildSignedFileClaim(bytes.NewReader([]byte("国密证据")), identity, sdk.FileClaimOptions{
+		IdempotencyKey: "cn-example-1",
+		Nonce:          bytes.Repeat([]byte{6}, 16),
+		EventType:      "file.snapshot",
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(signed.CryptoSuite, signed.Claim.Content.HashAlg, signed.Signature.Alg)
+	// Output: CN_SM_V1 sm3 sm2-sm3
+}
+
+func ExampleNewCallbackSigner() {
+	publicKey, privateKey, err := sdk.GenerateCNSMV1SoftwareKey()
+	if err != nil {
+		panic(err)
+	}
+	remoteKey, err := sdk.NewCNSMV1SoftwareSigner("hsm-sm2", privateKey)
+	if err != nil {
+		panic(err)
+	}
+	descriptor, err := sdk.NewCNSMV1PublicKey("hsm-sm2", publicKey)
+	if err != nil {
+		panic(err)
+	}
+	descriptor.Provider = "application-hsm"
+	signer, err := sdk.NewCallbackSigner(descriptor, func(ctx context.Context, message []byte) ([]byte, error) {
+		// A production callback sends only message to the private-key boundary.
+		// remoteKey stands in for that boundary in this self-contained example.
+		return remoteKey.Sign(ctx, message)
+	})
+	if err != nil {
+		panic(err)
+	}
+	_, err = sdk.NewIdentity("tenant-cn", "client-cn", signer)
+	if err != nil {
+		panic(err)
 	}
 }
 
