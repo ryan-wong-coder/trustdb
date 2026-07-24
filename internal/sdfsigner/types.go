@@ -8,6 +8,7 @@ package sdfsigner
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/wowtrust/trustdb/sdk/signerplugin"
 )
@@ -23,6 +24,8 @@ const (
 	MaxSM4OperationBytes  = 16 << 20
 	SM4KeyBytes           = 16
 	SM4BlockBytes         = 16
+
+	DefaultSessionCloseTimeout = 2 * time.Second
 )
 
 // Capability is negotiated with the adapter before the signer starts. The
@@ -41,14 +44,18 @@ const (
 	CapabilitySM4MAC
 )
 
-const RequiredCapabilities = CapabilityHealth |
+const SigningCapabilities = CapabilityHealth |
 	CapabilitySM2Sign |
-	CapabilitySM2PublicKey |
-	CapabilityRandom |
-	CapabilitySM4KEKGenerate |
+	CapabilitySM2PublicKey
+
+const SM4Capabilities = CapabilitySM4KEKGenerate |
 	CapabilitySM4KEKImport |
 	CapabilitySM4CBC |
 	CapabilitySM4MAC
+
+const AllCapabilities = SigningCapabilities |
+	CapabilityRandom |
+	SM4Capabilities
 
 var (
 	ErrInvalidConfiguration  = errors.New("invalid SDF signer configuration")
@@ -59,13 +66,14 @@ var (
 // Config binds one sidecar to one exact SDF device, credential reference, and
 // KEK index. AdapterConfig is passed only to the isolated native adapter.
 type Config struct {
-	PluginID           string
-	DeviceRef          string
-	CredentialRef      string
-	Credential         CredentialSource
-	KEKID              string
-	KEKIndex           uint32
-	MaxConcurrentSigns uint32
+	PluginID             string
+	DeviceRef            string
+	CredentialRef        string
+	Credential           CredentialSource
+	KEKID                string
+	KEKIndex             uint32
+	RequiredCapabilities Capability
+	MaxConcurrentSigns   uint32
 }
 
 // DeviceIdentity is the restart-stable public identity returned by an

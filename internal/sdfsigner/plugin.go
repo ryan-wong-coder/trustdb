@@ -23,6 +23,7 @@ type Plugin struct {
 	config   Config
 	identity DeviceIdentity
 	info     signerplugin.Info
+	required Capability
 
 	mu       sync.Mutex
 	accepted map[string][]byte
@@ -36,12 +37,23 @@ func New(ctx context.Context, config Config, backend Backend) (*Plugin, error) {
 	if backend == nil || config.Credential == nil {
 		return nil, fmt.Errorf("%w: backend and credential source are required", ErrInvalidConfiguration)
 	}
+	required := config.RequiredCapabilities
+	if required == 0 {
+		required = SigningCapabilities
+	}
 	if !validIdentifier(config.DeviceRef, 4096) ||
 		!validIdentifier(config.CredentialRef, 4096) ||
-		!validIdentifier(config.KEKID, 256) ||
-		config.KEKIndex == 0 ||
+		required&SigningCapabilities != SigningCapabilities ||
+		required&^AllCapabilities != 0 ||
 		config.MaxConcurrentSigns == 0 || config.MaxConcurrentSigns > 1024 {
 		return nil, fmt.Errorf("%w: device, credential, KEK, or concurrency is invalid", ErrInvalidConfiguration)
+	}
+	if required&SM4Capabilities != 0 {
+		if !validIdentifier(config.KEKID, 256) || config.KEKIndex == 0 {
+			return nil, fmt.Errorf("%w: SM4 KEK identity is required", ErrInvalidConfiguration)
+		}
+	} else if config.KEKID != "" || config.KEKIndex != 0 {
+		return nil, fmt.Errorf("%w: SM4 KEK configured without capability", ErrInvalidConfiguration)
 	}
 	info := signerplugin.Info{
 		PluginID:     config.PluginID,
@@ -66,7 +78,7 @@ func New(ctx context.Context, config Config, backend Backend) (*Plugin, error) {
 	if err != nil {
 		return nil, providerError(err)
 	}
-	if capabilities&RequiredCapabilities != RequiredCapabilities {
+	if capabilities&required != required {
 		return nil, providerError(newFault(faultUnsupported))
 	}
 	session, err := device.OpenSession(ctx)
@@ -82,7 +94,7 @@ func New(ctx context.Context, config Config, backend Backend) (*Plugin, error) {
 		return nil, providerError(closeErr)
 	}
 	return &Plugin{
-		backend: backend, config: config, identity: identity, info: info,
+		backend: backend, config: config, identity: identity, info: info, required: required,
 		accepted: make(map[string][]byte),
 	}, nil
 }
@@ -188,6 +200,9 @@ func (p *Plugin) Sign(ctx context.Context, key signerplugin.Key, message []byte)
 // Random obtains device random through the negotiated SDF capability. This
 // operation is intentionally not part of signer-plugin v1.
 func (p *Plugin) Random(ctx context.Context, length uint32) ([]byte, error) {
+	if p == nil || p.required&CapabilityRandom == 0 {
+		return nil, providerError(newFault(faultUnsupported))
+	}
 	if length == 0 || length > MaxRandomBytes {
 		return nil, providerError(newFault(faultInvalid))
 	}
@@ -211,6 +226,9 @@ func (p *Plugin) Random(ctx context.Context, length uint32) ([]byte, error) {
 // session key and returns only its KEK-wrapped durable form plus an opaque
 // same-session handle. The randomized generation operation is never retried.
 func (p *Plugin) GenerateSM4Session(ctx context.Context) (WrappedSM4Key, *SM4Session, error) {
+	if p == nil || p.required&SM4Capabilities != SM4Capabilities {
+		return WrappedSM4Key{}, nil, providerError(newFault(faultUnsupported))
+	}
 	session, err := p.openSession(ctx)
 	if err != nil {
 		return WrappedSM4Key{}, nil, providerError(err)
@@ -245,6 +263,9 @@ func (p *Plugin) GenerateSM4Session(ctx context.Context) (WrappedSM4Key, *SM4Ses
 // ImportSM4Session imports only a KEK-wrapped session key. Exact KEK identity
 // and index prevent a restored blob from silently binding to another KEK.
 func (p *Plugin) ImportSM4Session(ctx context.Context, wrapped WrappedSM4Key) (*SM4Session, error) {
+	if p == nil || p.required&SM4Capabilities != SM4Capabilities {
+		return nil, providerError(newFault(faultUnsupported))
+	}
 	if wrapped.KEKID != p.config.KEKID || wrapped.KEKIndex != p.config.KEKIndex ||
 		len(wrapped.Wrapped) == 0 || len(wrapped.Wrapped) > MaxWrappedKeyBytes {
 		return nil, providerError(newFault(faultInvalid))
@@ -282,9 +303,12 @@ type SM4Session struct {
 	session Session
 	handle  SessionKeyHandle
 
-	opMu   sync.Mutex
-	mu     sync.Mutex
-	closed bool
+	opMu      sync.Mutex
+	mu        sync.Mutex
+	closed    bool
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
 }
 
 func (s *SM4Session) EncryptCBC(ctx context.Context, iv, plaintext []byte) ([]byte, error) {
@@ -360,28 +384,53 @@ func (s *SM4Session) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
-	s.mu.Lock()
-	if s.closed {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultSessionCloseTimeout)
+	defer cancel()
+	return s.CloseContext(ctx)
+}
+
+// CloseContext bounds the caller-visible cleanup wait. A native SDF call
+// cannot be interrupted safely in-process, so timed-out cleanup continues in
+// the isolated sidecar; the host supervisor remains the final hard-stop.
+func (s *SM4Session) CloseContext(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.closeOnce.Do(func() {
+		s.closeDone = make(chan struct{})
+		s.mu.Lock()
+		s.closed = true
 		s.mu.Unlock()
-		return nil
+		go func() {
+			s.opMu.Lock()
+			s.mu.Lock()
+			session := s.session
+			handle := s.handle
+			s.session = nil
+			s.handle = SessionKeyHandle{}
+			s.mu.Unlock()
+			if session != nil {
+				destroyErr := session.DestroySessionKey(context.Background(), handle)
+				closeErr := session.Close()
+				if destroyErr != nil {
+					s.closeErr = providerError(destroyErr)
+				} else {
+					s.closeErr = providerError(closeErr)
+				}
+			}
+			s.opMu.Unlock()
+			close(s.closeDone)
+		}()
+	})
+	select {
+	case <-s.closeDone:
+		return s.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	s.closed = true
-	session := s.session
-	handle := s.handle
-	s.session = nil
-	s.handle = SessionKeyHandle{}
-	s.mu.Unlock()
-	if session == nil {
-		return nil
-	}
-	destroyErr := session.DestroySessionKey(context.Background(), handle)
-	closeErr := session.Close()
-	if destroyErr != nil {
-		return providerError(destroyErr)
-	}
-	return providerError(closeErr)
 }
 
 func (s *SM4Session) active() (Session, SessionKeyHandle, error) {
@@ -477,7 +526,7 @@ func (p *Plugin) openSession(ctx context.Context) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if capabilities&RequiredCapabilities != RequiredCapabilities {
+	if capabilities&p.required != p.required {
 		return nil, newFault(faultUnsupported)
 	}
 	return device.OpenSession(ctx)

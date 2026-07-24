@@ -18,6 +18,7 @@ const (
 	EnvDeviceRef         = "TRUSTDB_SDF_DEVICE_REF"
 	EnvCredentialRef     = "TRUSTDB_SDF_CREDENTIAL_REF"
 	EnvCredentialFile    = "TRUSTDB_SDF_CREDENTIAL_FILE"
+	EnvCapabilities      = "TRUSTDB_SDF_CAPABILITIES"
 	EnvKEKID             = "TRUSTDB_SDF_KEK_ID"
 	EnvKEKIndex          = "TRUSTDB_SDF_KEK_INDEX"
 	EnvPluginID          = "TRUSTDB_SDF_PLUGIN_ID"
@@ -65,13 +66,22 @@ func LoadEnvironment() (Environment, error) {
 	if err != nil {
 		return fail(Environment{}, err)
 	}
-	kekID := strings.TrimSpace(os.Getenv(EnvKEKID))
-	if !validIdentifier(kekID, 256) {
-		return fail(Environment{}, envError(EnvKEKID, "is required and malformed"))
+	requiredCapabilities, err := parseCapabilities(strings.TrimSpace(os.Getenv(EnvCapabilities)))
+	if err != nil {
+		return fail(Environment{}, err)
 	}
-	kekIndex, err := strconv.ParseUint(strings.TrimSpace(os.Getenv(EnvKEKIndex)), 10, 32)
-	if err != nil || kekIndex == 0 {
-		return fail(Environment{}, envError(EnvKEKIndex, "must be a non-zero decimal integer"))
+	kekID := strings.TrimSpace(os.Getenv(EnvKEKID))
+	var kekIndex uint64
+	if requiredCapabilities&SM4Capabilities != 0 {
+		if !validIdentifier(kekID, 256) {
+			return fail(Environment{}, envError(EnvKEKID, "is required for sm4-kek and malformed"))
+		}
+		kekIndex, err = strconv.ParseUint(strings.TrimSpace(os.Getenv(EnvKEKIndex)), 10, 32)
+		if err != nil || kekIndex == 0 {
+			return fail(Environment{}, envError(EnvKEKIndex, "must be a non-zero decimal integer for sm4-kek"))
+		}
+	} else if kekID != "" || strings.TrimSpace(os.Getenv(EnvKEKIndex)) != "" {
+		return fail(Environment{}, envError(EnvCapabilities, "must include sm4-kek when a KEK is configured"))
 	}
 	pluginID := strings.TrimSpace(os.Getenv(EnvPluginID))
 	if pluginID == "" {
@@ -88,15 +98,45 @@ func LoadEnvironment() (Environment, error) {
 		AdapterPath:   adapterPath,
 		AdapterConfig: adapterConfig,
 		Config: Config{
-			PluginID:           pluginID,
-			DeviceRef:          deviceRef,
-			CredentialRef:      credentialRef,
-			Credential:         credential,
-			KEKID:              kekID,
-			KEKIndex:           uint32(kekIndex),
-			MaxConcurrentSigns: uint32(maxConcurrency),
+			PluginID:             pluginID,
+			DeviceRef:            deviceRef,
+			CredentialRef:        credentialRef,
+			Credential:           credential,
+			KEKID:                kekID,
+			KEKIndex:             uint32(kekIndex),
+			RequiredCapabilities: requiredCapabilities,
+			MaxConcurrentSigns:   uint32(maxConcurrency),
 		},
 	}, nil
+}
+
+func parseCapabilities(raw string) (Capability, error) {
+	if raw == "" {
+		return SigningCapabilities, nil
+	}
+	var capabilities Capability
+	seen := make(map[string]struct{}, 3)
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if _, exists := seen[value]; exists {
+			return 0, envError(EnvCapabilities, "contains a duplicate capability")
+		}
+		seen[value] = struct{}{}
+		switch value {
+		case "sign":
+			capabilities |= SigningCapabilities
+		case "random":
+			capabilities |= CapabilityRandom
+		case "sm4-kek":
+			capabilities |= SM4Capabilities
+		default:
+			return 0, envError(EnvCapabilities, "contains an unsupported capability")
+		}
+	}
+	if capabilities&SigningCapabilities != SigningCapabilities {
+		return 0, envError(EnvCapabilities, "must include sign")
+	}
+	return capabilities, nil
 }
 
 func envError(name, message string) error {

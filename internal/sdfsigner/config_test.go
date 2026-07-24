@@ -27,6 +27,7 @@ func TestLoadEnvironmentRequiresExplicitSecretFiles(t *testing.T) {
 	t.Setenv(EnvDeviceRef, "sdf-production")
 	t.Setenv(EnvCredentialRef, "receipt-operator")
 	t.Setenv(EnvCredentialFile, credential)
+	t.Setenv(EnvCapabilities, "sign,random,sm4-kek")
 	t.Setenv(EnvKEKID, "backup-kek-v1")
 	t.Setenv(EnvKEKIndex, "11")
 	if runtime.GOOS == "windows" {
@@ -44,6 +45,7 @@ func TestLoadEnvironmentRequiresExplicitSecretFiles(t *testing.T) {
 		string(environment.AdapterConfig) != "vendor_driver=/opt/vendor/libsdf.so\n" ||
 		environment.Config.DeviceRef != "sdf-production" ||
 		environment.Config.CredentialRef != "receipt-operator" ||
+		environment.Config.RequiredCapabilities != AllCapabilities ||
 		environment.Config.KEKID != "backup-kek-v1" ||
 		environment.Config.KEKIndex != 11 ||
 		environment.Config.PluginID != DefaultPluginID ||
@@ -88,6 +90,7 @@ func clearSDFEnvironment(t *testing.T) {
 		EnvDeviceRef,
 		EnvCredentialRef,
 		EnvCredentialFile,
+		EnvCapabilities,
 		EnvKEKID,
 		EnvKEKIndex,
 		EnvPluginID,

@@ -31,6 +31,28 @@ func TestNewFailsClosedWhenAdapterMissesCapability(t *testing.T) {
 	requireProviderCode(t, err, signerplugin.ErrorUnsupported)
 }
 
+func TestSigningOnlyConfigurationDoesNotRequireKEKCapabilities(t *testing.T) {
+	t.Parallel()
+	backend := newFakeBackend(t)
+	backend.capabilities = SigningCapabilities
+	config := testConfig()
+	config.RequiredCapabilities = SigningCapabilities
+	config.KEKID = ""
+	config.KEKIndex = 0
+	plugin, err := New(context.Background(), config, backend)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer plugin.Close()
+	if _, err := plugin.PublicKey(context.Background(), testKey()); err != nil {
+		t.Fatalf("PublicKey() error = %v", err)
+	}
+	_, err = plugin.Random(context.Background(), 32)
+	requireProviderCode(t, err, signerplugin.ErrorUnsupported)
+	_, _, err = plugin.GenerateSM4Session(context.Background())
+	requireProviderCode(t, err, signerplugin.ErrorUnsupported)
+}
+
 func TestPluginConcurrentSM2SigningUsesIsolatedSessions(t *testing.T) {
 	t.Parallel()
 	backend := newFakeBackend(t)
@@ -198,6 +220,35 @@ func TestPluginRandomAndSM4KEKContract(t *testing.T) {
 	}
 }
 
+func TestSM4SessionCloseContextBoundsStuckDestroy(t *testing.T) {
+	t.Parallel()
+	backend := newFakeBackend(t)
+	block := make(chan struct{})
+	backend.destroyBlock = block
+	plugin := newTestPlugin(t, backend)
+	_, session, err := plugin.GenerateSM4Session(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := session.CloseContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("CloseContext() blocked for %s", elapsed)
+	}
+	close(block)
+	deadline := time.Now().Add(time.Second)
+	for backend.destroyCalls.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if backend.destroyCalls.Load() != 1 {
+		t.Fatal("timed-out key cleanup did not finish after adapter recovery")
+	}
+}
+
 func TestPluginRejectsDescriptorReferenceDrift(t *testing.T) {
 	t.Parallel()
 	plugin := newTestPlugin(t, newFakeBackend(t))
@@ -259,13 +310,14 @@ func TestFileCredentialSourceRejectsUnsafeFilesWithoutPathLeak(t *testing.T) {
 
 func testConfig() Config {
 	return Config{
-		PluginID:           DefaultPluginID,
-		DeviceRef:          "sdf-production",
-		CredentialRef:      "receipt-operator",
-		Credential:         staticCredentialSource("846295"),
-		KEKID:              "backup-kek-v1",
-		KEKIndex:           11,
-		MaxConcurrentSigns: 16,
+		PluginID:             DefaultPluginID,
+		DeviceRef:            "sdf-production",
+		CredentialRef:        "receipt-operator",
+		Credential:           staticCredentialSource("846295"),
+		KEKID:                "backup-kek-v1",
+		KEKIndex:             11,
+		RequiredCapabilities: AllCapabilities,
+		MaxConcurrentSigns:   16,
 	}
 }
 
@@ -328,6 +380,7 @@ type fakeBackend struct {
 	destroyCalls   atomic.Int32
 	activeSessions atomic.Int32
 	maxSessions    atomic.Int32
+	destroyBlock   <-chan struct{}
 }
 
 func newFakeBackend(t *testing.T) *fakeBackend {
@@ -341,7 +394,7 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 			AdapterID: "fake-sdf", AdapterVersion: "1.0.0", DeviceID: "sdf-production",
 			Serial: "serial-1", Firmware: "firmware-1",
 		},
-		capabilities: RequiredCapabilities,
+		capabilities: AllCapabilities,
 		available:    true,
 		privateKey:   privateKey,
 		publicKey:    elliptic.Marshal(sm2.P256(), privateKey.X, privateKey.Y),
@@ -585,6 +638,16 @@ func (s *fakeSession) CalculateSM4MAC(ctx context.Context, handle SessionKeyHand
 func (s *fakeSession) DestroySessionKey(ctx context.Context, handle SessionKeyHandle) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	s.backend.mu.Lock()
+	block := s.backend.destroyBlock
+	s.backend.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	s.keyMu.Lock()
 	defer s.keyMu.Unlock()
