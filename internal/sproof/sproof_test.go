@@ -14,6 +14,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
@@ -91,6 +92,21 @@ func TestValidateRejectsAnchorWithoutGlobalProof(t *testing.T) {
 	}
 	if err := Validate(proof); err == nil || !strings.Contains(err.Error(), "requires global_proof") {
 		t.Fatalf("Validate() error = %v, want global_proof requirement", err)
+	}
+}
+
+func TestValidateRejectsOversizedAnchorEvidence(t *testing.T) {
+	t.Parallel()
+
+	proof := vectorProof()
+	proof.GlobalProof = &model.GlobalLogProof{}
+	proof.AnchorResult = &model.STHAnchorResult{
+		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   cryptosuite.INTLV1,
+		Proof:         make([]byte, formatregistry.MaxAnchorEvidenceBytesV2+1),
+	}
+	if err := Validate(proof); err == nil || !strings.Contains(err.Error(), "anchor_result proof exceeds") {
+		t.Fatalf("Validate(oversized anchor) error = %v", err)
 	}
 }
 

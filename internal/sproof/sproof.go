@@ -118,6 +118,12 @@ func Validate(proof model.SingleProof) error {
 	if proof.ProofBundle.LogID == "" || proof.ProofBundle.LogID != proof.LogID {
 		return fmt.Errorf("sproof: log_id mismatch: envelope=%s proof_bundle=%s", proof.LogID, proof.ProofBundle.LogID)
 	}
+	if proof.AnchorResult != nil && len(proof.AnchorResult.Proof) > formatregistry.MaxAnchorEvidenceBytesV2 {
+		return fmt.Errorf(
+			"sproof: anchor_result proof exceeds %d bytes",
+			formatregistry.MaxAnchorEvidenceBytesV2,
+		)
+	}
 	if proof.ProofLevel != "" && proof.ProofLevel != Level(proof).String() {
 		return fmt.Errorf("sproof: proof_level=%s does not match embedded evidence level=%s",
 			proof.ProofLevel,
