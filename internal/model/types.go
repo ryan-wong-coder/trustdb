@@ -64,6 +64,7 @@ const (
 	AnchorStatePending   = "pending"
 	AnchorStatePublished = "published"
 	AnchorStateObserved  = "observed"
+	AnchorStateLocalOnly = "local_only"
 	AnchorStateFailed    = "failed"
 
 	// AnchorEvidenceStageOfflineVerified is the sole stage allowed to promote
@@ -71,6 +72,7 @@ const (
 	// observation that has not passed TrustDB's offline verification gates.
 	AnchorEvidenceStageOfflineVerified = "offline_verified"
 	AnchorEvidenceStageRaw             = "external_observation"
+	AnchorEvidenceStageLocalOnly       = "local_only"
 
 	RecordStatusAccepted     = "accepted"
 	RecordStatusProcessing   = "processing"
@@ -749,7 +751,9 @@ func AnchorResultProvidesOfflineL5(result STHAnchorResult) bool {
 }
 
 func ValidAnchorEvidenceStage(stage string) bool {
-	return stage == AnchorEvidenceStageOfflineVerified || stage == AnchorEvidenceStageRaw
+	return stage == AnchorEvidenceStageOfflineVerified ||
+		stage == AnchorEvidenceStageRaw ||
+		stage == AnchorEvidenceStageLocalOnly
 }
 
 // STHAnchorResultKey is the immutable storage identity of one sink-specific

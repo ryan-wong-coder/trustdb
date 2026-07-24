@@ -770,6 +770,12 @@ func anchorEnvelopeResponse(result model.STHAnchorResult) (*GetAnchorResponse, e
 	if !model.ValidAnchorEvidenceStage(result.EvidenceStage) {
 		return nil, trusterr.New(trusterr.CodeDataLoss, "anchor result has an unknown evidence stage")
 	}
+	if result.EvidenceStage == model.AnchorEvidenceStageLocalOnly {
+		return &GetAnchorResponse{
+			TreeSize: result.TreeSize, Status: model.AnchorStateLocalOnly,
+			ProofLevel: prooflevel.L4.String(), Result: &result,
+		}, nil
+	}
 	if !model.AnchorResultProvidesOfflineL5(result) {
 		return &GetAnchorResponse{
 			TreeSize: result.TreeSize, Status: model.AnchorStateObserved,

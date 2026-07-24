@@ -24,6 +24,8 @@ func newGlobalProofWithSTH(treeSize uint64, root []byte) model.GlobalLogProof {
 			TreeAlg:       model.DefaultMerkleTreeAlg,
 			TreeSize:      treeSize,
 			RootHash:      root,
+			NodeID:        "node-1",
+			LogID:         "log-1",
 		},
 	}
 }
@@ -86,6 +88,9 @@ func otsAnchorResult(t *testing.T, proof model.GlobalLogProof, digest []byte, ti
 	return model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.OtsSinkName,
 		AnchorID:      anchor.DeterministicOtsAnchorID(proof.STH),
@@ -102,6 +107,9 @@ func TestAnchorConsistencyFileSinkOK(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.FileSinkName,
 		AnchorID:      anchor.DeterministicFileAnchorID(proof.STH),
@@ -113,21 +121,24 @@ func TestAnchorConsistencyFileSinkOK(t *testing.T) {
 	}
 }
 
-func TestAnchorConsistencyNoopSinkOK(t *testing.T) {
+func TestAnchorConsistencyRejectsNoopLocalOnlyResult(t *testing.T) {
 	t.Parallel()
 	root := bytes.Repeat([]byte{0x01}, cryptosuite.DigestSize)
 	proof := newGlobalProofWithSTH(8, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageLocalOnly,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.NoopSinkName,
 		AnchorID:      anchor.DeterministicNoopAnchorID(proof.STH),
 		RootHash:      root,
 		STH:           proof.STH,
 	}
-	if err := AnchorConsistency(proof, ar); err != nil {
-		t.Fatalf("AnchorConsistency: %v", err)
+	if err := AnchorConsistency(proof, ar); err == nil || !strings.Contains(err.Error(), "offline_verified") {
+		t.Fatalf("AnchorConsistency() error=%v, want local-only rejection", err)
 	}
 }
 
@@ -159,6 +170,9 @@ func TestAnchorConsistencyRejectsUnknownSink(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      "ct-log",
 		AnchorID:      "arbitrary-opaque-id-from-ct-log",
@@ -187,6 +201,9 @@ func TestAnchorConsistencyUsesExternalVerifier(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      "vendor-chain",
 		AnchorID:      "transaction-1",
@@ -209,6 +226,9 @@ func TestAnchorContainerConsistencyAllowsBoundCustomProof(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      "vendor-chain",
 		AnchorID:      "transaction-2",
@@ -229,6 +249,9 @@ func TestAnchorConsistencyRejectsSchema(t *testing.T) {
 	proof := newGlobalProofWithSTH(1, []byte{1})
 	ar := model.STHAnchorResult{
 		SchemaVersion: "bogus",
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.NoopSinkName,
 		AnchorID:      anchor.DeterministicNoopAnchorID(proof.STH),
@@ -246,6 +269,9 @@ func TestAnchorConsistencyRejectsTreeSizeMismatch(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      3,
 		SinkName:      anchor.NoopSinkName,
 		AnchorID:      "noop-sth-3",
@@ -264,6 +290,9 @@ func TestAnchorConsistencyRejectsRootMismatch(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.NoopSinkName,
 		AnchorID:      anchor.DeterministicNoopAnchorID(proof.STH),
@@ -283,6 +312,9 @@ func TestAnchorConsistencyRejectsFileAnchorIDTamper(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.FileSinkName,
 		AnchorID:      "file-tampered-0000000000000000000",
@@ -301,6 +333,9 @@ func TestAnchorConsistencyRejectsEmptyAnchorID(t *testing.T) {
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.FileSinkName,
 		RootHash:      []byte{1},
@@ -309,5 +344,67 @@ func TestAnchorConsistencyRejectsEmptyAnchorID(t *testing.T) {
 	err := AnchorConsistency(proof, ar)
 	if err == nil || !strings.Contains(err.Error(), "anchor_id") {
 		t.Fatalf("want anchor_id missing error, got %v", err)
+	}
+}
+
+func TestAnchorConsistencyRejectsNonVerifiedEvidenceStages(t *testing.T) {
+	t.Parallel()
+	proof := newGlobalProofWithSTH(7, bytes.Repeat([]byte{0x71}, 32))
+	for _, stage := range []string{"", model.AnchorEvidenceStageRaw, model.AnchorEvidenceStageLocalOnly, "future_stage"} {
+		stage := stage
+		t.Run(stage, func(t *testing.T) {
+			ar := model.STHAnchorResult{
+				SchemaVersion: model.SchemaSTHAnchorResult,
+				EvidenceStage: stage,
+				NodeID:        proof.STH.NodeID,
+				LogID:         proof.STH.LogID,
+				TreeSize:      proof.STH.TreeSize,
+				SinkName:      anchor.FileSinkName,
+				AnchorID:      anchor.DeterministicFileAnchorID(proof.STH),
+				RootHash:      append([]byte(nil), proof.STH.RootHash...),
+				STH:           proof.STH,
+			}
+			if err := AnchorConsistency(proof, ar); err == nil || !strings.Contains(err.Error(), "offline_verified") {
+				t.Fatalf("stage %q error=%v, want fail-closed evidence-stage rejection", stage, err)
+			}
+		})
+	}
+}
+
+func TestAnchorBindingConsistencyRequiresExactNodeAndLogIdentity(t *testing.T) {
+	t.Parallel()
+	proof := newGlobalProofWithSTH(8, bytes.Repeat([]byte{0x81}, 32))
+	base := model.STHAnchorResult{
+		SchemaVersion: model.SchemaSTHAnchorResult,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        proof.STH.NodeID,
+		LogID:         proof.STH.LogID,
+		TreeSize:      proof.STH.TreeSize,
+		SinkName:      anchor.FileSinkName,
+		AnchorID:      anchor.DeterministicFileAnchorID(proof.STH),
+		RootHash:      append([]byte(nil), proof.STH.RootHash...),
+		STH:           proof.STH,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*model.STHAnchorResult, *model.GlobalLogProof)
+		want   string
+	}{
+		{name: "missing anchor node", mutate: func(ar *model.STHAnchorResult, _ *model.GlobalLogProof) { ar.NodeID = "" }, want: "node_id"},
+		{name: "missing sth node", mutate: func(_ *model.STHAnchorResult, proof *model.GlobalLogProof) { proof.STH.NodeID = "" }, want: "node_id"},
+		{name: "different node", mutate: func(ar *model.STHAnchorResult, _ *model.GlobalLogProof) { ar.NodeID = "node-2" }, want: "node_id"},
+		{name: "missing anchor log", mutate: func(ar *model.STHAnchorResult, _ *model.GlobalLogProof) { ar.LogID = "" }, want: "log_id"},
+		{name: "missing sth log", mutate: func(_ *model.STHAnchorResult, proof *model.GlobalLogProof) { proof.STH.LogID = "" }, want: "log_id"},
+		{name: "different log", mutate: func(ar *model.STHAnchorResult, _ *model.GlobalLogProof) { ar.LogID = "log-2" }, want: "log_id"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			ar, candidateProof := base, proof
+			test.mutate(&ar, &candidateProof)
+			if err := AnchorBindingConsistency(candidateProof, ar); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AnchorBindingConsistency() error=%v, want %s rejection", err, test.want)
+			}
+		})
 	}
 }

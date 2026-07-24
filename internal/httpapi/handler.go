@@ -1720,6 +1720,12 @@ func buildAnchorResponse(result model.STHAnchorResult) (anchorResponse, error) {
 		return anchorResponse{}, trusterr.New(trusterr.CodeDataLoss, "anchor result has an unknown evidence stage")
 	}
 	r := result
+	if result.EvidenceStage == model.AnchorEvidenceStageLocalOnly {
+		return anchorResponse{
+			TreeSize: result.TreeSize, Status: model.AnchorStateLocalOnly,
+			ProofLevel: prooflevel.L4.String(), Result: &r,
+		}, nil
+	}
 	if !model.AnchorResultProvidesOfflineL5(result) {
 		return anchorResponse{
 			TreeSize: result.TreeSize, Status: model.AnchorStateObserved,

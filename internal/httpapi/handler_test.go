@@ -1474,3 +1474,20 @@ func (f fakeAnchorService) Anchors(_ context.Context, opts model.AnchorListOptio
 	}
 	return out, nil
 }
+
+func TestBuildAnchorResponseKeepsLocalOnlyEvidenceAtL4(t *testing.T) {
+	t.Parallel()
+	response, err := buildAnchorResponse(model.STHAnchorResult{
+		SchemaVersion: model.SchemaSTHAnchorResult,
+		EvidenceStage: model.AnchorEvidenceStageLocalOnly,
+		TreeSize:      2,
+		SinkName:      "noop",
+		AnchorID:      "noop-sth-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != model.AnchorStateLocalOnly || response.ProofLevel != "L4" {
+		t.Fatalf("response=%+v, want local_only/L4", response)
+	}
+}

@@ -476,13 +476,16 @@ func AnchorBindingConsistency(proof model.GlobalLogProof, ar model.STHAnchorResu
 	if err := modelsuite.Require(suite.ID, ar); err != nil {
 		return fmt.Errorf("verify: anchor result crypto_suite: %w", err)
 	}
+	if ar.EvidenceStage != model.AnchorEvidenceStageOfflineVerified {
+		return fmt.Errorf("verify: anchor evidence stage is not offline_verified: %s", ar.EvidenceStage)
+	}
 	if ar.TreeSize != proof.STH.TreeSize {
 		return fmt.Errorf("verify: anchor tree_size mismatch: anchor=%d sth=%d", ar.TreeSize, proof.STH.TreeSize)
 	}
-	if ar.NodeID != "" && proof.STH.NodeID != "" && ar.NodeID != proof.STH.NodeID {
+	if ar.NodeID == "" || proof.STH.NodeID == "" || ar.NodeID != proof.STH.NodeID {
 		return fmt.Errorf("verify: anchor node_id mismatch: anchor=%s sth=%s", ar.NodeID, proof.STH.NodeID)
 	}
-	if ar.LogID != "" && proof.STH.LogID != "" && ar.LogID != proof.STH.LogID {
+	if ar.LogID == "" || proof.STH.LogID == "" || ar.LogID != proof.STH.LogID {
 		return fmt.Errorf("verify: anchor log_id mismatch: anchor=%s sth=%s", ar.LogID, proof.STH.LogID)
 	}
 	if !bytes.Equal(ar.RootHash, proof.STH.RootHash) {

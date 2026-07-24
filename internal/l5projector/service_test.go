@@ -141,6 +141,25 @@ func TestProjectPageWithoutAnchorLeavesL4(t *testing.T) {
 	}
 }
 
+func TestProjectPageDoesNotPromoteLocalOnlyResult(t *testing.T) {
+	t.Parallel()
+	key := projectorKey()
+	store := newProjectorStore(key, 1)
+	store.result = projectorResult(key, 1)
+	store.result.EvidenceStage = model.AnchorEvidenceStageLocalOnly
+	service, err := New(Config{Store: store, Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progressed, err := service.ProjectPage(context.Background())
+	if err != nil || progressed {
+		t.Fatalf("ProjectPage() progressed=%v error=%v, want no local-only projection", progressed, err)
+	}
+	if got := store.level("batch-0"); got != "L4" {
+		t.Fatalf("batch level=%q, want L4", got)
+	}
+}
+
 func TestStopCancelsProjectionWithoutForcingCheckpoint(t *testing.T) {
 	key := projectorKey()
 	base := newProjectorStore(key, 1)

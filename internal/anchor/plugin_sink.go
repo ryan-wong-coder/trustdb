@@ -91,6 +91,13 @@ func (s *PluginSink) Publish(ctx context.Context, sth model.SignedTreeHead) (mod
 		s.invalidate(process)
 		return model.STHAnchorResult{}, fmt.Errorf("anchor plugin publish: %w", err)
 	}
+	if err := process.Verify(ctx, pluginSTH(sth), result); err != nil {
+		if anchorplugin.IsPermanentRPC(err) {
+			return model.STHAnchorResult{}, fmt.Errorf("%w: anchor plugin verify after publish: %v", ErrPermanent, err)
+		}
+		s.invalidate(process)
+		return model.STHAnchorResult{}, fmt.Errorf("anchor plugin verify after publish: %w", err)
+	}
 	return model.STHAnchorResult{
 		AnchorID:         result.AnchorID,
 		Proof:            append([]byte(nil), result.Proof...),
