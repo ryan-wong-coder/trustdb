@@ -51,6 +51,12 @@ type options struct {
 	global         *model.GlobalLogProof
 	anchor         *model.STHAnchorResult
 	anchorVerifier AnchorVerifier
+	namespace      *namespaceBinding
+}
+
+type namespaceBinding struct {
+	nodeID string
+	logID  string
 }
 
 // AnchorVerifier validates proof bytes for a dynamically configured sink.
@@ -72,6 +78,15 @@ func WithAnchor(a model.STHAnchorResult) Option {
 
 func WithAnchorVerifier(verifier AnchorVerifier) Option {
 	return func(o *options) { o.anchorVerifier = verifier }
+}
+
+// WithExactNamespaceBinding makes the portable evidence envelope's NodeID and
+// LogID mandatory at the Global Log and anchor stages. It is intended for
+// formats such as .sproof v2 that carry an explicit outer namespace.
+func WithExactNamespaceBinding(nodeID, logID string) Option {
+	return func(o *options) {
+		o.namespace = &namespaceBinding{nodeID: nodeID, logID: logID}
+	}
 }
 
 func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts ...Option) (Result, error) {
@@ -158,6 +173,11 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		ProofLevel: prooflevel.Evaluate(evidence).String(),
 	}
 	if o.global != nil {
+		if o.namespace != nil {
+			if err := exactGlobalNamespace(*o.global, *o.namespace); err != nil {
+				return Result{}, failStage(StageGlobalLog, err)
+			}
+		}
 		if err := VerifyGlobalLogProof(
 			bundle,
 			*o.global,
@@ -173,6 +193,11 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		if o.global == nil {
 			return Result{}, failStage(StageAnchor, fmt.Errorf("verify: L5 anchor requires a global log proof"))
 		}
+		if o.namespace != nil {
+			if err := exactAnchorNamespace(*o.anchor, *o.namespace); err != nil {
+				return Result{}, failStage(StageAnchor, err)
+			}
+		}
 		if err := AnchorConsistencyWithVerifier(*o.global, *o.anchor, o.anchorVerifier); err != nil {
 			return Result{}, failStage(StageAnchor, err)
 		}
@@ -182,6 +207,26 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		result.AnchorID = o.anchor.AnchorID
 	}
 	return result, nil
+}
+
+func exactGlobalNamespace(proof model.GlobalLogProof, binding namespaceBinding) error {
+	if binding.nodeID == "" || proof.NodeID != binding.nodeID || proof.STH.NodeID != binding.nodeID {
+		return fmt.Errorf("verify: global proof node_id does not exactly match the evidence namespace")
+	}
+	if binding.logID == "" || proof.LogID != binding.logID || proof.STH.LogID != binding.logID {
+		return fmt.Errorf("verify: global proof log_id does not exactly match the evidence namespace")
+	}
+	return nil
+}
+
+func exactAnchorNamespace(result model.STHAnchorResult, binding namespaceBinding) error {
+	if binding.nodeID == "" || result.NodeID != binding.nodeID || result.STH.NodeID != binding.nodeID {
+		return fmt.Errorf("verify: anchor result node_id does not exactly match the evidence namespace")
+	}
+	if binding.logID == "" || result.LogID != binding.logID || result.STH.LogID != binding.logID {
+		return fmt.Errorf("verify: anchor result log_id does not exactly match the evidence namespace")
+	}
+	return nil
 }
 
 func publicKeyOrFallback(

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -136,6 +137,13 @@ result for every verification stage.`,
 				skipAnchor,
 			)
 			if err != nil {
+				if !remote && sproofPath != "" {
+					return writeOfflineVerificationResult(
+						rt,
+						sproof.ContainerFailureResult(err),
+						err,
+					)
+				}
 				return err
 			}
 
@@ -251,7 +259,7 @@ result for every verification stage.`,
 					SkipAnchor: skipAnchor,
 				})
 				if verifyErr != nil {
-					return verifyErr
+					return writeOfflineVerificationResult(rt, verified, verifyErr)
 				}
 				offlineResult = &verified
 				result = verify.Result{
@@ -278,7 +286,7 @@ result for every verification stage.`,
 			}
 			logEvent.Msg("verified proof")
 			if offlineResult != nil {
-				return rt.writeJSON(*offlineResult)
+				return writeOfflineVerificationResult(rt, *offlineResult, nil)
 			}
 			return rt.writeJSON(result)
 		},
@@ -385,7 +393,7 @@ func loadVerifyInputs(
 ) (model.ProofBundle, *model.GlobalLogProof, *model.STHAnchorResult, *model.SingleProof, error) {
 	if !remote {
 		if sproofPath != "" {
-			proof, err := sproof.ReadFile(sproofPath)
+			proof, err := sproof.ReadFileForVerification(sproofPath)
 			if err != nil {
 				return model.ProofBundle{}, nil, nil, nil, err
 			}
@@ -424,6 +432,21 @@ func loadVerifyInputs(
 		return model.ProofBundle{}, nil, nil, nil, err
 	}
 	return bundle, &global, ar, nil, nil
+}
+
+func writeOfflineVerificationResult(
+	rt *runtimeConfig,
+	result sproof.OfflineResult,
+	verificationErr error,
+) error {
+	if err := rt.writeJSON(result); err != nil {
+		writeErr := fmt.Errorf("write offline verification result: %w", err)
+		if verificationErr != nil {
+			return errors.Join(verificationErr, writeErr)
+		}
+		return writeErr
+	}
+	return verificationErr
 }
 
 type proofResponseEnvelope struct {

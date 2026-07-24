@@ -55,6 +55,17 @@ type OfflineOptions struct {
 	SkipAnchor bool
 }
 
+// ContainerFailureResult builds the structured fail-closed result used when a
+// .sproof cannot be decoded far enough to call VerifyOffline.
+func ContainerFailureResult(err error) OfflineResult {
+	result := OfflineResult{
+		Stages: make([]OfflineStageResult, 0, 11),
+	}
+	result.Stages = append(result.Stages, failedOfflineStage(OfflineStageContainer, err))
+	appendAfterContainerFailure(&result, model.SingleProof{}, OfflineOptions{})
+	return result
+}
+
 // VerifyOffline verifies a complete .sproof without server, CA, provider, DNS,
 // or network access. Every trust root must already be present in trust.
 func VerifyOffline(
@@ -67,9 +78,9 @@ func VerifyOffline(
 		RecordID: proof.RecordID,
 		Stages:   make([]OfflineStageResult, 0, 11),
 	}
-	if err := Validate(proof); err != nil {
+	if err := validateContainer(proof); err != nil {
 		result.Stages = append(result.Stages, failedOfflineStage(OfflineStageContainer, err))
-		appendNotRunProofStages(&result, proof, options)
+		appendAfterContainerFailure(&result, proof, options)
 		return result, err
 	}
 	result.Stages = append(result.Stages, passedOfflineStage(OfflineStageContainer))
@@ -90,7 +101,11 @@ func VerifyOffline(
 		result.Stages = append(result.Stages, passedOfflineStage(OfflineStageIdentity))
 	}
 
-	verifyOptions := make([]verify.Option, 0, 3)
+	verifyOptions := make([]verify.Option, 0, 4)
+	verifyOptions = append(
+		verifyOptions,
+		verify.WithExactNamespaceBinding(proof.NodeID, proof.LogID),
+	)
 	if proof.GlobalProof != nil {
 		verifyOptions = append(verifyOptions, verify.WithGlobalProof(*proof.GlobalProof))
 	}
@@ -164,6 +179,14 @@ var orderedProofStages = []verify.Stage{
 	verify.StageBatchMerkle,
 	verify.StageGlobalLog,
 	verify.StageAnchor,
+}
+
+func appendAfterContainerFailure(result *OfflineResult, proof model.SingleProof, options OfflineOptions) {
+	result.Stages = append(result.Stages, OfflineStageResult{
+		Name:   OfflineStageIdentity,
+		Status: OfflineStageNotRun,
+	})
+	appendNotRunProofStages(result, proof, options)
 }
 
 func appendNotRunProofStages(result *OfflineResult, proof model.SingleProof, options OfflineOptions) {

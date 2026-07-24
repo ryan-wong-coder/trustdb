@@ -79,6 +79,26 @@ func Level(proof model.SingleProof) prooflevel.Level {
 }
 
 func Validate(proof model.SingleProof) error {
+	if err := validateContainer(proof); err != nil {
+		return err
+	}
+	if err := validateGlobalEvidence(proof); err != nil {
+		return err
+	}
+	if err := validateAnchorEvidence(proof); err != nil {
+		return err
+	}
+	if err := validateIdentityEvidenceDetails(proof); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateContainer enforces only the format boundary needed before staged
+// offline verification: schema, suite, namespace envelope, component presence,
+// and allocation limits. Cryptographic and identity semantics are deliberately
+// left to their named verification stages.
+func validateContainer(proof model.SingleProof) error {
 	if proof.SchemaVersion != model.SchemaSingleProof {
 		return fmt.Errorf("sproof: unexpected schema_version %q", proof.SchemaVersion)
 	}
@@ -140,17 +160,6 @@ func Validate(proof model.SingleProof) error {
 		if err := modelsuite.Require(proof.CryptoSuite, *proof.GlobalProof); err != nil {
 			return fmt.Errorf("sproof: global_proof crypto_suite: %w", err)
 		}
-		if proof.GlobalProof.NodeID == "" || proof.GlobalProof.NodeID != proof.NodeID ||
-			proof.GlobalProof.STH.NodeID == "" || proof.GlobalProof.STH.NodeID != proof.NodeID {
-			return errors.New("sproof: global_proof node_id does not exactly match the envelope")
-		}
-		if proof.GlobalProof.LogID == "" || proof.GlobalProof.LogID != proof.LogID ||
-			proof.GlobalProof.STH.LogID == "" || proof.GlobalProof.STH.LogID != proof.LogID {
-			return errors.New("sproof: global_proof log_id does not exactly match the envelope")
-		}
-		if err := verify.GlobalLogConsistencyForSuite(proof.ProofBundle, *proof.GlobalProof); err != nil {
-			return fmt.Errorf("sproof: global_proof: %w", err)
-		}
 	}
 	if proof.AnchorResult != nil {
 		if proof.AnchorResult.SchemaVersion != model.SchemaSTHAnchorResult {
@@ -165,30 +174,60 @@ func Validate(proof model.SingleProof) error {
 		if err := modelsuite.Require(proof.CryptoSuite, *proof.AnchorResult); err != nil {
 			return fmt.Errorf("sproof: anchor_result crypto_suite: %w", err)
 		}
-		if proof.AnchorResult.NodeID == "" || proof.AnchorResult.NodeID != proof.NodeID ||
-			proof.AnchorResult.STH.NodeID == "" || proof.AnchorResult.STH.NodeID != proof.NodeID {
-			return errors.New("sproof: anchor_result node_id does not exactly match the envelope")
-		}
-		if proof.AnchorResult.LogID == "" || proof.AnchorResult.LogID != proof.LogID ||
-			proof.AnchorResult.STH.LogID == "" || proof.AnchorResult.STH.LogID != proof.LogID {
-			return errors.New("sproof: anchor_result log_id does not exactly match the envelope")
-		}
-		if err := verify.AnchorContainerConsistency(*proof.GlobalProof, *proof.AnchorResult); err != nil {
-			return fmt.Errorf("sproof: anchor_result: %w", err)
-		}
 		if proof.AnchorResult.SinkName == fiscobcos.SinkName {
-			if err := fiscobcos.ValidateProofContainer(proof.GlobalProof.STH, *proof.AnchorResult); err != nil {
-				return fmt.Errorf("sproof: FISCO BCOS anchor_result: %w", err)
+			if _, err := fiscobcos.UnmarshalProof(proof.AnchorResult.Proof); err != nil {
+				return fmt.Errorf("sproof: FISCO BCOS anchor_result container: %w", err)
 			}
 		}
 	}
-	if err := validateIdentityEvidence(proof); err != nil {
+	if err := validateIdentityEvidenceEnvelope(proof); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateIdentityEvidence(proof model.SingleProof) error {
+func validateGlobalEvidence(proof model.SingleProof) error {
+	if proof.GlobalProof == nil {
+		return nil
+	}
+	if proof.GlobalProof.NodeID == "" || proof.GlobalProof.NodeID != proof.NodeID ||
+		proof.GlobalProof.STH.NodeID == "" || proof.GlobalProof.STH.NodeID != proof.NodeID {
+		return errors.New("sproof: global_proof node_id does not exactly match the envelope")
+	}
+	if proof.GlobalProof.LogID == "" || proof.GlobalProof.LogID != proof.LogID ||
+		proof.GlobalProof.STH.LogID == "" || proof.GlobalProof.STH.LogID != proof.LogID {
+		return errors.New("sproof: global_proof log_id does not exactly match the envelope")
+	}
+	if err := verify.GlobalLogConsistencyForSuite(proof.ProofBundle, *proof.GlobalProof); err != nil {
+		return fmt.Errorf("sproof: global_proof: %w", err)
+	}
+	return nil
+}
+
+func validateAnchorEvidence(proof model.SingleProof) error {
+	if proof.AnchorResult == nil {
+		return nil
+	}
+	if proof.AnchorResult.NodeID == "" || proof.AnchorResult.NodeID != proof.NodeID ||
+		proof.AnchorResult.STH.NodeID == "" || proof.AnchorResult.STH.NodeID != proof.NodeID {
+		return errors.New("sproof: anchor_result node_id does not exactly match the envelope")
+	}
+	if proof.AnchorResult.LogID == "" || proof.AnchorResult.LogID != proof.LogID ||
+		proof.AnchorResult.STH.LogID == "" || proof.AnchorResult.STH.LogID != proof.LogID {
+		return errors.New("sproof: anchor_result log_id does not exactly match the envelope")
+	}
+	if err := verify.AnchorContainerConsistency(*proof.GlobalProof, *proof.AnchorResult); err != nil {
+		return fmt.Errorf("sproof: anchor_result: %w", err)
+	}
+	if proof.AnchorResult.SinkName == fiscobcos.SinkName {
+		if err := fiscobcos.ValidateProofContainer(proof.GlobalProof.STH, *proof.AnchorResult); err != nil {
+			return fmt.Errorf("sproof: FISCO BCOS anchor_result: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateIdentityEvidenceEnvelope(proof model.SingleProof) error {
 	if len(proof.IdentityEvidence) > MaxIdentityEvidence {
 		return fmt.Errorf("sproof: identity_evidence count exceeds %d", MaxIdentityEvidence)
 	}
@@ -232,16 +271,6 @@ func validateIdentityEvidence(proof model.SingleProof) error {
 		}
 		seen[identityKey] = struct{}{}
 
-		descriptor, err := keydescriptor.Unmarshal(evidence.KeyDescriptor)
-		if err != nil {
-			return fmt.Errorf("sproof: identity_evidence[%d] key_descriptor: %w", index, err)
-		}
-		if descriptor.Kind != keydescriptor.KindVerifier || descriptor.Provider != keydescriptor.ProviderPublic {
-			return fmt.Errorf("sproof: identity_evidence[%d] must contain a public verifier descriptor", index)
-		}
-		if descriptor.CryptoSuite != proof.CryptoSuite || descriptor.KeyID != evidence.KeyID {
-			return fmt.Errorf("sproof: identity_evidence[%d] descriptor binding mismatch", index)
-		}
 		if len(evidence.RegistryV2) > MaxRegistryEvidenceBytes {
 			return fmt.Errorf("sproof: identity_evidence[%d] registry_v2 exceeds %d bytes", index, MaxRegistryEvidenceBytes)
 		}
@@ -255,9 +284,6 @@ func validateIdentityEvidence(proof model.SingleProof) error {
 		}
 		if len(evidence.CertificateStatuses) > MaxCertificateStatuses {
 			return fmt.Errorf("sproof: identity_evidence[%d] certificate status count exceeds %d", index, MaxCertificateStatuses)
-		}
-		if len(evidence.CertificateStatuses) != 0 && len(descriptor.CertificateChain) == 0 {
-			return fmt.Errorf("sproof: identity_evidence[%d] certificate statuses require a certificate chain", index)
 		}
 		statusIssuers := make(map[string]struct{}, len(evidence.CertificateStatuses))
 		for statusIndex := range evidence.CertificateStatuses {
@@ -282,6 +308,26 @@ func validateIdentityEvidence(proof model.SingleProof) error {
 				return fmt.Errorf("sproof: identity_evidence[%d] contains duplicate status for one certificate issuer", index)
 			}
 			statusIssuers[issuerKey] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateIdentityEvidenceDetails(proof model.SingleProof) error {
+	for index := range proof.IdentityEvidence {
+		evidence := proof.IdentityEvidence[index]
+		descriptor, err := keydescriptor.Unmarshal(evidence.KeyDescriptor)
+		if err != nil {
+			return fmt.Errorf("sproof: identity_evidence[%d] key_descriptor: %w", index, err)
+		}
+		if descriptor.Kind != keydescriptor.KindVerifier || descriptor.Provider != keydescriptor.ProviderPublic {
+			return fmt.Errorf("sproof: identity_evidence[%d] must contain a public verifier descriptor", index)
+		}
+		if descriptor.CryptoSuite != proof.CryptoSuite || descriptor.KeyID != evidence.KeyID {
+			return fmt.Errorf("sproof: identity_evidence[%d] descriptor binding mismatch", index)
+		}
+		if len(evidence.CertificateStatuses) != 0 && len(descriptor.CertificateChain) == 0 {
+			return fmt.Errorf("sproof: identity_evidence[%d] certificate statuses require a certificate chain", index)
 		}
 	}
 	return nil
@@ -331,14 +377,25 @@ func requireWritableGeneration(suiteID cryptosuite.ID) error {
 }
 
 func Unmarshal(data []byte) (model.SingleProof, error) {
-	var proof model.SingleProof
-	if err := cborx.UnmarshalLimits(data, &proof, MaxBytes, MaxCollectionElements, MaxMapPairs); err != nil {
+	proof, err := unmarshalContainer(data)
+	if err != nil {
 		return model.SingleProof{}, err
 	}
 	if err := Validate(proof); err != nil {
 		return model.SingleProof{}, err
 	}
-	canonical, err := Marshal(proof)
+	return proof, nil
+}
+
+func unmarshalContainer(data []byte) (model.SingleProof, error) {
+	var proof model.SingleProof
+	if err := cborx.UnmarshalLimits(data, &proof, MaxBytes, MaxCollectionElements, MaxMapPairs); err != nil {
+		return model.SingleProof{}, err
+	}
+	if err := validateContainer(proof); err != nil {
+		return model.SingleProof{}, err
+	}
+	canonical, err := cborx.Marshal(proof)
 	if err != nil {
 		return model.SingleProof{}, err
 	}
@@ -349,6 +406,20 @@ func Unmarshal(data []byte) (model.SingleProof, error) {
 }
 
 func ReadFile(path string) (model.SingleProof, error) {
+	return readFile(path, Unmarshal)
+}
+
+// ReadFileForVerification preserves all V2 decoding, schema, suite, size, and
+// canonical-encoding gates while deferring identity and cryptographic semantics
+// to VerifyOffline so failures are attributed to their named stages.
+func ReadFileForVerification(path string) (model.SingleProof, error) {
+	return readFile(path, unmarshalContainer)
+}
+
+func readFile(
+	path string,
+	decode func([]byte) (model.SingleProof, error),
+) (model.SingleProof, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return model.SingleProof{}, err
@@ -366,7 +437,7 @@ func ReadFile(path string) (model.SingleProof, error) {
 			MaxBytes,
 		)
 	}
-	proof, err := Unmarshal(data)
+	proof, err := decode(data)
 	if err != nil {
 		return model.SingleProof{}, fmt.Errorf("read sproof %s: %w", filepath.Base(path), err)
 	}

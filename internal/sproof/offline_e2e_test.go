@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -96,6 +97,33 @@ func TestOfflineV2EndToEndAcrossSuitesAndTampering(t *testing.T) {
 				)
 			})
 
+			t.Run("global path", func(t *testing.T) {
+				tampered := cloneOfflineProof(t, fixture.proof)
+				tampered.GlobalProof.InclusionPath = append(
+					tampered.GlobalProof.InclusionPath,
+					bytes.Repeat([]byte{0x5a}, cryptosuite.DigestSize),
+				)
+				assertOfflineFailureStage(
+					t,
+					fixture.content,
+					tampered,
+					fixture.trust,
+					verify.StageGlobalLog,
+				)
+			})
+
+			t.Run("global namespace", func(t *testing.T) {
+				tampered := cloneOfflineProof(t, fixture.proof)
+				tampered.GlobalProof.NodeID = ""
+				assertOfflineFailureStage(
+					t,
+					fixture.content,
+					tampered,
+					fixture.trust,
+					verify.StageGlobalLog,
+				)
+			})
+
 			t.Run("suite", func(t *testing.T) {
 				tampered := cloneOfflineProof(t, fixture.proof)
 				if suiteID == cryptosuite.CNSMV1 {
@@ -121,13 +149,52 @@ func TestOfflineV2EndToEndAcrossSuitesAndTampering(t *testing.T) {
 			t.Run("STH", func(t *testing.T) {
 				tampered := cloneOfflineProof(t, fixture.proof)
 				tampered.GlobalProof.STH.RootHash[0] ^= 1
-				assertOfflineContainerFailure(t, fixture.content, tampered, fixture.trust, "global_proof")
+				assertOfflineFailureStage(
+					t,
+					fixture.content,
+					tampered,
+					fixture.trust,
+					verify.StageGlobalLog,
+				)
 			})
 
 			t.Run("anchor binding", func(t *testing.T) {
 				tampered := cloneOfflineProof(t, fixture.proof)
 				tampered.AnchorResult.RootHash[0] ^= 1
-				assertOfflineContainerFailure(t, fixture.content, tampered, fixture.trust, "anchor")
+				encoded, err := cborx.Marshal(tampered)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := Unmarshal(encoded); err == nil {
+					t.Fatal("strict Unmarshal() accepted a semantically invalid anchor binding")
+				}
+				path := filepath.Join(t.TempDir(), "tampered.sproof")
+				if err := os.WriteFile(path, encoded, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				staged, err := ReadFileForVerification(path)
+				if err != nil {
+					t.Fatalf("ReadFileForVerification() rejected structurally valid evidence: %v", err)
+				}
+				assertOfflineFailureStage(
+					t,
+					fixture.content,
+					staged,
+					fixture.trust,
+					verify.StageAnchor,
+				)
+			})
+
+			t.Run("anchor namespace", func(t *testing.T) {
+				tampered := cloneOfflineProof(t, fixture.proof)
+				tampered.AnchorResult.LogID = ""
+				assertOfflineFailureStage(
+					t,
+					fixture.content,
+					tampered,
+					fixture.trust,
+					verify.StageAnchor,
+				)
 			})
 
 			if suiteID == cryptosuite.CNSMV1 {
@@ -142,7 +209,16 @@ func TestOfflineV2EndToEndAcrossSuitesAndTampering(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					assertOfflineContainerFailure(t, fixture.content, tampered, fixture.trust, "sm2_user_id")
+					result, verifyErr := VerifyOffline(
+						bytes.NewReader(fixture.content),
+						tampered,
+						fixture.trust,
+						OfflineOptions{},
+					)
+					if verifyErr == nil || !strings.Contains(verifyErr.Error(), "sm2_user_id") {
+						t.Fatalf("VerifyOffline() error = %v, want sm2_user_id", verifyErr)
+					}
+					assertOfflineStage(t, result, OfflineStageIdentity, OfflineStageFailed)
 				})
 			}
 		})

@@ -39,7 +39,10 @@ type IdentityReport struct {
 // VerifyIdentityEvidence binds every carried descriptor and status object to
 // verifier-local trust. It performs no network or provider calls.
 func VerifyIdentityEvidence(proof model.SingleProof, trust IdentityTrust) (IdentityReport, error) {
-	if err := Validate(proof); err != nil {
+	if err := validateContainer(proof); err != nil {
+		return IdentityReport{}, err
+	}
+	if err := validateIdentityEvidenceDetails(proof); err != nil {
 		return IdentityReport{}, err
 	}
 	required := requiredIdentityKeys(proof)

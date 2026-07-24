@@ -20,6 +20,7 @@ func TestVerifyOfflineReportsContainerFailureAndStops(t *testing.T) {
 		t.Fatalf("VerifyOffline() error = %v", err)
 	}
 	assertOfflineStage(t, result, OfflineStageContainer, OfflineStageFailed)
+	assertOfflineStage(t, result, OfflineStageIdentity, OfflineStageNotRun)
 	assertOfflineStage(t, result, string(verify.StageProofBundle), OfflineStageNotRun)
 	assertOfflineStage(t, result, string(verify.StageGlobalLog), OfflineStageNotPresent)
 	assertOfflineStage(t, result, string(verify.StageAnchor), OfflineStageNotPresent)

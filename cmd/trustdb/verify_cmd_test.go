@@ -8,11 +8,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +34,9 @@ import (
 	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
+	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
+	"github.com/wowtrust/trustdb/internal/verify"
 )
 
 func TestDecodeSingleJSONRejectsTrailingData(t *testing.T) {
@@ -203,6 +207,111 @@ func TestVerifyCmdRemoteSkipAnchor(t *testing.T) {
 	}
 	if !result.Valid || result.ProofLevel != "L4" {
 		t.Fatalf("verify result = %+v, want L4 valid", result)
+	}
+}
+
+func TestVerifyCmdOfflineFailureEmitsStructuredStagesAndReturnsError(t *testing.T) {
+	ctx := context.Background()
+	server, _, clientPub, serverPub, contentPath, recordID := runServeForVerify(t, ctx)
+	bundle, global, anchorResult := fetchSingleProofInputs(t, ctx, server, recordID)
+	proof, err := sproof.New(bundle, sproof.Options{
+		GlobalProof:  &global,
+		AnchorResult: anchorResult,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofPath := filepath.Join(t.TempDir(), "offline.sproof")
+	if err := sproof.WriteFile(proofPath, proof); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(contentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content[0] ^= 1
+	tamperedContentPath := filepath.Join(t.TempDir(), "tampered-content.bin")
+	if err := os.WriteFile(tamperedContentPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, outBuf := newVerifyRuntime(t)
+	cmd := newVerifyCommand(rt)
+	cmd.SetArgs([]string{
+		"--file", tamperedContentPath,
+		"--sproof", proofPath,
+		"--client-public-key", writePubKey(t, "client-key", clientPub),
+		"--server-public-key", writePubKey(t, "server-key", serverPub),
+	})
+	cmd.SetContext(ctx)
+	verifyErr := cmd.Execute()
+	if verifyErr == nil || !strings.Contains(verifyErr.Error(), "content hash mismatch") {
+		t.Fatalf("verify error = %v, want original content hash mismatch", verifyErr)
+	}
+
+	var result sproof.OfflineResult
+	if err := json.Unmarshal(outBuf.Bytes(), &result); err != nil {
+		t.Fatalf("decode structured failure: %v (raw=%q)", err, outBuf.String())
+	}
+	if result.Valid {
+		t.Fatalf("structured failure result is valid: %+v", result)
+	}
+	var contentFailed bool
+	for _, stage := range result.Stages {
+		if stage.Name == string(verify.StageContent) && stage.Status == sproof.OfflineStageFailed {
+			contentFailed = true
+			break
+		}
+	}
+	if !contentFailed {
+		t.Fatalf("content failure stage is missing: %+v", result.Stages)
+	}
+}
+
+func TestVerifyCmdOfflineContainerFailureEmitsStructuredResult(t *testing.T) {
+	directory := t.TempDir()
+	contentPath := filepath.Join(directory, "content.bin")
+	if err := os.WriteFile(contentPath, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPath := writePubKey(t, "client-key", mustPub(t))
+	rt, outBuf := newVerifyRuntime(t)
+	cmd := newVerifyCommand(rt)
+	cmd.SetArgs([]string{
+		"--file", contentPath,
+		"--sproof", filepath.Join(directory, "missing.sproof"),
+		"--client-public-key", publicKeyPath,
+		"--server-public-key", publicKeyPath,
+	})
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("verify missing .sproof error = nil")
+	}
+
+	var result sproof.OfflineResult
+	if err := json.Unmarshal(outBuf.Bytes(), &result); err != nil {
+		t.Fatalf("decode structured container failure: %v (raw=%q)", err, outBuf.String())
+	}
+	if len(result.Stages) != 11 ||
+		result.Stages[0].Name != sproof.OfflineStageContainer ||
+		result.Stages[0].Status != sproof.OfflineStageFailed ||
+		result.Stages[1].Name != sproof.OfflineStageIdentity ||
+		result.Stages[1].Status != sproof.OfflineStageNotRun {
+		t.Fatalf("structured container stages = %+v", result.Stages)
+	}
+}
+
+func TestWriteOfflineVerificationResultPreservesVerificationAndWriteErrors(t *testing.T) {
+	verificationErr := errors.New("verification failed")
+	outputErr := errors.New("output failed")
+	rt := &runtimeConfig{out: failingWriter{err: outputErr}}
+
+	err := writeOfflineVerificationResult(rt, sproof.OfflineResult{}, verificationErr)
+	if !errors.Is(err, verificationErr) {
+		t.Fatalf("result error %v does not preserve verification error", err)
+	}
+	if !errors.Is(err, outputErr) {
+		t.Fatalf("result error %v does not preserve output error", err)
 	}
 }
 
@@ -608,4 +717,12 @@ func mustPub(t *testing.T) ed25519.PublicKey {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	return pub
+}
+
+type failingWriter struct {
+	err error
+}
+
+func (w failingWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }
