@@ -193,7 +193,42 @@ descriptor and Registry V2 event, changing the intended role, and restarting
 the signer resolver. Do not reuse an index or descriptor for a different key.
 Historical evidence continues to verify with its historical public descriptor.
 
-## SM4 KEK and durable wrapped-key boundary
+## Provider recovery artifact
+
+[`trustdb.sdf-recovery-bundle.v1`](../../formats/SDF_RECOVERY_BUNDLE_V1.md) is
+the bounded, deterministic provider recovery artifact owned by this
+integration. It contains:
+
+- the exact stable device identity;
+- 1–128 complete canonical SDF signer descriptors, including each public key
+  and `{device_ref, key_index, credential_ref}` provider binding; and
+- 0–1024 optional canonical wrapped-SM4 envelopes.
+
+Export first reads every indexed public key from the live device and compares
+it to the descriptor. Restore strictly rejects duplicate/unknown fields, tags,
+indefinite values, trailing bytes, non-canonical CBOR, oversized bytes or
+declared collection counts, duplicate KeyIDs/handles, and an unsupported
+schema. It then rebinds the complete device identity, credential identity,
+every live public key, and every configured KEK. All public-key pins are
+published to the process cache atomically only after every descriptor and
+wrapped key passes, so a late conflict cannot leave a partially restored
+inventory.
+
+The artifact contains no credential value, adapter configuration/path, private
+key, plaintext SM4 key, or same-session native handle. Its unkeyed SM3 checksum
+detects accidental corruption but cannot authenticate an attacker who can
+rewrite the artifact and recompute the checksum.
+
+The current `.tdbackup v4` is a proofstore-only format and does **not** contain
+this provider recovery artifact, key descriptors, credentials, or device key
+material. Operators must not claim that a v4 archive alone recovers an SDF
+deployment. Issue
+[#473](https://github.com/wowtrust/trustdb/issues/473) owns the breaking,
+authenticated and encrypted backup v5 integration: it will carry the complete
+SDF recovery artifact as a typed inventory entry while keeping credentials and
+private/plaintext keys outside the archive.
+
+### SM4 KEK boundary
 
 When `sm4-kek` is enabled, the adapter may generate a 128-bit SM4 session key
 under the configured internal KEK or import its wrapped representation. The
@@ -206,13 +241,11 @@ identity/index, bounded wrapped bytes, and an SM3 checksum. It can be persisted
 and imported after reopening the adapter only if every device and KEK binding
 still matches.
 
-The SM3 checksum detects accidental corruption; it is deliberately unkeyed and
-does not authenticate an attacker-controlled envelope. The device's KEK
-wrapping provides the key-custody boundary. If the selected vendor's wrapping
-format is not authenticated, deployment storage or a future logical-backup
-format must add a separate AEAD/MAC. TrustDB logical backups do not currently
-include this envelope automatically, so it must not be described as covered by
-the existing backup format.
+The envelope's SM3 checksum also detects accidental corruption only; it is
+deliberately unkeyed and does not authenticate attacker-controlled bytes. The
+device's KEK wrapping provides the key-custody boundary. If the selected
+vendor's wrapping format is not authenticated, deployment storage and backup
+v5 must add a separate AEAD/MAC.
 
 ## Failure, timeout, and shutdown behavior
 
@@ -264,14 +297,15 @@ Real hardware is intentionally tested only by the manually dispatched
 6. retain the JSON test stream, qualification metadata, reviewed adapter
    source/binary checksum, device certificate, key ceremony, and approvals.
 
-The test confirms the exact public key, direct native health/signing, the full
-supervised signer-plugin path, local verification of 16 concurrent signatures,
-and—when enabled—random generation plus wrapped-SM4 persistence across a fresh
-backend. Before upload, the workflow verifies byte-for-byte that neither the
-credential-file content nor adapter-config-file content occurs in the JSON
-test stream. The artifacts contain only that sanitized Go test stream and the
-bounded non-secret qualification identifiers, commit, and run ID. No vendor is
-considered qualified merely because its library loads.
+The test confirms the exact public key, direct native health/signing, complete
+provider-recovery export/restore across a fresh backend, the full supervised
+signer-plugin path, local verification of 16 concurrent signatures, and—when
+enabled—random generation plus wrapped-SM4 recovery. Before upload, the
+workflow verifies byte-for-byte that neither the credential-file content nor
+adapter-config-file content occurs in the JSON test stream. The artifacts
+contain only that sanitized Go test stream and the bounded non-secret
+qualification identifiers, commit, and run ID. No vendor is considered
+qualified merely because its library loads.
 
 Before production acceptance also record and test:
 

@@ -29,6 +29,12 @@ The sidecar computes the fixed SM2 `ZA || message` SM3 digest from the public
 key and TrustDB's immutable user ID before calling the adapter. A vendor shim
 must not hash the digest again or apply a different user ID.
 
+Restart and backup portability use the canonical
+[`trustdb.sdf-recovery-bundle.v1`](../../formats/SDF_RECOVERY_BUNDLE_V1.md)
+provider artifact. The artifact preserves descriptors, public bindings, and
+optional KEK-wrapped SM4 keys; it never serializes the opaque same-session
+handles in this ABI. Backup v5 integration is tracked separately by #473.
+
 Configuration, credential, input, output, and IV pointers are borrowed for one
 call only. The adapter must not retain them. Raw vendor diagnostics, device
 references, key indexes, credentials, and handles must never be returned or

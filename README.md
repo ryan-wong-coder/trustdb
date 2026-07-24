@@ -355,6 +355,7 @@ The screenshot below is rendered directly from the current desktop client code:
 - [formats/KEY_DESCRIPTOR_V1.md](formats/KEY_DESCRIPTOR_V1.md): canonical key descriptor schema, provider union, resolution contract, redaction, and migration rules.
 - [formats/SM4_KEY_ENVELOPE_V1.md](formats/SM4_KEY_ENVELOPE_V1.md): canonical authenticated software-private-key envelope, passphrase KDF profile, and atomic persistence contract.
 - [formats/SIGNER_PLUGIN_V1.md](formats/SIGNER_PLUGIN_V1.md): versioned subprocess protocol for external private-key custody providers.
+- [formats/SDF_RECOVERY_BUNDLE_V1.md](formats/SDF_RECOVERY_BUNDLE_V1.md): canonical SDF signer-reference and wrapped-SM4 provider recovery artifact.
 - [docs/integrations/SDF_SIGNER.md](docs/integrations/SDF_SIGNER.md): isolated SDF signer, stable vendor-adapter ABI, SM2/SM4 custody boundary, configuration, and gated hardware qualification.
 - [formats/KEY_REGISTRY_V2.md](formats/KEY_REGISTRY_V2.md): byte-level V2 registry framing, manifest, event-chain, lifecycle, recovery, and compatibility contract.
 - [formats/DISTRIBUTED_ARCHITECTURE.md](formats/DISTRIBUTED_ARCHITECTURE.md): distributed/storage-compute separation notes.

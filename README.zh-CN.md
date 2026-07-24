@@ -309,6 +309,7 @@ unset TRUSTDB_DEV_KEY_PASSPHRASE_NEW
 - [CONTRIBUTING.md](CONTRIBUTING.md)：Issue、PR、Commit、验证和 Review 标准。
 - [formats/SPROOF_V1.md](formats/SPROOF_V1.md)：稳定 `.sproof` v1 交换格式。
 - [formats/KEY_DESCRIPTOR_V1.md](formats/KEY_DESCRIPTOR_V1.md)：canonical key descriptor schema、provider union、解析、脱敏与迁移契约。
+- [formats/SDF_RECOVERY_BUNDLE_V1.md](formats/SDF_RECOVERY_BUNDLE_V1.md)：canonical SDF 签名引用与 wrapped-SM4 provider 恢复 artifact。
 - [docs/integrations/SDF_SIGNER.md](docs/integrations/SDF_SIGNER.md)：隔离 SDF 签名 sidecar、稳定厂商适配 ABI、SM2/SM4 托管边界、配置与真机资格测试。
 - [formats/SM4_KEY_ENVELOPE_V1.md](formats/SM4_KEY_ENVELOPE_V1.md)：canonical 认证软件私钥 envelope、passphrase KDF profile 和原子持久化契约。
 - [formats/KEY_REGISTRY_V2.md](formats/KEY_REGISTRY_V2.md)：Registry V2 字节布局、manifest、事件链、生命周期、恢复和兼容性契约。
