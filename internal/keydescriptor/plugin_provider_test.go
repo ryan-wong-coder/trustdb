@@ -399,7 +399,7 @@ func TestPluginSignerProviderTreatsRebindProtocolViolationAsPermanent(t *testing
 	}
 }
 
-func TestPluginSignerProviderSupportsKnownSuiteForLifecycleOnly(t *testing.T) {
+func TestPluginSignerProviderSupportsAvailableCNSuite(t *testing.T) {
 	t.Parallel()
 	publicKey, privateKey, err := trustcrypto.GenerateSM2Key()
 	if err != nil {
@@ -454,24 +454,21 @@ func TestPluginSignerProviderSupportsKnownSuiteForLifecycleOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = resolver.Close() })
-	if _, err := resolver.ResolveSigner(context.Background(), descriptor, t.TempDir()); err == nil {
-		t.Fatal("ResolveSigner() enabled reserved CN_SM_V1 production signing")
-	}
-	signer, err := resolver.ResolveLifecycleSigner(context.Background(), descriptor, t.TempDir())
+	signer, err := resolver.ResolveSigner(context.Background(), descriptor, t.TempDir())
 	if err != nil {
-		t.Fatalf("ResolveLifecycleSigner() error = %v", err)
+		t.Fatalf("ResolveSigner() error = %v", err)
 	}
-	message := []byte("registry lifecycle event")
+	message := []byte("CN_SM_V1 production event")
 	signature, err := signer.Sign(context.Background(), message)
 	if err != nil {
-		t.Fatalf("lifecycle Sign() error = %v", err)
+		t.Fatalf("Sign() error = %v", err)
 	}
 	publicDescriptor, err := descriptor.PublicKeyDescriptor()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := trustcrypto.VerifySignatureForSuite(context.Background(), suite.ID, publicDescriptor, message, signature); err != nil {
-		t.Fatalf("lifecycle signature verification error = %v", err)
+		t.Fatalf("production signature verification error = %v", err)
 	}
 }
 

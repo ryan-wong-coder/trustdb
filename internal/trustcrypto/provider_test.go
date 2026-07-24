@@ -127,9 +127,13 @@ func TestSignerProviderContract(t *testing.T) {
 func TestProviderContractsFailClosed(t *testing.T) {
 	t.Parallel()
 
-	t.Run("reserved suite", func(t *testing.T) {
-		if _, err := ProviderForSuite(cryptosuite.CNSMV1); !errors.Is(err, cryptosuite.ErrUnavailableSuite) {
-			t.Fatalf("ProviderForSuite(CN_SM_V1) error = %v, want unavailable suite", err)
+	t.Run("available CN suite", func(t *testing.T) {
+		provider, err := ProviderForSuite(cryptosuite.CNSMV1)
+		if err != nil {
+			t.Fatalf("ProviderForSuite(CN_SM_V1) error = %v", err)
+		}
+		if provider.Suite() != cryptosuite.CNSMV1 {
+			t.Fatalf("ProviderForSuite(CN_SM_V1) suite = %s", provider.Suite())
 		}
 	})
 
