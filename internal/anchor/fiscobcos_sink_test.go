@@ -294,6 +294,39 @@ func TestFISCOBCOSStandardSinkFailsClosedOnEndpointDisagreement(t *testing.T) {
 	}
 }
 
+func TestFISCOBCOSStandardSinkRejectsNonCanonicalV1BindingBeforeSideEffect(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*fiscobcos.TrustConfig)
+	}{
+		{name: "protocol version", mutate: func(trust *fiscobcos.TrustConfig) {
+			trust.Contract.ProtocolVersion = "trustdb-anchor-v2"
+		}},
+		{name: "event signature", mutate: func(trust *fiscobcos.TrustConfig) {
+			trust.Contract.EventSignature = "AnchorPublished(bytes32)"
+		}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			trust, drivers := fakeBCOSFixture(t)
+			state := drivers[0].(*fakeBCOSDriver).state
+			test.mutate(&trust)
+			if _, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{
+				TrustConfig: trust,
+				Drivers:     drivers,
+			}); !errors.Is(err, fiscobcos.ErrInvalidTrustConfig) {
+				t.Fatalf("constructor error=%v, want ErrInvalidTrustConfig", err)
+			}
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if state.submitCalls != 0 {
+				t.Fatalf("invalid V1 binding produced %d side effects", state.submitCalls)
+			}
+		})
+	}
+}
+
 func TestFISCOBCOSStandardSinkDoesNotMaskConfiguredEndpointReadDisagreement(t *testing.T) {
 	trust, drivers := fakeBCOSFixture(t)
 	trust.Endpoints = append(trust.Endpoints, "127.0.0.1:20202")
@@ -663,8 +696,8 @@ func fakeBCOSFixture(t *testing.T) (fiscobcos.TrustConfig, []fiscobcos.Driver) {
 	trust.TrustedCheckpoint = fiscobcos.BlockCheckpoint{BlockNumber: 400, BlockHash: bytes.Repeat([]byte{0x21}, 32)}
 	trust.Contract = fiscobcos.ContractBinding{
 		Address: bytes.Repeat([]byte{0x41}, 20), CodeHash: bytes.Repeat([]byte{0x61}, 32),
-		ProtocolVersion: "trustdb-anchor-v1",
-		EventSignature:  "AnchorPublished(bytes32,bytes32,uint64,bytes32,bytes32,address,uint16)",
+		ProtocolVersion: fiscobcos.TrustDBAnchorV1ProtocolVersion,
+		EventSignature:  fiscobcos.TrustDBAnchorV1EventSignature,
 	}
 	trust.Endpoints = []string{"127.0.0.1:20200", "127.0.0.1:20201"}
 	trust.ReadQuorum = 2

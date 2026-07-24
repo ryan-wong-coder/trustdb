@@ -9,6 +9,9 @@ import (
 )
 
 const (
+	TrustDBAnchorV1ProtocolVersion = "trustdb-anchor-v1"
+	TrustDBAnchorV1EventSignature  = "AnchorPublished(bytes32,bytes32,uint64,bytes32,bytes32,address,uint16)"
+
 	publishSignature   = "publish(bytes32,bytes32,uint64,bytes32,bytes32,uint16)"
 	getAnchorSignature = "getAnchor(bytes32)"
 )

@@ -175,8 +175,8 @@ func testFISCOBCOSTrust(t *testing.T) fiscobcos.TrustConfig {
 	trust.TrustedCheckpoint = fiscobcos.BlockCheckpoint{BlockNumber: 100, BlockHash: bytes.Repeat([]byte{0x02}, 32)}
 	trust.Contract = fiscobcos.ContractBinding{
 		Address: bytes.Repeat([]byte{0x03}, 20), CodeHash: bytes.Repeat([]byte{0x04}, 32),
-		ProtocolVersion: "trustdb-anchor-v1",
-		EventSignature:  "AnchorPublished(bytes32,bytes32,uint64,bytes32,bytes32,address,uint16)",
+		ProtocolVersion: fiscobcos.TrustDBAnchorV1ProtocolVersion,
+		EventSignature:  fiscobcos.TrustDBAnchorV1EventSignature,
 	}
 	trust.Endpoints = []string{"127.0.0.1:20200", "127.0.0.1:20201"}
 	trust.ReadQuorum = 2

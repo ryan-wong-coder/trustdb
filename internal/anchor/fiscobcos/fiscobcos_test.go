@@ -423,8 +423,8 @@ func testTrustConfig(t *testing.T, mode CryptoMode) TrustConfig {
 	config.TrustedCheckpoint = BlockCheckpoint{BlockNumber: 4096, BlockHash: sequenceBytes(0x21, 32)}
 	config.Contract = ContractBinding{
 		Address: sequenceBytes(0x41, 20), CodeHash: sequenceBytes(0x61, 32),
-		ProtocolVersion: "trustdb-anchor-v1",
-		EventSignature:  "AnchorPublished(bytes32,bytes32,uint64,bytes32,bytes32,address,uint16)",
+		ProtocolVersion: TrustDBAnchorV1ProtocolVersion,
+		EventSignature:  TrustDBAnchorV1EventSignature,
 	}
 	config.Endpoints = []string{"127.0.0.1:20201", "127.0.0.1:20200", "https://bcos.example.test:20202"}
 	config.ReadQuorum = 2
