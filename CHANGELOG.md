@@ -4,6 +4,27 @@ This file summarizes user-visible TrustDB changes. Complete pull request lists, 
 
 TrustDB follows semantic versioning for stable releases. Proof, backup, storage, and API compatibility notes are called out explicitly when they require operator action.
 
+## [Unreleased]
+
+### Added
+
+- Versioned authenticated SM4-GCM envelopes for software-managed private keys,
+  including a provider-neutral KEK interface, development PBKDF2-HMAC-SM3
+  passphrase provider, and atomic `key rewrap` operation.
+
+### Changed
+
+- `trustdb key generate` now defaults to `sm4-envelope-v1` and requires
+  `TRUSTDB_DEV_KEY_PASSPHRASE`; `plaintext-dev-v1` remains an explicit
+  development-only compatibility option.
+
+### Security and correctness
+
+- Envelope parsing and opening fail closed for non-canonical data, wrong KEKs,
+  tampering, truncation, metadata/KDF downgrade, unsafe permissions, symlinks,
+  and unregistered providers. Software envelopes are not represented as HSM or
+  certified production key custody.
+
 ## [1.0.0] - 2026-07-22
 
 First stable release.

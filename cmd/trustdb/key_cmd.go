@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
+	"github.com/wowtrust/trustdb/internal/keyenvelope"
 	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/statusnotify"
@@ -25,19 +26,23 @@ func newKeyCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.AddCommand(newKeyRevokeCommand(rt, false))
 	cmd.AddCommand(newKeyCompromiseCommand(rt))
 	cmd.AddCommand(newKeyRotateCommand(rt))
+	cmd.AddCommand(newKeyRewrapCommand(rt))
 	cmd.AddCommand(newKeyListCommand(rt, false))
 	cmd.AddCommand(newKeyInspectCommand(rt))
 	return cmd
 }
 
 func newKeygenCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
-	var outDir, prefix, keyID, suiteID string
+	var outDir, prefix, keyID, suiteID, protection string
 	cmd := &cobra.Command{
 		Use:     "keygen",
 		Aliases: []string{"gen", "generate"},
 		Short:   "Generate a development signing key descriptor pair",
 		Hidden:  hidden,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if protection != keydescriptor.SoftwareProtectionSM4Envelope && protection != keydescriptor.SoftwareProtectionPlaintextDev {
+				return usageError("protection must be sm4-envelope-v1 or plaintext-dev-v1")
+			}
 			suite, err := cryptosuite.RequireKnown(cryptosuite.ID(suiteID))
 			if err != nil {
 				return err
@@ -86,15 +91,33 @@ func newKeygenCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 				Software: &keydescriptor.SoftwareKeyReference{
 					MaterialPath: materialName,
 					Encoding:     suite.Signature.PrivateKeyEncoding,
-					Protection:   keydescriptor.SoftwareProtectionPlaintextDev,
+					Protection:   protection,
 				},
 			}
 			verifierDescriptor := signerDescriptor.Clone()
 			verifierDescriptor.Kind = keydescriptor.KindVerifier
 			verifierDescriptor.Provider = keydescriptor.ProviderPublic
 			verifierDescriptor.Software = nil
-			if err := writeFileAtomic(materialPath, []byte(base64.RawURLEncoding.EncodeToString(priv)), 0o600); err != nil {
-				return err
+			switch protection {
+			case keydescriptor.SoftwareProtectionSM4Envelope:
+				provider := keyenvelope.NewPassphraseKEKProvider(keyenvelope.EnvPassphraseSource(keyenvelope.DefaultPassphraseEnv))
+				encrypted, err := keyenvelope.Seal(cmd.Context(), keyenvelope.Metadata{
+					CryptoSuite:        string(suite.ID),
+					KeyID:              resolvedKeyID,
+					KeyAlgorithm:       suite.Signature.Algorithm,
+					PrivateKeyEncoding: suite.Signature.PrivateKeyEncoding,
+				}, priv, provider)
+				if err != nil {
+					return err
+				}
+				defer clear(encrypted)
+				if err := keyenvelope.WriteFile(materialPath, encrypted); err != nil {
+					return err
+				}
+			case keydescriptor.SoftwareProtectionPlaintextDev:
+				if err := writeFileAtomic(materialPath, []byte(base64.RawURLEncoding.EncodeToString(priv)), 0o600); err != nil {
+					return err
+				}
 			}
 			if err := writeKeyDescriptor(privPath, signerDescriptor); err != nil {
 				return err
@@ -107,6 +130,7 @@ func newKeygenCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 				Str("signer_descriptor", privPath).
 				Str("key_id", resolvedKeyID).
 				Str("crypto_suite", string(suite.ID)).
+				Str("protection", protection).
 				Bool("development_only", true).
 				Msg("generated key pair")
 			return rt.writeJSON(map[string]string{
@@ -115,6 +139,7 @@ func newKeygenCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 				"key_id":              resolvedKeyID,
 				"crypto_suite":        string(suite.ID),
 				"algorithm":           suite.Signature.Algorithm,
+				"protection":          protection,
 			})
 		},
 	}
@@ -122,6 +147,7 @@ func newKeygenCommand(rt *runtimeConfig, hidden bool) *cobra.Command {
 	cmd.Flags().StringVar(&prefix, "prefix", "client", "key filename prefix")
 	cmd.Flags().StringVar(&keyID, "key-id", "", "descriptor key ID (defaults to <prefix>-key)")
 	cmd.Flags().StringVar(&suiteID, "suite", string(cryptosuite.INTLV1), "cryptographic suite (INTL_V1 or CN_SM_V1)")
+	cmd.Flags().StringVar(&protection, "protection", keydescriptor.SoftwareProtectionSM4Envelope, "software key protection (sm4-envelope-v1 or plaintext-dev-v1)")
 	return cmd
 }
 
@@ -159,6 +185,7 @@ func newKeyInspectCommand(rt *runtimeConfig) *cobra.Command {
 				"schema_version":    descriptor.SchemaVersion,
 				"kind":              kind,
 				"provider":          descriptor.Provider,
+				"protection":        descriptorProtection(descriptor),
 				"crypto_suite":      descriptor.CryptoSuite,
 				"key_id":            descriptor.KeyID,
 				"alg":               descriptor.Algorithm,
@@ -172,6 +199,47 @@ func newKeyInspectCommand(rt *runtimeConfig) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&keyPath, "key", "", "key file to inspect")
 	return cmd
+}
+
+func newKeyRewrapCommand(rt *runtimeConfig) *cobra.Command {
+	var descriptorPath string
+	cmd := &cobra.Command{
+		Use:   "rewrap",
+		Short: "Atomically rotate an encrypted software key's development KEK",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if descriptorPath == "" {
+				return usageError("key rewrap requires descriptor")
+			}
+			descriptor, err := keydescriptor.ReadFile(descriptorPath)
+			if err != nil {
+				return err
+			}
+			oldProvider := keyenvelope.NewPassphraseKEKProvider(keyenvelope.EnvPassphraseSource(keyenvelope.DefaultPassphraseEnv))
+			newProvider := keyenvelope.NewPassphraseKEKProvider(keyenvelope.EnvPassphraseSource(keyenvelope.DefaultPassphraseEnv + "_NEW"))
+			if err := keydescriptor.RewrapSoftwareEnvelopeFile(cmd.Context(), descriptorPath, oldProvider, newProvider); err != nil {
+				return err
+			}
+			rt.logger.Info().
+				Str("key_id", descriptor.KeyID).
+				Str("kek_provider", keyenvelope.PassphraseProvider).
+				Msg("rewrapped software key envelope")
+			return rt.writeJSON(map[string]string{
+				"key_id":       descriptor.KeyID,
+				"crypto_suite": string(descriptor.CryptoSuite),
+				"protection":   keydescriptor.SoftwareProtectionSM4Envelope,
+				"kek_provider": keyenvelope.PassphraseProvider,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&descriptorPath, "descriptor", "", "encrypted software signer descriptor")
+	return cmd
+}
+
+func descriptorProtection(descriptor keydescriptor.Descriptor) string {
+	if descriptor.Software == nil {
+		return ""
+	}
+	return descriptor.Software.Protection
 }
 
 func newKeyRegisterCommand(rt *runtimeConfig, hidden bool) *cobra.Command {

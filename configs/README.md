@@ -52,6 +52,20 @@ Override via `TRUSTDB_RUN_PROFILE`.
 
 If omitted, serve logs that the deployment is treated as **custom**.
 
+## Software key envelopes
+
+`trustdb key generate` defaults to an authenticated `sm4-envelope-v1` material
+file. The built-in development KEK provider reads
+`TRUSTDB_DEV_KEY_PASSPHRASE`; it is intentionally not a YAML field or ordinary
+CLI flag, so configuration display and process arguments cannot expose it.
+Every process that opens an encrypted software signer must receive that
+environment variable. This provider is for development/offline deployments,
+not production HSM custody. Production profiles should use an approved
+PKCS#11, SDF, HSM/KMS, or remote signer descriptor.
+
+The owner-permissions-only compatibility path requires explicit
+`--protection plaintext-dev-v1` and must not be used in production.
+
 ## Admin Web (`admin`)
 
 Optional block `admin` enables the operator UI mounted by `trustdb serve` (see repository README). Use `TRUSTDB_ADMIN_*` env vars in production; set `admin.password_hash` to a bcrypt string from `trustdb admin hash-password`, and `admin.session_secret` to at least 32 random bytes.

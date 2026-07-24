@@ -100,7 +100,7 @@ trustdb key list --registry ./keys.tdkeys --registry-public-key ./keys/registry.
 trustdb key inspect --key ./keys/client.pub
 ```
 
-`key generate` 的 `plaintext-dev-v1` 只用于开发。生产私钥必须留在 HSM/SDF/KMS/PKCS#11 边界内，CLI 只导入 descriptor 和公开材料。
+`key generate` 默认写入 [`sm4-envelope-v1`](../../formats/SM4_KEY_ENVELOPE_V1.md)，内置 passphrase KEK 仍只用于开发；显式 `plaintext-dev-v1` 同样不能用于生产。生产私钥必须留在 HSM/SDF/KMS/PKCS#11 边界内，CLI/Registry 只导入 descriptor 和公开材料。
 
 ## 7. 验证 Gate
 
@@ -117,7 +117,7 @@ trustdb key inspect --key ./keys/client.pub
 
 ## 8. 后续工作
 
-- #451：SM4 software-key envelope；
+- #451：SM4 software-key envelope 已完成，见 [`ADR-0010`](ADR-0010-AUTHENTICATED-SM4-SOFTWARE-KEY-ENVELOPES.zh-CN.md)；
 - #452：PKCS#11 provider；
 - #453：SDF provider；
 - #454：Server Model V2 与 CN_SM_V1 证据生成；

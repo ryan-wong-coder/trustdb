@@ -146,9 +146,12 @@ printf 'hello TrustDB\n' > example.txt
 mkdir -p .trustdb-dev
 ```
 
-生成一次性客户端和服务端身份。每条命令会写入 signer descriptor（`.key`）、公开 verifier descriptor（`.pub`）和独立的软件私钥材料（`.material`）。两个 descriptor 都是 canonical CBOR，不是裸私钥。`key generate` 会替换同名文件；已经签发过证据的身份不能重复执行：
+生成一次性客户端和服务端身份。每条命令会写入 signer descriptor（`.key`）、公开 verifier descriptor（`.pub`）和独立的软件私钥材料（`.material`）。两个 descriptor 都是 canonical CBOR，不是裸私钥；默认 material 是经过认证的 SM4-GCM envelope。开发 passphrase 只通过标准环境变量传入，不能作为普通 argv flag。加密生成拒绝覆盖已有 material；已经签发过证据的身份必须显式轮换，不能重新生成：
 
 ```bash
+read -r -s -p '开发密钥口令：' TRUSTDB_DEV_KEY_PASSPHRASE
+export TRUSTDB_DEV_KEY_PASSPHRASE
+printf '\n'
 ./bin/trustdb key generate --out .trustdb-dev --prefix client
 ./bin/trustdb key generate --out .trustdb-dev --prefix server
 ```
@@ -162,7 +165,18 @@ mkdir -p .trustdb-dev
   --prefix client
 ```
 
-`plaintext-dev-v1` 材料只依靠 owner-only 文件权限，适用于本地评估。生产环境应配置版本化 PKCS#11、SDF 或 remote provider descriptor；SM4 加密软件 envelope 由 #451 跟进。TrustDB 不再读取或回退到旧 raw-base64 key file。
+默认 `sm4-envelope-v1` 使用随机 DEK/nonce，并由仅限开发的 `passphrase-dev-v1` provider 包装 DEK。只依靠 owner-only 权限的旧路径必须显式指定 `--protection plaintext-dev-v1`，仍然只能用于开发。生产环境应配置版本化 PKCS#11、SDF、HSM/KMS 或 remote provider descriptor；软件 SM4 envelope 不等于生产 HSM 托管。TrustDB 不读取或回退到旧 raw-base64 key file。完整格式见 [`formats/SM4_KEY_ENVELOPE_V1.md`](formats/SM4_KEY_ENVELOPE_V1.md)。
+
+只轮换开发 KEK、保持签名私钥和公开身份不变：
+
+```bash
+read -r -s -p '新开发密钥口令：' TRUSTDB_DEV_KEY_PASSPHRASE_NEW
+export TRUSTDB_DEV_KEY_PASSPHRASE_NEW
+printf '\n'
+./bin/trustdb key rewrap --descriptor .trustdb-dev/client.key
+export TRUSTDB_DEV_KEY_PASSPHRASE="$TRUSTDB_DEV_KEY_PASSPHRASE_NEW"
+unset TRUSTDB_DEV_KEY_PASSPHRASE_NEW
+```
 
 在本地创建并签名文件 claim：
 
@@ -262,6 +276,7 @@ mkdir -p .trustdb-dev
 - [docs/compliance/ADR-0004-PROVIDER-NEUTRAL-CRYPTO-CONTRACTS.zh-CN.md](docs/compliance/ADR-0004-PROVIDER-NEUTRAL-CRYPTO-CONTRACTS.zh-CN.md)：suite-aware hash、不可导出 KeyHandle、Signer/Verifier 与 provider fail-closed 契约。
 - [docs/compliance/ADR-0008-VERSIONED-KEY-DESCRIPTORS.zh-CN.md](docs/compliance/ADR-0008-VERSIONED-KEY-DESCRIPTORS.zh-CN.md)：canonical software、PKCS#11、SDF、remote 与证书描述符、脱敏、解析和破坏性迁移规则。
 - [docs/compliance/ADR-0009-SUITE-AWARE-KEY-REGISTRY-V2.zh-CN.md](docs/compliance/ADR-0009-SUITE-AWARE-KEY-REGISTRY-V2.zh-CN.md)：suite-bound Registry V2、SM2/INTL 生命周期、原子轮换、崩溃恢复和外部 trust root 规则。
+- [docs/compliance/ADR-0010-AUTHENTICATED-SM4-SOFTWARE-KEY-ENVELOPES.zh-CN.md](docs/compliance/ADR-0010-AUTHENTICATED-SM4-SOFTWARE-KEY-ENVELOPES.zh-CN.md)：认证 SM4-GCM 软件私钥 envelope、KEK provider 边界、原子 rewrap 和生产托管限制。
 - [COMMUNITY.md](COMMUNITY.md)：使用支持、讨论和首次贡献入口。
 - [ROADMAP.md](ROADMAP.md)：公开产品方向以及影响路线图的方式。
 - [SECURITY.md](SECURITY.md)：漏洞私密报告和支持版本策略。
@@ -271,6 +286,7 @@ mkdir -p .trustdb-dev
 - [CONTRIBUTING.md](CONTRIBUTING.md)：Issue、PR、Commit、验证和 Review 标准。
 - [formats/SPROOF_V1.md](formats/SPROOF_V1.md)：稳定 `.sproof` v1 交换格式。
 - [formats/KEY_DESCRIPTOR_V1.md](formats/KEY_DESCRIPTOR_V1.md)：canonical key descriptor schema、provider union、解析、脱敏与迁移契约。
+- [formats/SM4_KEY_ENVELOPE_V1.md](formats/SM4_KEY_ENVELOPE_V1.md)：canonical 认证软件私钥 envelope、passphrase KDF profile 和原子持久化契约。
 - [formats/KEY_REGISTRY_V2.md](formats/KEY_REGISTRY_V2.md)：Registry V2 字节布局、manifest、事件链、生命周期、恢复和兼容性契约。
 - [formats/DISTRIBUTED_ARCHITECTURE.md](formats/DISTRIBUTED_ARCHITECTURE.md)：分布式/存算分离说明。
 - [docs/performance/trustdb-sustained-stream-persistence-assessment-2026-07-23.zh-CN.md](docs/performance/trustdb-sustained-stream-persistence-assessment-2026-07-23.zh-CN.md)：唯一双机性能口径，覆盖 L2-L5、HTTP/gRPC、背压、持久化与多种配置语义。

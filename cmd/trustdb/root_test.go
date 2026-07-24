@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 	trustconfig "github.com/wowtrust/trustdb/internal/config"
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
+	"github.com/wowtrust/trustdb/internal/keyenvelope"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
 
@@ -316,7 +317,7 @@ func TestLogsGoToStderr(t *testing.T) {
 	tmp := t.TempDir()
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"--log-level", "info", "keygen", "--out", tmp, "--prefix", "client"})
+	cmd.SetArgs([]string{"--log-level", "info", "keygen", "--out", tmp, "--prefix", "client", "--protection", keydescriptor.SoftwareProtectionPlaintextDev})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("keygen error = %v stderr=%s", err, errOut.String())
 	}
@@ -349,6 +350,7 @@ func TestLogsCanWriteRotatingFile(t *testing.T) {
 		"keygen",
 		"--out", tmp,
 		"--prefix", "client",
+		"--protection", keydescriptor.SoftwareProtectionPlaintextDev,
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("keygen error = %v stderr=%s", err, errOut.String())
@@ -388,6 +390,7 @@ func TestLogsCanWriteAsyncFile(t *testing.T) {
 		"keygen",
 		"--out", tmp,
 		"--prefix", "client",
+		"--protection", keydescriptor.SoftwareProtectionPlaintextDev,
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("keygen error = %v stderr=%s", err, errOut.String())
@@ -625,7 +628,7 @@ func TestKeyInspectCommand(t *testing.T) {
 	tmp := t.TempDir()
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"keygen", "--out", tmp, "--prefix", "client"})
+	cmd.SetArgs([]string{"keygen", "--out", tmp, "--prefix", "client", "--protection", keydescriptor.SoftwareProtectionPlaintextDev})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("keygen error = %v stderr=%s", err, errOut.String())
 	}
@@ -647,7 +650,7 @@ func TestKeyInspectCommand(t *testing.T) {
 }
 
 func TestKeygenProducesResolvableDescriptorsAndRejectsLegacyRawKeys(t *testing.T) {
-	t.Parallel()
+	t.Setenv(keyenvelope.DefaultPassphraseEnv, "correct horse battery staple")
 
 	tmp := t.TempDir()
 	var out, errOut bytes.Buffer
@@ -671,6 +674,9 @@ func TestKeygenProducesResolvableDescriptorsAndRejectsLegacyRawKeys(t *testing.T
 	if signerDescriptor.Kind != keydescriptor.KindSigner || verifierDescriptor.Kind != keydescriptor.KindVerifier {
 		t.Fatalf("descriptor kinds = %q/%q", signerDescriptor.Kind, verifierDescriptor.Kind)
 	}
+	if signerDescriptor.Software == nil || signerDescriptor.Software.Protection != keydescriptor.SoftwareProtectionSM4Envelope {
+		t.Fatalf("signer protection = %+v", signerDescriptor.Software)
+	}
 	if signerDescriptor.KeyID != "client-key" || verifierDescriptor.KeyID != "client-key" {
 		t.Fatalf("descriptor key IDs = %q/%q", signerDescriptor.KeyID, verifierDescriptor.KeyID)
 	}
@@ -679,6 +685,39 @@ func TestKeygenProducesResolvableDescriptorsAndRejectsLegacyRawKeys(t *testing.T
 	}
 	if _, err := os.Stat(materialPath); err != nil {
 		t.Fatalf("material file missing: %v", err)
+	}
+	material, err := os.ReadFile(materialPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRotation, err := keyenvelope.Unmarshal(material)
+	if err != nil {
+		t.Fatalf("Unmarshal(envelope) error = %v", err)
+	}
+	t.Setenv(keyenvelope.DefaultPassphraseEnv+"_NEW", "replacement horse battery staple")
+	out.Reset()
+	errOut.Reset()
+	cmd = newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{"key", "rewrap", "--descriptor", signerPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("key rewrap error = %v stderr=%s", err, errOut.String())
+	}
+	rotatedMaterial, err := os.ReadFile(materialPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRotation, err := keyenvelope.Unmarshal(rotatedMaterial)
+	if err != nil {
+		t.Fatalf("Unmarshal(rotated envelope) error = %v", err)
+	}
+	if !bytes.Equal(beforeRotation.ContentNonce, afterRotation.ContentNonce) ||
+		!bytes.Equal(beforeRotation.Ciphertext, afterRotation.Ciphertext) ||
+		bytes.Equal(beforeRotation.WrappedDEK.Parameters, afterRotation.WrappedDEK.Parameters) {
+		t.Fatal("key rewrap did not preserve encrypted identity with fresh KEK parameters")
+	}
+	t.Setenv(keyenvelope.DefaultPassphraseEnv, "replacement horse battery staple")
+	if _, _, err := keydescriptor.NewDefaultResolver().ResolveSignerFile(context.Background(), signerPath); err != nil {
+		t.Fatalf("ResolveSignerFile(after rewrap) error = %v", err)
 	}
 
 	out.Reset()
@@ -715,7 +754,7 @@ func TestKeygenPrefixCannotEscapeOutputDir(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"keygen", "--out", outDir, "--prefix", "../outside"})
+	cmd.SetArgs([]string{"keygen", "--out", outDir, "--prefix", "../outside", "--protection", keydescriptor.SoftwareProtectionPlaintextDev})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("keygen error = %v stderr=%s", err, errOut.String())
 	}

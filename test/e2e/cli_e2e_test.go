@@ -194,6 +194,7 @@ func runTrustDB(t *testing.T, root string, args ...string) []byte {
 	cmdArgs := append([]string{"run", "./cmd/trustdb"}, args...)
 	cmd := exec.Command("go", cmdArgs...)
 	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "TRUSTDB_DEV_KEY_PASSPHRASE=trustdb-e2e-development-passphrase")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go %v failed: %v\n%s", cmdArgs, err, out)

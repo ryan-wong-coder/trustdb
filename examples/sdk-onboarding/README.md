@@ -13,9 +13,15 @@ Build the CLI and generate separate client and server Ed25519 key pairs:
 ```sh
 mkdir -p ./bin .trustdb-onboarding
 go build -o ./bin/trustdb ./cmd/trustdb
+read -r -s -p 'Development key passphrase: ' TRUSTDB_DEV_KEY_PASSPHRASE
+export TRUSTDB_DEV_KEY_PASSPHRASE
+printf '\n'
 ./bin/trustdb keygen --out .trustdb-onboarding --prefix client
 ./bin/trustdb keygen --out .trustdb-onboarding --prefix server
 ```
+
+Export the same `TRUSTDB_DEV_KEY_PASSPHRASE` in each terminal below. This
+built-in passphrase provider is a development facility, not HSM custody.
 
 In terminal 1, start a local server. The short batch delay keeps the tutorial wait brief:
 
