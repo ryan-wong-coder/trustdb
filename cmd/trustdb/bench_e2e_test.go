@@ -379,7 +379,8 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 	}
 
 	tmp := t.TempDir()
-	writer, _, err := openWALWriterWithOptions(filepath.Join(tmp, "wal"), wal.Options{})
+	walPath := filepath.Join(tmp, "wal")
+	writer, _, err := openWALWriterWithOptions(walPath, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("openWALWriterWithOptions: %v", err)
 	}

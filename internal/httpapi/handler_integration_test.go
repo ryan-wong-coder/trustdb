@@ -82,7 +82,12 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
 	svc := ingest.New(engine, ingest.Options{QueueSize: 8, Workers: 2}, nil)
-	batchSvc := batch.New(engine, newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "proofs")), batch.Options{QueueSize: 8, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	batchSvc := batch.New(engine, newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "proofs")), batch.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   8,
+		MaxRecords:  1,
+		MaxDelay:    time.Hour,
+	}, nil)
 	handler := New(svc, nil, batchSvc)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
