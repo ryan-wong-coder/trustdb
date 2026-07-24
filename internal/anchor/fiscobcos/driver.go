@@ -1,0 +1,187 @@
+package fiscobcos
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+)
+
+const (
+	StandardSDKVersion = "fisco-bcos-go-sdk-v3.0.2"
+	ReceiptStatusOK    = 0
+)
+
+var (
+	ErrDriverInvalid           = errors.New("invalid FISCO BCOS driver response")
+	ErrWrongNetwork            = errors.New("FISCO BCOS wrong network")
+	ErrStaleEndpoint           = errors.New("FISCO BCOS stale endpoint")
+	ErrEndpointDisagreement    = errors.New("FISCO BCOS endpoint disagreement")
+	ErrContractMismatch        = errors.New("FISCO BCOS contract mismatch")
+	ErrUnsupportedSDK          = errors.New("FISCO BCOS SDK is unsupported")
+	ErrInvalidReceiptStatus    = errors.New("FISCO BCOS receipt status is invalid")
+	ErrIncompleteChainEvidence = errors.New("FISCO BCOS chain evidence is incomplete")
+)
+
+// FailureClass is intentionally small and stable. The anchor worker maps
+// permanent failures to anchor.ErrPermanent and retries transient failures
+// without replacing its immutable InFlight STH.
+type FailureClass string
+
+const (
+	FailurePermanent FailureClass = "permanent"
+	FailureTransient FailureClass = "transient"
+	FailureAmbiguous FailureClass = "ambiguous"
+)
+
+// DriverError carries a bounded classification without exposing certificate
+// paths, account references, private material, or provider error payloads.
+type DriverError struct {
+	Operation string
+	Endpoint  string
+	Class     FailureClass
+	Kind      error
+}
+
+func (e *DriverError) Error() string {
+	if e == nil {
+		return "FISCO BCOS driver error"
+	}
+	if e.Endpoint == "" {
+		return fmt.Sprintf("FISCO BCOS %s failed: %v", e.Operation, e.Kind)
+	}
+	return fmt.Sprintf("FISCO BCOS %s failed for endpoint %q: %v", e.Operation, e.Endpoint, e.Kind)
+}
+
+func (e *DriverError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Kind
+}
+
+func IsPermanentDriverError(err error) bool {
+	var driverErr *DriverError
+	return errors.As(err, &driverErr) && driverErr.Class == FailurePermanent
+}
+
+// ChainProbe is the minimum startup/readiness identity returned by one
+// independently configured endpoint. All byte fields are fixed 32-byte
+// identities. Height is compared across the quorum before any side effect.
+type ChainProbe struct {
+	Endpoint         string
+	SDKVersion       string
+	CryptoMode       CryptoMode
+	ChainID          string
+	GroupID          string
+	GenesisHash      []byte
+	CheckpointHash   []byte
+	Height           uint64
+	ContractCodeHash []byte
+}
+
+// AnchorRecord mirrors TrustDBAnchorV1.AnchorRecord. It is a read-only chain
+// observation and is not itself an offline proof.
+type AnchorRecord struct {
+	StreamID        []byte
+	TreeSize        uint64
+	RootHash        []byte
+	SignedSTHDigest []byte
+	Publisher       []byte
+	PayloadVersion  uint16
+	Exists          bool
+}
+
+// SubmitRequest is immutable for one scheduler attempt. CanonicalPayload is
+// retained so fake, native, or sidecar drivers cannot infer TrustDB fields.
+type SubmitRequest struct {
+	Payload          AnchorPayload
+	CanonicalPayload []byte
+}
+
+type Submission struct {
+	Attempt TransactionAttempt
+}
+
+// ReceiptWithProof is deliberately named to exclude receipt-only APIs. A
+// driver must return both transaction and receipt proof fields, the decoded
+// exact contract record, and the containing block identity.
+type ReceiptWithProof struct {
+	Status        int
+	StatusMessage string
+	BlockNumber   uint64
+	BlockHash     []byte
+	Record        AnchorRecord
+	Evidence      ReceiptEvidence
+}
+
+type BlockHeader struct {
+	Evidence BlockEvidence
+}
+
+type ConsensusSnapshot struct {
+	BlockNumber uint64
+	BlockHash   []byte
+	Finality    FinalityEvidence
+}
+
+// Driver is the complete network boundary used by the standard-crypto sink.
+// Implementations may wrap the pinned Go SDK, but no SDK types cross this
+// interface and no method claims that returned evidence is offline-valid.
+type Driver interface {
+	Endpoint() string
+	ProbeChain(context.Context) (ChainProbe, error)
+	SubmitAnchor(context.Context, SubmitRequest) (Submission, error)
+	ReadAnchor(context.Context, []byte) (AnchorRecord, error)
+	GetReceiptWithProof(context.Context, []byte) (ReceiptWithProof, error)
+	GetBlockHeader(context.Context, uint64) (BlockHeader, error)
+	GetConsensusSnapshot(context.Context, uint64) (ConsensusSnapshot, error)
+	Close() error
+}
+
+func ValidateAnchorRecord(payload AnchorPayload, record AnchorRecord) error {
+	if !record.Exists {
+		return fmt.Errorf("%w: anchor record is absent", ErrDriverInvalid)
+	}
+	if !bytes.Equal(record.StreamID, payload.StreamID) ||
+		record.TreeSize != payload.TreeSize ||
+		!bytes.Equal(record.RootHash, payload.RootHash) ||
+		!bytes.Equal(record.SignedSTHDigest, payload.SignedSTHDigest) ||
+		record.PayloadVersion != payload.Version ||
+		len(record.Publisher) != 20 {
+		return fmt.Errorf("%w: on-chain record does not exactly match canonical payload", ErrContractMismatch)
+	}
+	return nil
+}
+
+func validateProbeAgainstTrust(probe ChainProbe, config TrustConfig) error {
+	if probe.SDKVersion != StandardSDKVersion {
+		return &DriverError{Operation: "probe", Endpoint: probe.Endpoint, Class: FailurePermanent, Kind: ErrUnsupportedSDK}
+	}
+	if probe.CryptoMode != CryptoModeStandard {
+		return &DriverError{Operation: "probe", Endpoint: probe.Endpoint, Class: FailurePermanent, Kind: ErrWrongNetwork}
+	}
+	if probe.ChainID != config.ChainID || probe.GroupID != config.GroupID ||
+		!bytes.Equal(probe.GenesisHash, config.GenesisHash) ||
+		!bytes.Equal(probe.CheckpointHash, config.TrustedCheckpoint.BlockHash) {
+		return &DriverError{Operation: "probe", Endpoint: probe.Endpoint, Class: FailurePermanent, Kind: ErrWrongNetwork}
+	}
+	if probe.Height < config.TrustedCheckpoint.BlockNumber {
+		return &DriverError{Operation: "probe", Endpoint: probe.Endpoint, Class: FailureTransient, Kind: ErrStaleEndpoint}
+	}
+	if !bytes.Equal(probe.ContractCodeHash, config.Contract.CodeHash) {
+		return &DriverError{Operation: "probe", Endpoint: probe.Endpoint, Class: FailurePermanent, Kind: ErrContractMismatch}
+	}
+	return nil
+}
+
+func probesAgree(left, right ChainProbe) bool {
+	return left.SDKVersion == right.SDKVersion &&
+		left.CryptoMode == right.CryptoMode &&
+		left.ChainID == right.ChainID &&
+		left.GroupID == right.GroupID &&
+		bytes.Equal(left.GenesisHash, right.GenesisHash) &&
+		bytes.Equal(left.CheckpointHash, right.CheckpointHash) &&
+		left.Height == right.Height &&
+		bytes.Equal(left.ContractCodeHash, right.ContractCodeHash)
+}
