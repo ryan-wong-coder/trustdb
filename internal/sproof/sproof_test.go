@@ -285,7 +285,7 @@ func vectorProof() model.SingleProof {
 	}
 }
 
-func verifierDescriptor(t *testing.T, keyID string) []byte {
+func verifierDescriptor(t testing.TB, keyID string) []byte {
 	t.Helper()
 	public := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public().(ed25519.PublicKey)
 	encoded, err := keydescriptor.Marshal(keydescriptor.Descriptor{
