@@ -22,7 +22,7 @@ func (s *countingAnchorPageStore) ListSTHAnchorResultsPage(ctx context.Context, 
 
 func TestAPIAnchorsCompositeCursorRetainsSameTreeSinks(t *testing.T) {
 	t.Parallel()
-	store := &countingAnchorPageStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &countingAnchorPageStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	writer := proofstore.STHAnchorResultWriter(store)
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	sth := testSTH(key, 7, 0x77)

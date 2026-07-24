@@ -13,7 +13,6 @@ import (
 	"github.com/wowtrust/trustdb/internal/claim"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -100,7 +99,7 @@ func newProofBundleFixture(t *testing.T) proofBundleFixture {
 func globalProofForBundle(t *testing.T, f proofBundleFixture) model.GlobalLogProof {
 	t.Helper()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc, err := globallog.New(globallog.Options{
 		Store:  store,
 		NodeID: f.bundle.NodeID,

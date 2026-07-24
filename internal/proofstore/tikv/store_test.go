@@ -34,7 +34,7 @@ func TestTiKVSuiteBindingConformance(t *testing.T) {
 		db, _ := newMockTiKVDB(t, "suite-conformance/"+t.Name()+"/")
 		return proofstoremetatest.Harness{
 			Open: func(suiteID cryptosuite.ID) (cryptosuite.ID, error) {
-				marker, err := ensureStorageSchema(db, suiteID)
+				marker, err := ensureStorageSchema(db, suiteID, "node-1", "log-1", "test")
 				return marker.CryptoSuite, err
 			},
 			SeedUnbound: func() error {
@@ -72,7 +72,7 @@ func TestOpenWithOptionsRequiresPDEndpoints(t *testing.T) {
 
 func TestEnsureStorageSchemaInitializesAndReopensCurrentNamespace(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "storage-schema-current/")
-	marker, err := ensureStorageSchema(db, cryptosuite.INTLV1)
+	marker, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test")
 	if err != nil {
 		t.Fatalf("ensureStorageSchema(empty) error = %v", err)
 	}
@@ -91,10 +91,10 @@ func TestEnsureStorageSchemaInitializesAndReopensCurrentNamespace(t *testing.T) 
 	if err := proofstoremeta.Validate(stored, cryptosuite.INTLV1); err != nil {
 		t.Fatalf("stored marker = %+v: %v", stored, err)
 	}
-	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); err != nil {
+	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); err != nil {
 		t.Fatalf("ensureStorageSchema(current) error = %v", err)
 	}
-	if _, err := ensureStorageSchema(db, cryptosuite.CNSMV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+	if _, err := ensureStorageSchema(db, cryptosuite.CNSMV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("ensureStorageSchema(mismatch) code=%s err=%v", trusterr.CodeOf(err), err)
 	}
 }
@@ -104,7 +104,7 @@ func TestEnsureStorageSchemaRejectsLegacyVersion(t *testing.T) {
 	if err := db.Set([]byte(storageSchemaKey), []byte("trustdb-proofstore-v3"), syncWrite); err != nil {
 		t.Fatalf("seed legacy schema: %v", err)
 	}
-	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("ensureStorageSchema(v3) code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
 	}
 }
@@ -114,7 +114,7 @@ func TestEnsureStorageSchemaRejectsUnversionedLegacyQueue(t *testing.T) {
 	if err := db.Set([]byte("anchor/sth-outbox/00000000000000000001"), []byte("legacy"), syncWrite); err != nil {
 		t.Fatalf("seed legacy queue item: %v", err)
 	}
-	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("ensureStorageSchema(unversioned) code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
 	}
 }
@@ -125,7 +125,7 @@ func TestEnsureStorageSchemaIgnoresOtherNamespaces(t *testing.T) {
 	if err := other.Set([]byte("anchor/sth-outbox/00000000000000000001"), []byte("legacy"), syncWrite); err != nil {
 		t.Fatalf("seed other namespace: %v", err)
 	}
-	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); err != nil {
+	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); err != nil {
 		t.Fatalf("ensureStorageSchema(target) error = %v", err)
 	}
 }
@@ -140,7 +140,7 @@ func TestEnsureStorageSchemaAcceptsConcurrentInitialization(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := ensureStorageSchema(db, cryptosuite.INTLV1)
+			_, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test")
 			results <- err
 		}()
 	}
@@ -161,28 +161,28 @@ func TestEnsureStorageSchemaRejectsCorruptUnknownAndConflictingMarkers(t *testin
 		if err := db.Set([]byte(storageSchemaKey), []byte{0xff}, syncWrite); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 			t.Fatalf("corrupt marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
 	t.Run("unknown", func(t *testing.T) {
 		db, _ := newMockTiKVDB(t, "storage-schema-unknown/")
-		marker, _ := proofstoremeta.New(cryptosuite.INTLV1)
+		marker, _ := proofstoremeta.New(cryptosuite.INTLV1, "node-1", "log-1", "test")
 		marker.CryptoSuite = cryptosuite.ID("UNKNOWN")
 		data, _ := cborx.Marshal(marker)
 		if err := db.Set([]byte(storageSchemaKey), data, syncWrite); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("unknown marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
 	t.Run("conflicting", func(t *testing.T) {
 		db, _ := newMockTiKVDB(t, "storage-schema-conflicting/")
-		if _, err := ensureStorageSchema(db, cryptosuite.CNSMV1); err != nil {
+		if _, err := ensureStorageSchema(db, cryptosuite.CNSMV1, "node-1", "log-1", "test"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("conflicting marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
@@ -190,7 +190,7 @@ func TestEnsureStorageSchemaRejectsCorruptUnknownAndConflictingMarkers(t *testin
 
 func TestGetBundleMissUsesOnePointRead(t *testing.T) {
 	db, countingClient := newMockTiKVDB(t, "bundle-miss/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 
 	if _, err := store.GetBundle(context.Background(), "missing-record"); trusterr.CodeOf(err) != trusterr.CodeNotFound {
 		t.Fatalf("GetBundle error = %v, code = %s, want %s", err, trusterr.CodeOf(err), trusterr.CodeNotFound)
@@ -202,9 +202,9 @@ func TestGetBundleMissUsesOnePointRead(t *testing.T) {
 
 func TestTiKVLatestAnchorCachedReferenceValidatesResultEnvelope(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "latest-anchor-validation/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 	ctx := context.Background()
-	result := model.STHAnchorResult{
+	result := model.STHAnchorResult{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		NodeID:        "node-1",
 		LogID:         "log-1",
@@ -212,7 +212,7 @@ func TestTiKVLatestAnchorCachedReferenceValidatesResultEnvelope(t *testing.T) {
 		SinkName:      "file",
 		AnchorID:      "anchor-7",
 		RootHash:      bytes.Repeat([]byte{0x77}, 32),
-		STH: model.SignedTreeHead{
+		STH: model.SignedTreeHead{CryptoSuite: "INTL_V1",
 			SchemaVersion:  model.SchemaSignedTreeHead,
 			TreeAlg:        model.DefaultMerkleTreeAlg,
 			TreeSize:       7,
@@ -255,7 +255,7 @@ func TestTiKVLatestAnchorCachedReferenceValidatesResultEnvelope(t *testing.T) {
 
 func TestTiKVGlobalPublicationChunksL4Promotions(t *testing.T) {
 	db, countingClient := newMockTiKVDB(t, "global-publication-chunks/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	ctx := context.Background()
 	const recordCount = batchArtifactChunkSize*2 + 17
 	const batchID = "batch-global-publication-chunks"
@@ -263,7 +263,7 @@ func TestTiKVGlobalPublicationChunksL4Promotions(t *testing.T) {
 	seed := db.NewBatch()
 	defer seed.Close()
 	for index := range recordCount {
-		idx := model.RecordIndex{
+		idx := model.RecordIndex{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaRecordIndex,
 			RecordID:        fmt.Sprintf("tr1-global-publication-%04d", index),
 			ReceivedAtUnixN: int64(index + 1),
@@ -277,10 +277,10 @@ func TestTiKVGlobalPublicationChunksL4Promotions(t *testing.T) {
 	if err := seed.Commit(syncWrite); err != nil {
 		t.Fatalf("seed record indexes: %v", err)
 	}
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogOutbox,
 		BatchID:       batchID,
-		BatchRoot: model.BatchRoot{
+		BatchRoot: model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       batchID,
 			BatchRoot:     bytes.Repeat([]byte{0x31}, 32),
@@ -326,13 +326,13 @@ func TestTiKVGlobalPublicationChunksL4Promotions(t *testing.T) {
 
 func TestTiKVGlobalPublicationPersistsIntentBeforeL4ProjectionFailure(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "global-publication-intent-first/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	ctx := context.Background()
 	const batchID = "batch-global-publication-intent-first"
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogOutbox,
 		BatchID:       batchID,
-		BatchRoot: model.BatchRoot{
+		BatchRoot: model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       batchID,
 			BatchRoot:     bytes.Repeat([]byte{0x32}, 32),
@@ -367,7 +367,7 @@ func TestTiKVGlobalPublicationPersistsIntentBeforeL4ProjectionFailure(t *testing
 }
 
 func tikvPublicationSTH(key model.STHAnchorScheduleKey, treeSize uint64, fill byte) model.SignedTreeHead {
-	return model.SignedTreeHead{
+	return model.SignedTreeHead{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
@@ -390,7 +390,7 @@ func TestTiKVCheckpointPruneSafetyRequiresCompleteScope(t *testing.T) {
 			t.Fatalf("WALCheckpointPruneSafe() = true for incomplete scope: %+v", store)
 		}
 	}
-	ready := &Store{checkpointNodeID: "node", checkpointWALID: "wal"}
+	ready := &Store{binding: testStoreBinding(), checkpointNodeID: "node", checkpointWALID: "wal"}
 	ready.idempotencyReady.Store(true)
 	if !ready.WALCheckpointPruneSafe() {
 		t.Fatal("WALCheckpointPruneSafe() = false for complete scope")
@@ -399,13 +399,13 @@ func TestTiKVCheckpointPruneSafetyRequiresCompleteScope(t *testing.T) {
 
 func TestTiKVCheckpointScopesDoNotShareStateOrLegacyFallback(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "checkpoint-scope/")
-	nodeA := &Store{db: db, checkpointNodeID: "node-a", checkpointWALID: "wal-a"}
-	nodeB := &Store{db: db, checkpointNodeID: "node-b", checkpointWALID: "wal-b"}
+	nodeA := &Store{binding: testStoreBinding(), db: db, checkpointNodeID: "node-a", checkpointWALID: "wal-a"}
+	nodeB := &Store{binding: testStoreBinding(), db: db, checkpointNodeID: "node-b", checkpointWALID: "wal-b"}
 	nodeA.idempotencyReady.Store(true)
 	nodeB.idempotencyReady.Store(true)
 	ctx := context.Background()
 
-	legacy, err := cborx.Marshal(model.WALCheckpoint{LastSequence: 99})
+	legacy, err := cborx.Marshal(model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 99})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestTiKVCheckpointScopesDoNotShareStateOrLegacyFallback(t *testing.T) {
 		t.Fatalf("nodeA legacy GetCheckpoint found=%v err=%v", found, err)
 	}
 
-	if err := nodeA.PutCheckpoint(ctx, model.WALCheckpoint{LastSequence: 7}); err != nil {
+	if err := nodeA.PutCheckpoint(ctx, model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 7}); err != nil {
 		t.Fatal(err)
 	}
 	if _, found, err := nodeB.GetCheckpoint(ctx); err != nil || found {
@@ -430,13 +430,13 @@ func TestTiKVCheckpointScopesDoNotShareStateOrLegacyFallback(t *testing.T) {
 
 func TestTiKVCheckpointNeverRegressesWithinScope(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "checkpoint-monotonic/")
-	store := &Store{db: db, checkpointNodeID: "node", checkpointWALID: "wal"}
+	store := &Store{binding: testStoreBinding(), db: db, checkpointNodeID: "node", checkpointWALID: "wal"}
 	store.idempotencyReady.Store(true)
 	ctx := context.Background()
-	if err := store.PutCheckpoint(ctx, model.WALCheckpoint{LastSequence: 12, BatchID: "new"}); err != nil {
+	if err := store.PutCheckpoint(ctx, model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 12, BatchID: "new"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutCheckpoint(ctx, model.WALCheckpoint{LastSequence: 4, BatchID: "old"}); err != nil {
+	if err := store.PutCheckpoint(ctx, model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 4, BatchID: "old"}); err != nil {
 		t.Fatal(err)
 	}
 	got, found, err := store.GetCheckpoint(ctx)
@@ -447,7 +447,7 @@ func TestTiKVCheckpointNeverRegressesWithinScope(t *testing.T) {
 
 func TestTiKVIdempotencyProjectionPublishesWithCommittedManifest(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "idempotency-publication/")
-	store := &Store{db: db, checkpointNodeID: "node", checkpointWALID: "wal"}
+	store := &Store{binding: testStoreBinding(), db: db, checkpointNodeID: "node", checkpointWALID: "wal"}
 	ctx := context.Background()
 	if err := store.EnsureIdempotencyProjection(ctx); err != nil {
 		t.Fatal(err)
@@ -456,7 +456,7 @@ func TestTiKVIdempotencyProjectionPublishesWithCommittedManifest(t *testing.T) {
 	if err := store.PutBundle(ctx, bundle); err != nil {
 		t.Fatal(err)
 	}
-	prepared := model.BatchManifest{
+	prepared := model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "batch-idempotency",
 		State:         model.BatchStatePrepared,
@@ -487,8 +487,8 @@ func TestTiKVIdempotencyProjectionPublishesWithCommittedManifest(t *testing.T) {
 
 func TestTiKVIdempotencyProjectionRejectsCommittedHistoryWithoutMarker(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "idempotency-no-compat/")
-	store := &Store{db: db}
-	if err := store.PutManifest(context.Background(), model.BatchManifest{
+	store := &Store{binding: testStoreBinding(), db: db}
+	if err := store.PutManifest(context.Background(), model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "old-committed",
 		State:         model.BatchStateCommitted,
@@ -502,20 +502,20 @@ func TestTiKVIdempotencyProjectionRejectsCommittedHistoryWithoutMarker(t *testin
 
 func TestTiKVGenericCommitChecksSharedProjectionReadiness(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "idempotency-shared-readiness/")
-	initializer := &Store{db: db}
-	staleWriter := &Store{db: db}
+	initializer := &Store{binding: testStoreBinding(), db: db}
+	staleWriter := &Store{binding: testStoreBinding(), db: db}
 	ctx := context.Background()
 	if err := initializer.EnsureIdempotencyProjection(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := staleWriter.PutManifest(ctx, model.BatchManifest{
+	if err := staleWriter.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "generic-commit",
 		State:         model.BatchStateCommitted,
 	}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("PutManifest(committed) error=%v, want failed_precondition", err)
 	}
-	if err := staleWriter.PutManifest(ctx, model.BatchManifest{
+	if err := staleWriter.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "prepared",
 		State:         model.BatchStatePrepared,
@@ -527,8 +527,8 @@ func TestTiKVGenericCommitChecksSharedProjectionReadiness(t *testing.T) {
 func TestTiKVProjectionInitializationFencesConcurrentGenericCommit(t *testing.T) {
 	for attempt := 0; attempt < 8; attempt++ {
 		db, _ := newMockTiKVDB(t, fmt.Sprintf("idempotency-fence-%d/", attempt))
-		initializer := &Store{db: db}
-		writer := &Store{db: db}
+		initializer := &Store{binding: testStoreBinding(), db: db}
+		writer := &Store{binding: testStoreBinding(), db: db}
 		start := make(chan struct{})
 		var initializeErr, writeErr error
 		var wg sync.WaitGroup
@@ -541,7 +541,7 @@ func TestTiKVProjectionInitializationFencesConcurrentGenericCommit(t *testing.T)
 		go func() {
 			defer wg.Done()
 			<-start
-			writeErr = writer.PutManifest(context.Background(), model.BatchManifest{
+			writeErr = writer.PutManifest(context.Background(), model.BatchManifest{CryptoSuite: "INTL_V1",
 				SchemaVersion: model.SchemaBatchManifest,
 				BatchID:       "concurrent-commit",
 				State:         model.BatchStateCommitted,
@@ -557,11 +557,11 @@ func TestTiKVProjectionInitializationFencesConcurrentGenericCommit(t *testing.T)
 
 func TestTiKVPreparedManifestIndexBoundsAndTransitions(t *testing.T) {
 	db, countingClient := newMockTiKVDB(t, "prepared-manifests/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 	ctx := context.Background()
 
 	for i := range 128 {
-		if err := store.PutManifest(ctx, model.BatchManifest{
+		if err := store.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchManifest,
 			BatchID:       fmt.Sprintf("committed-%03d", i),
 			State:         model.BatchStateCommitted,
@@ -569,10 +569,10 @@ func TestTiKVPreparedManifestIndexBoundsAndTransitions(t *testing.T) {
 			t.Fatalf("PutManifest(committed %d): %v", i, err)
 		}
 	}
-	readyA := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-a", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 10}
-	readyB := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-b", NodeID: "node-b", State: model.BatchStatePrepared, MaterializeNextUnixN: 20}
-	readyC := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-c", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 30}
-	future := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "future", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 1_000}
+	readyA := model.BatchManifest{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-a", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 10}
+	readyB := model.BatchManifest{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-b", NodeID: "node-b", State: model.BatchStatePrepared, MaterializeNextUnixN: 20}
+	readyC := model.BatchManifest{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchManifest, BatchID: "ready-c", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 30}
+	future := model.BatchManifest{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchManifest, BatchID: "future", NodeID: "node-a", State: model.BatchStatePrepared, MaterializeNextUnixN: 1_000}
 	for _, manifest := range []model.BatchManifest{readyC, future, readyB, readyA} {
 		if err := store.PutManifest(ctx, manifest); err != nil {
 			t.Fatalf("PutManifest(%s): %v", manifest.BatchID, err)
@@ -613,9 +613,9 @@ func TestTiKVPreparedManifestIndexBoundsAndTransitions(t *testing.T) {
 
 func TestTiKVPreparedManifestIndexFailsClosedOnMismatch(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "prepared-manifest-mismatch/")
-	store := &Store{db: db}
-	indexed := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "indexed", State: model.BatchStatePrepared}
-	wrong := model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "wrong", State: model.BatchStatePrepared}
+	store := &Store{binding: testStoreBinding(), db: db}
+	indexed := model.BatchManifest{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchManifest, BatchID: "indexed", State: model.BatchStatePrepared}
+	wrong := model.BatchManifest{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchManifest, BatchID: "wrong", State: model.BatchStatePrepared}
 	data, err := cborx.Marshal(wrong)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -781,13 +781,13 @@ func TestTiKVIterPrevReusesReverseScanBatches(t *testing.T) {
 
 func TestListRecordIndexesBatchesReferences(t *testing.T) {
 	db, countingClient := newMockTiKVDB(t, "record-list-batch/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 
 	batch := db.NewBatch()
 	defer batch.Close()
 	const recordCount = 1000
 	for index := range recordCount {
-		idx := model.RecordIndex{
+		idx := model.RecordIndex{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaRecordIndex,
 			RecordID:        fmt.Sprintf("tr1%04d", index),
 			ReceivedAtUnixN: int64(index + 1),
@@ -992,13 +992,13 @@ func TestListRecordIndexesBatchesReferences(t *testing.T) {
 
 func TestListRecordIndexesBatchGetPreservesPageBoundaryAndLegacyInline(t *testing.T) {
 	db, countingClient := newMockTiKVDB(t, "record-list-legacy/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
-	first := model.RecordIndex{
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
+	first := model.RecordIndex{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaRecordIndex,
 		RecordID:        "tr1-reference",
 		ReceivedAtUnixN: 1,
 	}
-	legacy := model.RecordIndex{
+	legacy := model.RecordIndex{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaRecordIndex,
 		RecordID:        "tr2-legacy-inline",
 		ReceivedAtUnixN: 2,
@@ -1375,7 +1375,7 @@ func BenchmarkTiKVDecodeStoredProofBundleV2(b *testing.B) {
 
 func tikvIdempotencyFixture(t testing.TB, batchID string) (model.ProofBundle, model.IdempotencyDecision) {
 	t.Helper()
-	clientClaim := model.ClientClaim{
+	clientClaim := model.ClientClaim{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaClientClaim,
 		TenantID:        "tenant-a",
 		ClientID:        "client-a",
@@ -1393,7 +1393,7 @@ func tikvIdempotencyFixture(t testing.TB, batchID string) (model.ProofBundle, mo
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed := model.SignedClaim{
+	signed := model.SignedClaim{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaSignedClaim,
 		Claim:         clientClaim,
 		Signature: model.Signature{
@@ -1405,7 +1405,7 @@ func tikvIdempotencyFixture(t testing.TB, batchID string) (model.ProofBundle, mo
 	claimHash, _ := trustcrypto.HashBytes(model.DefaultHashAlg, canonical)
 	signatureHash, _ := trustcrypto.HashBytes(model.DefaultHashAlg, signed.Signature.Signature)
 	position := model.WALPosition{SegmentID: 1, Offset: 64, Sequence: 1}
-	record := model.ServerRecord{
+	record := model.ServerRecord{CryptoSuite: "INTL_V1",
 		SchemaVersion:       model.SchemaServerRecord,
 		RecordID:            claim.RecordID(canonical, signed.Signature),
 		TenantID:            clientClaim.TenantID,
@@ -1416,7 +1416,7 @@ func tikvIdempotencyFixture(t testing.TB, batchID string) (model.ProofBundle, mo
 		ReceivedAtUnixN:     20,
 		WAL:                 position,
 	}
-	accepted := model.AcceptedReceipt{
+	accepted := model.AcceptedReceipt{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaAcceptedReceipt,
 		RecordID:        record.RecordID,
 		Status:          "accepted",
@@ -1433,13 +1433,13 @@ func tikvIdempotencyFixture(t testing.TB, batchID string) (model.ProofBundle, mo
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle := model.ProofBundle{
+	bundle := model.ProofBundle{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaProofBundle,
 		RecordID:        record.RecordID,
 		SignedClaim:     signed,
 		ServerRecord:    record,
 		AcceptedReceipt: accepted,
-		CommittedReceipt: model.CommittedReceipt{
+		CommittedReceipt: model.CommittedReceipt{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaCommittedReceipt,
 			RecordID:      record.RecordID,
 			Status:        "committed",
@@ -1455,12 +1455,12 @@ func syntheticTiKVProofBundles(n int) []model.ProofBundle {
 	bundles := make([]model.ProofBundle, n)
 	for i := range bundles {
 		recordID := fmt.Sprintf("bench-record-%04d", i)
-		bundles[i] = model.ProofBundle{
+		bundles[i] = model.ProofBundle{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaProofBundle,
 			RecordID:      recordID,
-			SignedClaim: model.SignedClaim{
+			SignedClaim: model.SignedClaim{CryptoSuite: "INTL_V1",
 				SchemaVersion: model.SchemaSignedClaim,
-				Claim: model.ClientClaim{
+				Claim: model.ClientClaim{CryptoSuite: "INTL_V1",
 					SchemaVersion: model.SchemaClientClaim,
 					TenantID:      "bench-tenant",
 					ClientID:      "bench-client",
@@ -1474,7 +1474,7 @@ func syntheticTiKVProofBundles(n int) []model.ProofBundle {
 					Metadata: model.Metadata{EventType: "bench.synthetic"},
 				},
 			},
-			ServerRecord: model.ServerRecord{
+			ServerRecord: model.ServerRecord{CryptoSuite: "INTL_V1",
 				SchemaVersion:   model.SchemaServerRecord,
 				RecordID:        recordID,
 				TenantID:        "bench-tenant",
@@ -1483,7 +1483,7 @@ func syntheticTiKVProofBundles(n int) []model.ProofBundle {
 				ReceivedAtUnixN: int64(1_000 + i),
 				WAL:             model.WALPosition{SegmentID: 1, Offset: int64(i * 512), Sequence: uint64(i + 1)},
 			},
-			CommittedReceipt: model.CommittedReceipt{
+			CommittedReceipt: model.CommittedReceipt{CryptoSuite: "INTL_V1",
 				SchemaVersion: model.SchemaCommittedReceipt,
 				RecordID:      recordID,
 				BatchID:       "bench-batch",

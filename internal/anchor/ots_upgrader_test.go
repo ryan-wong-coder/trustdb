@@ -100,7 +100,7 @@ func TestOtsUpgrader_TickPersistsAndShortCircuits(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 
 	upgraded := []byte("upgraded-with-block-header")
 	var hits int32
@@ -163,7 +163,7 @@ func TestOtsUpgrader_StillPendingGaugeReflectsState(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 
 	// Calendar that always returns the *same* bytes the seeder put
 	// in, so UpgradeOtsProof observes "no change" and the batch
@@ -210,7 +210,7 @@ func TestOtsUpgrader_IgnoresNonOtsSTHs(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 	ctx := context.Background()
 
 	root := make([]byte, 32)
@@ -252,7 +252,7 @@ func TestOtsUpgrader_IgnoresNonOtsSTHs(t *testing.T) {
 func TestOtsUpgraderRotatesPastFirstBatch(t *testing.T) {
 	t.Parallel()
 
-	store := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "ps"))
 	hits := make([]atomic.Int32, 3)
 	servers := make([]*httptest.Server, 0, 3)
 	for i := range 3 {
@@ -295,7 +295,7 @@ func TestOtsUpgraderRotatesPastFirstBatch(t *testing.T) {
 
 func TestOtsUpgraderPrioritizesNewestOtsAfterNonOtsHistory(t *testing.T) {
 	t.Parallel()
-	store := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "ps"))
 	writer := any(store).(proofstore.STHAnchorResultWriter)
 	for treeSize := uint64(1); treeSize <= 20; treeSize++ {
 		root := bytes.Repeat([]byte{byte(treeSize)}, 32)
@@ -336,7 +336,7 @@ func TestOtsUpgraderPrioritizesNewestOtsAfterNonOtsHistory(t *testing.T) {
 
 func TestNewOtsUpgraderRejectsBatchAboveStorePageLimit(t *testing.T) {
 	t.Parallel()
-	store := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "ps"))
 	if _, err := NewOtsUpgrader(UpgraderConfig{Store: store, BatchSize: MaxOtsUpgradeBatchSize + 1}); err == nil {
 		t.Fatal("NewOtsUpgrader accepted a batch larger than the store page limit")
 	}
@@ -344,7 +344,7 @@ func TestNewOtsUpgraderRejectsBatchAboveStorePageLimit(t *testing.T) {
 
 func TestPersistOtsAnchorResultUpgradeMergesConcurrentCalendars(t *testing.T) {
 	t.Parallel()
-	store := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "ps"))
 	original := seedPublishedOtsSTH(t, store, 40, []string{"https://calendar-a.example", "https://calendar-b.example"}, nil)
 	reader := any(store).(proofstore.STHAnchorResultKeyedReader)
 	updater := any(store).(proofstore.STHAnchorResultUpdater)
@@ -395,7 +395,7 @@ func TestOtsUpgrader_MarkUpgradedAfterChange(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -429,7 +429,7 @@ func TestOtsUpgrader_MarkUpgradedAfterChange(t *testing.T) {
 func TestOtsUpgrader_StartStopIsIdempotent(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 	upgrader, _ := NewOtsUpgrader(UpgraderConfig{Store: store, PollInterval: 24 * time.Hour})
 
 	upgrader.Stop() // never started: no-op
@@ -441,7 +441,7 @@ func TestOtsUpgrader_StartStopIsIdempotent(t *testing.T) {
 
 func TestOtsUpgrader_ContextCancellationAllowsRestart(t *testing.T) {
 	t.Parallel()
-	store := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "ps"))
 	upgrader, err := NewOtsUpgrader(UpgraderConfig{Store: store, PollInterval: 24 * time.Hour})
 	if err != nil {
 		t.Fatal(err)

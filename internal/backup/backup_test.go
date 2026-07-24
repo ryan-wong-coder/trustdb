@@ -25,7 +25,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	bundle := model.ProofBundle{
 		SchemaVersion: model.SchemaProofBundle,
 		RecordID:      "record-1",
@@ -130,7 +130,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected verify report: %+v", verified)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	checkpoint := filepath.Join(t.TempDir(), "restore.checkpoint.json")
 	restored, err := RestoreWithOptions(ctx, dst, path, RestoreOptions{Resume: true, CheckpointPath: checkpoint})
 	if err != nil {
@@ -172,7 +172,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 func TestRestoreRejectsSuiteMismatchBeforeApplyingEntries(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src"), SuiteID: cryptosuite.CNSMV1}
+	src := newBoundTestLocalStoreForSuite(t, filepath.Join(t.TempDir(), "src"), cryptosuite.CNSMV1)
 	root := model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "cn-root",
@@ -191,7 +191,7 @@ func TestRestoreRejectsSuiteMismatchBeforeApplyingEntries(t *testing.T) {
 	if report.CryptoSuite != cryptosuite.CNSMV1 {
 		t.Fatalf("backup suite = %q", report.CryptoSuite)
 	}
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst"), SuiteID: cryptosuite.INTLV1}
+	dst := newBoundTestLocalStoreForSuite(t, filepath.Join(t.TempDir(), "dst"), cryptosuite.INTLV1)
 	if _, err := Restore(ctx, dst, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("Restore mismatch code=%s err=%v", trusterr.CodeOf(err), err)
 	}
@@ -203,7 +203,7 @@ func TestRestoreRejectsSuiteMismatchBeforeApplyingEntries(t *testing.T) {
 func TestBackupRoundTripPreservesAnchorScheduleAndIndependentResult(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	scheduler, ok := any(src).(proofstore.STHAnchorScheduleStore)
 	if !ok {
 		t.Fatal("LocalStore does not implement STHAnchorScheduleStore")
@@ -275,7 +275,7 @@ func TestBackupRoundTripPreservesAnchorScheduleAndIndependentResult(t *testing.T
 		t.Fatalf("backup report = %+v", report)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	restored, err := Restore(ctx, dst, path)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -356,7 +356,7 @@ func TestRestoreRejectsLegacySchemaBeforeApplyingEntries(t *testing.T) {
 			if _, err := Verify(ctx, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), schema) {
 				t.Fatalf("Verify %s error=%v", schema, err)
 			}
-			dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+			dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 			if _, err := Restore(ctx, dst, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), schema) {
 				t.Fatalf("Restore %s error=%v", schema, err)
 			}
@@ -417,7 +417,7 @@ func TestVerifyRejectsMissingAndMixedSuiteBindings(t *testing.T) {
 func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	const rootCount = scanPageSize + 1
 	const closedAtUnixN = int64(100)
 
@@ -450,7 +450,7 @@ func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 		t.Fatalf("Verify Roots = %d, want %d", verified.Roots, rootCount)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	restored, err := Restore(ctx, dst, path)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -487,7 +487,7 @@ func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 func TestBackupCreateRejectsMissingManifestBundle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	if err := src.PutManifest(ctx, model.BatchManifest{
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "batch-missing-bundle",
@@ -524,7 +524,7 @@ func TestBackupCreateRejectsMissingManifestBundle(t *testing.T) {
 func TestBackupRoundTripPreservesGlobalOutboxStatuses(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	items := []model.GlobalLogOutboxItem{
 		{BatchID: "batch-pending", Status: model.AnchorStatePending, EnqueuedAtUnixN: 1},
 		{BatchID: "batch-published", Status: model.AnchorStatePublished, EnqueuedAtUnixN: 2, CompletedAtUnixN: 3},
@@ -542,7 +542,7 @@ func TestBackupRoundTripPreservesGlobalOutboxStatuses(t *testing.T) {
 	if report.GlobalOutboxes != len(items) {
 		t.Fatalf("GlobalOutboxes = %d, want %d", report.GlobalOutboxes, len(items))
 	}
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	if _, err := Restore(ctx, dst, path); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestCreateRejectsDirectoryTarget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	store := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	store := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	path := filepath.Join(t.TempDir(), "trustdb.tdbackup")
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("Mkdir(target) error = %v", err)
@@ -619,7 +619,7 @@ func TestRestoreRejectsInvalidResumeCheckpoint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	backupPath := filepath.Join(t.TempDir(), "trustdb.tdbackup")
 	if _, err := Create(ctx, src, backupPath, Options{Compression: "none"}); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -629,7 +629,7 @@ func TestRestoreRejectsInvalidResumeCheckpoint(t *testing.T) {
 		t.Fatalf("WriteFile(checkpoint) error = %v", err)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	_, err := RestoreWithOptions(ctx, dst, backupPath, RestoreOptions{
 		Resume:         true,
 		CheckpointPath: checkpointPath,
@@ -658,7 +658,7 @@ func TestCreateDoesNotReplaceTargetOnFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	path := filepath.Join(t.TempDir(), "trustdb.tdbackup")
 	original := []byte("existing backup content")
 	if err := os.WriteFile(path, original, 0o600); err != nil {
@@ -681,7 +681,7 @@ func TestCreateUsesCollisionResistantArchiveNames(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	ids := []string{"rec/1", "rec_2F1"}
 	for _, id := range ids {
 		if err := src.PutBundle(ctx, model.ProofBundle{

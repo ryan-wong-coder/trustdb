@@ -230,7 +230,7 @@ func validDecisionInputs(t *testing.T, idempotencyKey string) (model.SignedClaim
 
 	clientPrivate := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, ed25519.SeedSize))
 	serverPrivate := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, ed25519.SeedSize))
-	clientClaim := model.ClientClaim{
+	clientClaim := model.ClientClaim{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaClientClaim,
 		TenantID:        "tenant-a",
 		ClientID:        "client-a",
@@ -263,7 +263,7 @@ func validDecisionInputs(t *testing.T, idempotencyKey string) (model.SignedClaim
 		t.Fatalf("HashBytes(signature) error = %v", err)
 	}
 	position := model.WALPosition{SegmentID: 1, Offset: 64, Sequence: 7}
-	record := model.ServerRecord{
+	record := model.ServerRecord{CryptoSuite: "INTL_V1",
 		SchemaVersion:       model.SchemaServerRecord,
 		RecordID:            claim.RecordID(canonical, signed.Signature),
 		TenantID:            clientClaim.TenantID,
@@ -280,7 +280,7 @@ func validDecisionInputs(t *testing.T, idempotencyKey string) (model.SignedClaim
 			KeyStatus:           model.KeyStatusValid,
 		},
 	}
-	accepted := model.AcceptedReceipt{
+	accepted := model.AcceptedReceipt{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaAcceptedReceipt,
 		RecordID:        record.RecordID,
 		Status:          "accepted",

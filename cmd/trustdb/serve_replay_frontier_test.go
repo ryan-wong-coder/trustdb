@@ -11,6 +11,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/batch"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	durableidempotency "github.com/wowtrust/trustdb/internal/idempotency"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -122,7 +123,12 @@ func TestPebbleCheckpointedRestartUsesDurableIdempotencyWithoutWALAppend(t *test
 	}
 
 	storePath := filepath.Join(env.dir, "pebble")
-	store, err := pebblestore.Open(storePath)
+	store, err := pebblestore.OpenWithOptions(storePath, pebblestore.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "server-idem",
+		LogID:       "server-idem",
+		NamespaceID: "test-replay-frontier",
+	})
 	if err != nil {
 		t.Fatalf("pebble.Open() error = %v", err)
 	}
@@ -142,7 +148,12 @@ func TestPebbleCheckpointedRestartUsesDurableIdempotencyWithoutWALAppend(t *test
 
 	reopenedWAL := env.reopen(t)
 	defer reopenedWAL.Close()
-	store, err = pebblestore.Open(storePath)
+	store, err = pebblestore.OpenWithOptions(storePath, pebblestore.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "server-idem",
+		LogID:       "server-idem",
+		NamespaceID: "test-replay-frontier",
+	})
 	if err != nil {
 		t.Fatalf("pebble reopen error = %v", err)
 	}
@@ -526,7 +537,7 @@ func TestReplayRejectsLegacyCheckpointWithPrunedPrefix(t *testing.T) {
 		t.Fatalf("PruneSegmentsBefore(%d) removed=%d err=%v", cutoff, removed, err)
 	}
 
-	local := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "proofs")}
+	local := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "proofs"))
 	if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpoint,
 		SegmentID:     positions[len(positions)-1].SegmentID,
@@ -547,7 +558,7 @@ func TestReplayRejectsLegacyCheckpointWithPrunedPrefix(t *testing.T) {
 		t.Fatalf("checkpoint writes after missing prefix = %+v, want none", puts)
 	}
 
-	unsafeLocal := checkpointUnsafeLocalStore{LocalStore: proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "unsafe-proofs")}}
+	unsafeLocal := checkpointUnsafeLocalStore{LocalStore: newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "unsafe-proofs"))}
 	if err := unsafeLocal.PutCheckpoint(context.Background(), model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpoint,
 		SegmentID:     positions[len(positions)-1].SegmentID,
@@ -566,7 +577,7 @@ func TestReplayRejectsLegacyCheckpointWithPrunedPrefix(t *testing.T) {
 
 func TestReplayLegacyEmptyWALMigrationSafety(t *testing.T) {
 	t.Run("nonzero fails closed", func(t *testing.T) {
-		local := proofstore.LocalStore{Root: t.TempDir()}
+		local := newBoundTestLocalStore(t, t.TempDir())
 		if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{SchemaVersion: model.SchemaWALCheckpoint, LastSequence: 4}); err != nil {
 			t.Fatalf("PutCheckpoint() error = %v", err)
 		}
@@ -583,7 +594,7 @@ func TestReplayLegacyEmptyWALMigrationSafety(t *testing.T) {
 	})
 
 	t.Run("zero migrates without pruning", func(t *testing.T) {
-		local := proofstore.LocalStore{Root: t.TempDir()}
+		local := newBoundTestLocalStore(t, t.TempDir())
 		if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{SchemaVersion: model.SchemaWALCheckpoint}); err != nil {
 			t.Fatalf("PutCheckpoint() error = %v", err)
 		}
@@ -718,7 +729,7 @@ func TestReplayRejectsZeroTrustedCheckpointWithPrunedPrefix(t *testing.T) {
 		t.Fatalf("PruneSegmentsBefore(%d) removed=%d err=%v", positions[2].SegmentID, removed, err)
 	}
 
-	local := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "proofs")}
+	local := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "proofs"))
 	if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{SchemaVersion: model.SchemaWALCheckpointContiguous}); err != nil {
 		t.Fatalf("PutCheckpoint(v2 zero) error = %v", err)
 	}
@@ -865,7 +876,7 @@ func TestReplayRejectsTrustedCheckpointAgainstReplacedWAL(t *testing.T) {
 }
 
 func TestReplayRejectsTrustedNonzeroCheckpointWithEmptyWAL(t *testing.T) {
-	local := proofstore.LocalStore{Root: t.TempDir()}
+	local := newBoundTestLocalStore(t, t.TempDir())
 	if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     1,

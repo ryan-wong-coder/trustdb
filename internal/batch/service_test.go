@@ -22,7 +22,7 @@ const asyncProofWaitTimeout = 10 * time.Second
 func TestServiceCommitsFullBatch(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 2, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
@@ -59,7 +59,7 @@ func TestServiceRecordStatusMovesFromProcessingToCommitted(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	changes := make(chan []model.RecordStatus, 8)
 	svc := New(blockingEngine{block: block, entered: entered}, store, Options{
 		QueueSize:  1,
@@ -111,7 +111,7 @@ func TestServiceRecordStatusMovesFromProcessingToCommitted(t *testing.T) {
 func TestServiceShutdownFlushesPartialBatch(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 10, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1partial"), record("tr1partial"), accepted("tr1partial")); err != nil {
 		t.Fatalf("Enqueue() error = %v", err)
@@ -133,7 +133,7 @@ func TestServiceBlocksWhenQueueIsFullUntilCapacityIsAvailable(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	svc := New(blockingEngine{block: block, entered: entered}, proofstore.LocalStore{Root: t.TempDir()}, Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := New(blockingEngine{block: block, entered: entered}, newBoundTestLocalStore(t, t.TempDir()), Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1a"), record("tr1a"), accepted("tr1a")); err != nil {
 		t.Fatalf("Enqueue(a) error = %v", err)
 	}
@@ -171,7 +171,7 @@ func TestServiceFullQueueWaitHonorsCancellation(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	svc := New(blockingEngine{block: block, entered: entered}, proofstore.LocalStore{Root: t.TempDir()}, Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := New(blockingEngine{block: block, entered: entered}, newBoundTestLocalStore(t, t.TempDir()), Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1a"), record("tr1a"), accepted("tr1a")); err != nil {
 		t.Fatalf("Enqueue(a) error = %v", err)
 	}
@@ -211,7 +211,7 @@ func TestServiceShutdownWakesFullQueueWaiters(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	svc := New(blockingEngine{block: block, entered: entered}, proofstore.LocalStore{Root: t.TempDir()}, Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := New(blockingEngine{block: block, entered: entered}, newBoundTestLocalStore(t, t.TempDir()), Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1a"), record("tr1a"), accepted("tr1a")); err != nil {
 		t.Fatalf("Enqueue(a) error = %v", err)
 	}
@@ -258,7 +258,7 @@ func TestServiceShutdownWakesFullQueueWaiters(t *testing.T) {
 func TestServiceAdvancesCheckpointAfterCommit(t *testing.T) {
 	t.Parallel()
 
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 2, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
@@ -284,7 +284,7 @@ func TestServiceAdvancesCheckpointAfterCommit(t *testing.T) {
 func TestServiceCheckpointMonotonic(t *testing.T) {
 	t.Parallel()
 
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		CryptoSuite:   cryptosuite.INTLV1,
@@ -331,7 +331,7 @@ func TestServiceCheckpointMonotonic(t *testing.T) {
 func TestServiceSkipsCheckpointOnZeroSequence(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
@@ -356,7 +356,7 @@ func TestServiceUpdatesCheckpointGauge(t *testing.T) {
 	t.Parallel()
 
 	_, metrics := observability.NewRegistry()
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, metrics)
 	defer svc.Shutdown(context.Background())
 
@@ -393,7 +393,7 @@ func TestServiceInvokesOnCheckpointAdvanced(t *testing.T) {
 		hookCPs  []model.WALCheckpoint
 		hookFire = make(chan struct{}, 8)
 	)
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	svc := New(fakeEngine{}, store, Options{
 		QueueSize:  4,
 		MaxRecords: 1,
@@ -442,7 +442,7 @@ func TestServiceInvokesOnCheckpointAdvanced(t *testing.T) {
 
 func TestServiceKeepsWorkerCheckpointFailureVisible(t *testing.T) {
 	store := &checkpointRecordingStore{
-		LocalStore: proofstore.LocalStore{Root: t.TempDir()},
+		LocalStore: newBoundTestLocalStore(t, t.TempDir()),
 		failPuts:   1,
 	}
 	_, metrics := observability.NewRegistry()
@@ -488,7 +488,7 @@ func TestServiceAsyncProofModePublishesIndexBeforeBundle(t *testing.T) {
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	engine := blockingMaterializeEngine{block: block, entered: entered}
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync}, nil)
 	defer func() {
 		close(block)
@@ -526,7 +526,7 @@ func TestServiceAsyncProofModePublishesIndexBeforeBundle(t *testing.T) {
 func TestServiceNonInlineFallbackRejectsInconsistentProofCount(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(emptyBundleEngine{}, store, Options{
 		QueueSize:  4,
 		MaxRecords: 1,
@@ -555,7 +555,7 @@ func TestServiceOnDemandProofModeMaterializesOnce(t *testing.T) {
 	t.Parallel()
 
 	engine := &countingMaterializeEngine{}
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeOnDemand}, nil)
 	defer svc.Shutdown(context.Background())
 
@@ -592,7 +592,7 @@ func TestServiceOnDemandRecoverManifestKeepsBundleLazy(t *testing.T) {
 
 	items := []Accepted{{Signed: signed("recover-ondemand"), Record: recordWithWAL("recover-ondemand", 51), Accepted: accepted("recover-ondemand")}}
 	engine := &countingMaterializeEngine{}
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	closedAt := time.Unix(0, 1234).UTC()
 	root, indexes, err := engine.CommitBatchIndexes("recover-batch", closedAt, []model.SignedClaim{items[0].Signed}, []model.ServerRecord{items[0].Record}, []model.AcceptedReceipt{items[0].Accepted})
 	if err != nil {
@@ -930,7 +930,7 @@ func accepted(recordID string) model.AcceptedReceipt {
 func TestServiceInitialSeqResumesSuffix(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(fakeEngine{}, store, Options{
 		QueueSize:  4,
 		MaxRecords: 1, // commit immediately, no batching delay
@@ -972,7 +972,7 @@ func TestServiceInitialSeqResumesSuffix(t *testing.T) {
 func TestServiceInitialSeqZeroPreservesLegacyBehaviour(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(fakeEngine{}, store, Options{
 		QueueSize:  4,
 		MaxRecords: 1,

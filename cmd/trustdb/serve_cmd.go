@@ -299,8 +299,21 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if err := validateSemanticModes(batchProofMode, proofstoreRecordIndexMode, proofstoreArtifactSyncMode); err != nil {
 				return err
 			}
+			nodeID := stringValue(cmd, rt, "server-id", "server_id")
+			logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
+			if logID == "" {
+				logID = nodeID
+			}
+			walID, err := filepath.Abs(filepath.Clean(walPath))
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "resolve wal identity", err)
+			}
 			reg, metrics := observability.NewRegistry()
 			walOpts := wal.Options{
+				CryptoSuite:         serverKey.CryptoSuite,
+				NodeID:              nodeID,
+				LogID:               logID,
+				NamespaceID:         "wal:" + walID,
 				MaxSegmentBytes:     walMaxSegmentBytes,
 				FsyncMode:           walFsyncMode,
 				GroupCommitInterval: walGroupCommitInterval,
@@ -354,15 +367,6 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			}
 
 			idempotency := app.NewIdempotencyIndex()
-			nodeID := stringValue(cmd, rt, "server-id", "server_id")
-			walID, err := filepath.Abs(filepath.Clean(walPath))
-			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInvalidArgument, "resolve wal identity", err)
-			}
-			logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
-			if logID == "" {
-				logID = nodeID
-			}
 			engine := app.LocalEngine{
 				ServerID:        nodeID,
 				LogID:           logID,
@@ -410,6 +414,9 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				IndexStorageTokens:           !strings.EqualFold(proofstoreRecordIndexMode, "no_storage_tokens"),
 				IndexStorageTokensConfigured: cmd.Flags().Changed("proofstore-index-storage-tokens"),
 				CryptoSuite:                  serverKey.CryptoSuite,
+				NodeID:                       nodeID,
+				LogID:                        logID,
+				NamespaceID:                  proofstoreNamespaceID(metaKind, metaPath, proofstoreTiKVKeyspace, proofstoreTiKVNamespace),
 			})
 			if err != nil {
 				return err
@@ -454,6 +461,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				Bool("global_log_enabled", rt.cfg.GlobalLog.Enabled).
 				Msg("semantic performance profile active")
 			batchOpts := batch.Options{
+				CryptoSuite:              serverKey.CryptoSuite,
 				QueueSize:                batchQueueSize,
 				MaxRecords:               batchMaxRecords,
 				MaxDelay:                 batchMaxDelay,
@@ -2143,6 +2151,25 @@ func stringOrLiteral(cmd *cobra.Command, flagName, flagValue, fallback string) s
 		return flagValue
 	}
 	return fallback
+}
+
+func proofstoreNamespaceID(kind, path, tikvKeyspace, tikvNamespace string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), string(proofstore.BackendTiKV)) {
+		keyspace := strings.TrimSpace(tikvKeyspace)
+		if keyspace == "" {
+			keyspace = "default"
+		}
+		namespace := strings.TrimSpace(tikvNamespace)
+		if namespace == "" {
+			namespace = "default"
+		}
+		return "tikv:" + keyspace + ":" + namespace
+	}
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		absolute = filepath.Clean(path)
+	}
+	return strings.ToLower(strings.TrimSpace(kind)) + ":" + absolute
 }
 
 func splitCSV(text string) []string {

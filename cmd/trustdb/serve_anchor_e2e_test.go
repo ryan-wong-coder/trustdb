@@ -26,7 +26,6 @@ import (
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -76,7 +75,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Unix(300, 0) },
 	}
-	proofStore := proofstore.LocalStore{Root: proofDir}
+	proofStore := newBoundTestLocalStore(t, proofDir)
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 8, Workers: 2}, metrics)
 	defer ingestSvc.Shutdown(context.Background())
 
@@ -286,7 +285,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 // Startup backfill must enqueue the event exactly once; the outbox worker owns
 // the later append + durable STH anchor candidate merge.
 func TestBackfillGlobalLog(t *testing.T) {
-	proofStore := proofstore.LocalStore{Root: t.TempDir()}
+	proofStore := newBoundTestLocalStore(t, t.TempDir())
 	ctx := context.Background()
 
 	rootHash := bytes.Repeat([]byte{7}, 32)

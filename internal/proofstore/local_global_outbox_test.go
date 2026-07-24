@@ -13,12 +13,12 @@ import (
 func TestLocalStoreGlobalOutboxSeparatesPendingAndPublished(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	items := []model.GlobalLogOutboxItem{
-		{BatchID: "batch-a", Status: model.AnchorStatePending, EnqueuedAtUnixN: 10},
-		{BatchID: "batch-b", Status: model.AnchorStatePublished, EnqueuedAtUnixN: 20, CompletedAtUnixN: 21},
-		{BatchID: "batch/c", Status: model.AnchorStatePending, EnqueuedAtUnixN: 30, NextAttemptUnixN: 100},
+		{CryptoSuite: "INTL_V1", BatchID: "batch-a", Status: model.AnchorStatePending, EnqueuedAtUnixN: 10},
+		{CryptoSuite: "INTL_V1", BatchID: "batch-b", Status: model.AnchorStatePublished, EnqueuedAtUnixN: 20, CompletedAtUnixN: 21},
+		{CryptoSuite: "INTL_V1", BatchID: "batch/c", Status: model.AnchorStatePending, EnqueuedAtUnixN: 30, NextAttemptUnixN: 100},
 	}
 	for _, item := range items {
 		if err := store.EnqueueGlobalLog(ctx, item); err != nil {
@@ -58,10 +58,10 @@ func TestLocalStoreGlobalOutboxSeparatesPendingAndPublished(t *testing.T) {
 func TestLocalStoreGlobalOutboxPublishAndRescheduleTransitionStatus(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	const batchID = "batch-transition"
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		BatchID:         batchID,
 		Status:          model.AnchorStatePending,
 		EnqueuedAtUnixN: 10,
@@ -78,7 +78,7 @@ func TestLocalStoreGlobalOutboxPublishAndRescheduleTransitionStatus(t *testing.T
 	if _, err := os.Stat(store.globalOutboxPath(model.AnchorStatePublished, batchID)); !os.IsNotExist(err) {
 		t.Fatalf("published path before publish error = %v, want not exist", err)
 	}
-	sth := model.SignedTreeHead{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1}
+	sth := model.SignedTreeHead{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1}
 	if err := store.MarkGlobalLogPublished(ctx, batchID, sth); err != nil {
 		t.Fatalf("MarkGlobalLogPublished: %v", err)
 	}
@@ -97,10 +97,10 @@ func TestLocalStoreGlobalOutboxPublishAndRescheduleTransitionStatus(t *testing.T
 func TestLocalStoreGlobalOutboxDuplicateTransitionConverges(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	const batchID = "batch-duplicate"
-	pending := model.GlobalLogOutboxItem{
+	pending := model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaGlobalLogOutbox,
 		BatchID:         batchID,
 		Status:          model.AnchorStatePending,
@@ -128,7 +128,7 @@ func TestLocalStoreGlobalOutboxDuplicateTransitionConverges(t *testing.T) {
 	if err != nil || len(pendingItems) != 1 {
 		t.Fatalf("ListPendingGlobalLog duplicate = %+v err=%v", pendingItems, err)
 	}
-	if err := store.MarkGlobalLogPublished(ctx, batchID, model.SignedTreeHead{TreeSize: 1}); err != nil {
+	if err := store.MarkGlobalLogPublished(ctx, batchID, model.SignedTreeHead{CryptoSuite: "INTL_V1", TreeSize: 1}); err != nil {
 		t.Fatalf("MarkGlobalLogPublished duplicate: %v", err)
 	}
 	if _, err := os.Stat(store.globalOutboxPath(model.AnchorStatePending, batchID)); !os.IsNotExist(err) {
@@ -139,13 +139,13 @@ func TestLocalStoreGlobalOutboxDuplicateTransitionConverges(t *testing.T) {
 func TestLocalStoreGlobalOutboxPublishesCandidateBeforeConverging(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	batchIDs := []string{"batch-anchor-1", "batch-anchor-2"}
 	sths := []model.SignedTreeHead{localScheduleSTH(key, 1, 0x11), localScheduleSTH(key, 2, 0x22)}
 	for _, batchID := range batchIDs {
-		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{BatchID: batchID, Status: model.AnchorStatePending}); err != nil {
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1", BatchID: batchID, Status: model.AnchorStatePending}); err != nil {
 			t.Fatalf("EnqueueGlobalLog(%q): %v", batchID, err)
 		}
 	}
@@ -173,13 +173,13 @@ func TestLocalStoreGlobalOutboxPublishesCandidateBeforeConverging(t *testing.T) 
 func TestLocalStoreGlobalOutboxValidatesAnchorCandidateBeforeMutation(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	batchIDs := []string{"batch-valid-1", "batch-valid-2"}
 	sths := []model.SignedTreeHead{localScheduleSTH(key, 1, 0x11), localScheduleSTH(key, 2, 0x22)}
 	for _, batchID := range batchIDs {
-		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{BatchID: batchID, Status: model.AnchorStatePending}); err != nil {
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1", BatchID: batchID, Status: model.AnchorStatePending}); err != nil {
 			t.Fatalf("EnqueueGlobalLog(%q): %v", batchID, err)
 		}
 	}
@@ -203,27 +203,27 @@ func TestLocalStoreReplaysDurableAnchorPublicationJournal(t *testing.T) {
 
 	ctx := context.Background()
 	root := t.TempDir()
-	store := LocalStore{Root: root}
+	store := testLocalStore(root)
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	batchIDs := []string{"batch-journal-1", "batch-journal-2"}
 	sths := []model.SignedTreeHead{localScheduleSTH(key, 1, 0x41), localScheduleSTH(key, 2, 0x42)}
 	for i, batchID := range batchIDs {
-		if err := store.PutRecordIndex(ctx, model.RecordIndex{
+		if err := store.PutRecordIndex(ctx, model.RecordIndex{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaRecordIndex, RecordID: "record-journal-" + batchID,
 			BatchID: batchID, ProofLevel: "L3", ReceivedAtUnixN: int64(i + 1),
 		}); err != nil {
 			t.Fatalf("PutRecordIndex(%s): %v", batchID, err)
 		}
-		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: batchID,
-			BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{byte(i + 1)}, TreeSize: 1},
+			BatchRoot: model.BatchRoot{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{byte(i + 1)}, TreeSize: 1},
 			Status:    model.AnchorStatePending,
 		}); err != nil {
 			t.Fatalf("EnqueueGlobalLog(%s): %v", batchID, err)
 		}
 	}
 	candidate := model.STHAnchorCandidate{Key: key, STH: sths[1], ObservedAtUnixN: 100, DueAtUnixN: 200}
-	schedule, changed, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, candidate, nil)
+	schedule, changed, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{CryptoSuite: "INTL_V1"}, false, candidate, nil)
 	if err != nil || !changed {
 		t.Fatalf("MergeCandidate changed=%v err=%v", changed, err)
 	}
@@ -237,7 +237,7 @@ func TestLocalStoreReplaysDurableAnchorPublicationJournal(t *testing.T) {
 		t.Fatalf("write publication journal: %v", err)
 	}
 
-	restarted := LocalStore{Root: root}
+	restarted := testLocalStore(root)
 	gotSchedule, found, err := restarted.GetSTHAnchorSchedule(ctx, key)
 	if err != nil || !found || gotSchedule.Pending == nil || gotSchedule.Pending.Target.TreeSize != 2 {
 		t.Fatalf("replayed schedule=%+v found=%v err=%v", gotSchedule, found, err)
@@ -262,19 +262,19 @@ func TestLocalStoreJournalReplayRemovesStalePendingAfterPublishedCopy(t *testing
 
 	ctx := context.Background()
 	root := t.TempDir()
-	store := LocalStore{Root: root}
+	store := testLocalStore(root)
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	batchID := "batch-published-before-pending-delete"
 	sth := localScheduleSTH(key, 1, 0x51)
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: batchID,
-		BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{0x51}, TreeSize: 1},
+		BatchRoot: model.BatchRoot{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{0x51}, TreeSize: 1},
 		Status:    model.AnchorStatePending,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	candidate := model.STHAnchorCandidate{Key: key, STH: sth, ObservedAtUnixN: 100, DueAtUnixN: 200}
-	schedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, candidate, nil)
+	schedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{CryptoSuite: "INTL_V1"}, false, candidate, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,9 +285,9 @@ func TestLocalStoreJournalReplayRemovesStalePendingAfterPublishedCopy(t *testing
 	if err := store.writeSTHAnchorSchedule(schedule); err != nil {
 		t.Fatal(err)
 	}
-	published := model.GlobalLogOutboxItem{
+	published := model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: batchID,
-		BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{0x51}, TreeSize: 1},
+		BatchRoot: model.BatchRoot{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: []byte{0x51}, TreeSize: 1},
 		Status:    model.AnchorStatePublished, STH: sth, CompletedAtUnixN: 300,
 	}
 	if err := writeCBORAtomic(store.globalOutboxPath(model.AnchorStatePublished, batchID), published); err != nil {
@@ -297,7 +297,7 @@ func TestLocalStoreJournalReplayRemovesStalePendingAfterPublishedCopy(t *testing
 		t.Fatal(err)
 	}
 
-	restarted := LocalStore{Root: root}
+	restarted := testLocalStore(root)
 	if _, found, err := restarted.GetSTHAnchorSchedule(ctx, key); err != nil || !found {
 		t.Fatalf("GetSTHAnchorSchedule found=%v err=%v", found, err)
 	}
@@ -313,12 +313,12 @@ func TestLocalStoreJournalReplayRejectsPathKeyMismatch(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	expected := model.STHAnchorScheduleKey{NodeID: "node-a", LogID: "log-a", SinkName: "file"}
 	journalKey := model.STHAnchorScheduleKey{NodeID: "node-b", LogID: "log-b", SinkName: "file"}
 	sth := localScheduleSTH(journalKey, 1, 0x61)
 	candidate := model.STHAnchorCandidate{Key: journalKey, STH: sth, ObservedAtUnixN: 100, DueAtUnixN: 200}
-	schedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, candidate, nil)
+	schedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{CryptoSuite: "INTL_V1"}, false, candidate, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,8 +341,8 @@ func TestLocalStoreJournalReplayRejectsPathKeyMismatch(t *testing.T) {
 func TestLocalStoreGlobalOutboxRejectsUnknownStatus(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
-	err := store.EnqueueGlobalLog(context.Background(), model.GlobalLogOutboxItem{BatchID: "batch-invalid", Status: "unknown"})
+	store := testLocalStore(t.TempDir())
+	err := store.EnqueueGlobalLog(context.Background(), model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1", BatchID: "batch-invalid", Status: "unknown"})
 	if trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
 		t.Fatalf("EnqueueGlobalLog error = %v, want invalid argument", err)
 	}

@@ -13,7 +13,7 @@ import (
 
 func seedGlobalLogForCLI(t *testing.T, proofDir string) {
 	t.Helper()
-	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: proofDir})
+	store, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendFile, proofDir))
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
@@ -57,6 +57,7 @@ func TestGlobalLogInclusionCommand_DefaultsToJSONStdout(t *testing.T) {
 		"global-log", "proof", "inclusion",
 		"--batch-id", "batch-1",
 		"--metastore-path", proofDir,
+		"--crypto-suite", "INTL_V1",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("global-log proof inclusion: %v stderr=%s", err, errOut.String())
@@ -84,6 +85,7 @@ func TestGlobalLogInclusionCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 		"global-log", "proof", "inclusion",
 		"--batch-id", "batch-1",
 		"--metastore-path", proofDir,
+		"--crypto-suite", "INTL_V1",
 		"--out", outPath,
 	})
 	if err := cmd.Execute(); err != nil {

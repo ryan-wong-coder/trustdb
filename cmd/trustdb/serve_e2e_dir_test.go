@@ -24,7 +24,6 @@ import (
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -90,7 +89,7 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
-	proofStore := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: proofDir}}
+	proofStore := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, proofDir)}
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 16, Workers: 2}, metrics)
 	defer ingestSvc.Shutdown(context.Background())
 

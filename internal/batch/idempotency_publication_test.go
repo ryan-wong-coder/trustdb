@@ -83,7 +83,7 @@ func (s *publishingCheckpointStore) snapshot() ([]string, []model.BatchManifest,
 }
 
 func TestServicePublishesIdempotencyBeforeCheckpoint(t *testing.T) {
-	store := &publishingCheckpointStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &publishingCheckpointStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	svc := New(fakeEngine{}, store, Options{}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "keyed")
@@ -109,7 +109,7 @@ func TestServicePublishesIdempotencyBeforeCheckpoint(t *testing.T) {
 func TestServicePublicationFailurePreventsCheckpoint(t *testing.T) {
 	publishErr := errors.New("injected publication failure")
 	store := &publishingCheckpointStore{
-		LocalStore: proofstore.LocalStore{Root: t.TempDir()},
+		LocalStore: newBoundTestLocalStore(t, t.TempDir()),
 		publishErr: publishErr,
 	}
 	svc := New(fakeEngine{}, store, Options{}, nil)
@@ -128,7 +128,7 @@ func TestServicePublicationFailurePreventsCheckpoint(t *testing.T) {
 }
 
 func TestServiceKeepsEmptyIdempotencyKeyOptOut(t *testing.T) {
-	store := &publishingCheckpointStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &publishingCheckpointStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	svc := New(fakeEngine{}, store, Options{}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "")

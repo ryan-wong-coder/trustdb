@@ -77,7 +77,7 @@ func testBatchArtifactsOptional(t *testing.T, newStore Factory) {
 		recordBundle("bulk-rec-1", "tenant-a", "client-a", "bulk-batch", 100),
 		recordBundle("bulk-rec-2", "tenant-a", "client-b", "bulk-batch", 200),
 	}
-	root := model.BatchRoot{
+	root := model.BatchRoot{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "bulk-batch",
 		BatchRoot:     []byte{1, 2, 3},
@@ -120,7 +120,7 @@ func testBundleRoundTrip(t *testing.T, newStore Factory) {
 	defer cleanup()
 	ctx := context.Background()
 
-	bundle := model.ProofBundle{SchemaVersion: model.SchemaProofBundle, RecordID: "rec/1"}
+	bundle := model.ProofBundle{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaProofBundle, RecordID: "rec/1"}
 	if err := store.PutBundle(ctx, bundle); err != nil {
 		t.Fatalf("PutBundle: %v", err)
 	}
@@ -153,11 +153,11 @@ func testBundleOverwrite(t *testing.T, newStore Factory) {
 	defer cleanup()
 	ctx := context.Background()
 
-	first := model.ProofBundle{SchemaVersion: model.SchemaProofBundle, RecordID: "rec-1"}
+	first := model.ProofBundle{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaProofBundle, RecordID: "rec-1"}
 	if err := store.PutBundle(ctx, first); err != nil {
 		t.Fatalf("first PutBundle: %v", err)
 	}
-	second := model.ProofBundle{SchemaVersion: "v2", RecordID: "rec-1"}
+	second := model.ProofBundle{CryptoSuite: "INTL_V1", SchemaVersion: "v2", RecordID: "rec-1"}
 	if err := store.PutBundle(ctx, second); err != nil {
 		t.Fatalf("second PutBundle: %v", err)
 	}
@@ -258,7 +258,7 @@ func testRecordIndexProofLevelPromotes(t *testing.T, newStore Factory) {
 	if err := store.PutBundle(ctx, bundle); err != nil {
 		t.Fatalf("PutBundle: %v", err)
 	}
-	if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{
+	if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogLeaf,
 		BatchID:       "batch-1",
 		BatchRoot:     []byte{1},
@@ -266,11 +266,11 @@ func testRecordIndexProofLevelPromotes(t *testing.T, newStore Factory) {
 	}); err != nil {
 		t.Fatalf("PutGlobalLeaf: %v", err)
 	}
-	sth := model.SignedTreeHead{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{1}}
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+	sth := model.SignedTreeHead{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{1}}
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogOutbox,
 		BatchID:       "batch-1",
-		BatchRoot:     model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", BatchRoot: []byte{1}, TreeSize: 1},
+		BatchRoot:     model.BatchRoot{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", BatchRoot: []byte{1}, TreeSize: 1},
 		Status:        model.AnchorStatePending,
 	}); err != nil {
 		t.Fatalf("EnqueueGlobalLog: %v", err)
@@ -314,7 +314,7 @@ func testManifestRoundTrip(t *testing.T, newStore Factory) {
 	defer cleanup()
 	ctx := context.Background()
 
-	manifest := model.BatchManifest{
+	manifest := model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "batch-1",
 		State:         model.BatchStatePrepared,
@@ -341,7 +341,7 @@ func testManifestListIsSorted(t *testing.T, newStore Factory) {
 
 	ids := []string{"batch-3", "batch-1", "batch-2"}
 	for _, id := range ids {
-		if err := store.PutManifest(ctx, model.BatchManifest{
+		if err := store.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchManifest,
 			BatchID:       id,
 			State:         model.BatchStatePrepared,
@@ -370,7 +370,7 @@ func testManifestListAfterPaginates(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for _, id := range []string{"batch-3", "batch-1", "batch-2"} {
-		if err := store.PutManifest(ctx, model.BatchManifest{
+		if err := store.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchManifest,
 			BatchID:       id,
 			State:         model.BatchStatePrepared,
@@ -401,7 +401,7 @@ func testRootListIsReverseChrono(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for i, ts := range []int64{100, 200, 150} {
-		if err := store.PutRoot(ctx, model.BatchRoot{
+		if err := store.PutRoot(ctx, model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       []string{"a", "b", "c"}[i],
 			BatchRoot:     []byte{byte(i)},
@@ -438,7 +438,7 @@ func testRootListAcceptsHugeLimit(t *testing.T, newStore Factory) {
 	if len(roots) != 0 {
 		t.Fatalf("ListRoots empty store len = %d, want 0", len(roots))
 	}
-	if err := store.PutRoot(ctx, model.BatchRoot{
+	if err := store.PutRoot(ctx, model.BatchRoot{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "batch-huge-limit",
 		BatchRoot:     []byte{1, 2, 3},
@@ -462,7 +462,7 @@ func testLatestRoot(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for i, ts := range []int64{100, 300, 200} {
-		if err := store.PutRoot(ctx, model.BatchRoot{
+		if err := store.PutRoot(ctx, model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       []string{"a", "b", "c"}[i],
 			ClosedAtUnixN: ts,
@@ -486,9 +486,9 @@ func testRootListPagePaginates(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for _, root := range []model.BatchRoot{
-		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", ClosedAtUnixN: 100},
-		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-2", ClosedAtUnixN: 200},
-		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-3", ClosedAtUnixN: 300},
+		{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: "INTL_V1", BatchID: "batch-1", ClosedAtUnixN: 100},
+		{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: "INTL_V1", BatchID: "batch-2", ClosedAtUnixN: 200},
+		{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: "INTL_V1", BatchID: "batch-3", ClosedAtUnixN: 300},
 	} {
 		if err := store.PutRoot(ctx, root); err != nil {
 			t.Fatalf("PutRoot %s: %v", root.BatchID, err)
@@ -522,15 +522,15 @@ func testBatchTreeArtifactsRoundTrip(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	leaves := []model.BatchTreeLeaf{
-		{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-tree", RecordID: "rec-0", LeafIndex: 0, LeafHash: []byte{1}},
-		{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-tree", RecordID: "rec-1", LeafIndex: 1, LeafHash: []byte{2}},
-		{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-tree", RecordID: "rec-2", LeafIndex: 2, LeafHash: []byte{3}},
+		{SchemaVersion: model.SchemaBatchTreeLeaf, CryptoSuite: "INTL_V1", BatchID: "batch-tree", RecordID: "rec-0", LeafIndex: 0, LeafHash: []byte{1}},
+		{SchemaVersion: model.SchemaBatchTreeLeaf, CryptoSuite: "INTL_V1", BatchID: "batch-tree", RecordID: "rec-1", LeafIndex: 1, LeafHash: []byte{2}},
+		{SchemaVersion: model.SchemaBatchTreeLeaf, CryptoSuite: "INTL_V1", BatchID: "batch-tree", RecordID: "rec-2", LeafIndex: 2, LeafHash: []byte{3}},
 	}
 	nodes := []model.BatchTreeNode{
-		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 0, StartIndex: 0, Width: 1, Hash: []byte{1}},
-		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 0, StartIndex: 1, Width: 1, Hash: []byte{2}},
-		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 1, StartIndex: 0, Width: 2, Hash: []byte{4}},
-		{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-tree", Level: 2, StartIndex: 0, Width: 3, Hash: []byte{5}},
+		{SchemaVersion: model.SchemaBatchTreeNode, CryptoSuite: "INTL_V1", BatchID: "batch-tree", Level: 0, StartIndex: 0, Width: 1, Hash: []byte{1}},
+		{SchemaVersion: model.SchemaBatchTreeNode, CryptoSuite: "INTL_V1", BatchID: "batch-tree", Level: 0, StartIndex: 1, Width: 1, Hash: []byte{2}},
+		{SchemaVersion: model.SchemaBatchTreeNode, CryptoSuite: "INTL_V1", BatchID: "batch-tree", Level: 1, StartIndex: 0, Width: 2, Hash: []byte{4}},
+		{SchemaVersion: model.SchemaBatchTreeNode, CryptoSuite: "INTL_V1", BatchID: "batch-tree", Level: 2, StartIndex: 0, Width: 3, Hash: []byte{5}},
 	}
 	if err := store.PutBatchTreeArtifacts(ctx, leaves, nodes); err != nil {
 		t.Fatalf("PutBatchTreeArtifacts: %v", err)
@@ -571,7 +571,7 @@ func testCheckpointRoundTrip(t *testing.T, newStore Factory) {
 	defer cleanup()
 	ctx := context.Background()
 
-	cp := model.WALCheckpoint{
+	cp := model.WALCheckpoint{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaWALCheckpoint,
 		SegmentID:     7,
 		LastSequence:  101,
@@ -623,7 +623,7 @@ func testConcurrentPutBundle(t *testing.T, newStore Factory) {
 			defer wg.Done()
 			for j := 0; j < perWorker; j++ {
 				id := idForWorker(worker, j)
-				if err := store.PutBundle(ctx, model.ProofBundle{
+				if err := store.PutBundle(ctx, model.ProofBundle{CryptoSuite: "INTL_V1",
 					SchemaVersion: model.SchemaProofBundle,
 					RecordID:      id,
 				}); err != nil {
@@ -651,7 +651,7 @@ func testGlobalLogRoundTrip(t *testing.T, newStore Factory) {
 	defer cleanup()
 	ctx := context.Background()
 
-	leaf := model.GlobalLogLeaf{
+	leaf := model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
 		BatchID:            "batch-1",
 		BatchRoot:          []byte{1, 2, 3},
@@ -685,7 +685,7 @@ func testGlobalLogRoundTrip(t *testing.T, newStore Factory) {
 	if len(leaves) != 1 || leaves[0].BatchID != "batch-1" {
 		t.Fatalf("ListGlobalLeaves = %+v", leaves)
 	}
-	sth := model.SignedTreeHead{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{8}, TimestampUnixN: 123}
+	sth := model.SignedTreeHead{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 1, RootHash: []byte{8}, TimestampUnixN: 123}
 	if err := store.PutSignedTreeHead(ctx, sth); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
@@ -712,8 +712,8 @@ func testGlobalLogListPendingRespectsBackoff(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for _, item := range []model.GlobalLogOutboxItem{
-		{BatchID: "batch-ready", EnqueuedAtUnixN: 100, NextAttemptUnixN: 100},
-		{BatchID: "batch-future", EnqueuedAtUnixN: 200, NextAttemptUnixN: 200},
+		{CryptoSuite: "INTL_V1", BatchID: "batch-ready", EnqueuedAtUnixN: 100, NextAttemptUnixN: 100},
+		{CryptoSuite: "INTL_V1", BatchID: "batch-future", EnqueuedAtUnixN: 200, NextAttemptUnixN: 200},
 	} {
 		if err := store.EnqueueGlobalLog(ctx, item); err != nil {
 			t.Fatalf("EnqueueGlobalLog %s: %v", item.BatchID, err)
@@ -750,14 +750,16 @@ func testGlobalLogListPendingScopesStream(t *testing.T, newStore Factory) {
 
 	items := []model.GlobalLogOutboxItem{
 		{
+			CryptoSuite:      "INTL_V1",
 			BatchID:          "batch-foreign-stream",
-			BatchRoot:        model.BatchRoot{BatchID: "batch-foreign-stream", NodeID: "node-a", LogID: "log-a"},
+			BatchRoot:        model.BatchRoot{CryptoSuite: "INTL_V1", BatchID: "batch-foreign-stream", NodeID: "node-a", LogID: "log-a"},
 			EnqueuedAtUnixN:  10,
 			NextAttemptUnixN: 10,
 		},
 		{
+			CryptoSuite:      "INTL_V1",
 			BatchID:          "batch-local-stream",
-			BatchRoot:        model.BatchRoot{BatchID: "batch-local-stream", NodeID: "node-b", LogID: "log-b"},
+			BatchRoot:        model.BatchRoot{CryptoSuite: "INTL_V1", BatchID: "batch-local-stream", NodeID: "node-b", LogID: "log-b"},
 			EnqueuedAtUnixN:  20,
 			NextAttemptUnixN: 20,
 		},
@@ -785,7 +787,7 @@ func testGlobalLogListPendingScopesStream(t *testing.T, newStore Factory) {
 	if err != nil || len(got) != 1 || got[0].Attempts != 1 {
 		t.Fatalf("scoped list after retry = %+v err=%v", got, err)
 	}
-	if err := store.MarkGlobalLogPublished(ctx, "batch-local-stream", model.SignedTreeHead{TreeSize: 1}); err != nil {
+	if err := store.MarkGlobalLogPublished(ctx, "batch-local-stream", model.SignedTreeHead{CryptoSuite: "INTL_V1", TreeSize: 1}); err != nil {
 		t.Fatalf("MarkGlobalLogPublished: %v", err)
 	}
 	got, err = store.ListPendingGlobalLogForStream(ctx, "node-b", "log-b", 300, 1)
@@ -800,7 +802,7 @@ func testGlobalLogAppendCommitRoundTrip(t *testing.T, newStore Factory) {
 	defer cleanup()
 	ctx := context.Background()
 
-	leaf := model.GlobalLogLeaf{
+	leaf := model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
 		BatchID:            "batch-append-1",
 		BatchRoot:          []byte{1, 2, 3},
@@ -810,7 +812,7 @@ func testGlobalLogAppendCommitRoundTrip(t *testing.T, newStore Factory) {
 		LeafHash:           []byte{9},
 		AppendedAtUnixN:    100,
 	}
-	node := model.GlobalLogNode{
+	node := model.GlobalLogNode{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaGlobalLogNode,
 		Level:          0,
 		StartIndex:     0,
@@ -818,14 +820,14 @@ func testGlobalLogAppendCommitRoundTrip(t *testing.T, newStore Factory) {
 		Hash:           []byte{9},
 		CreatedAtUnixN: 101,
 	}
-	state := model.GlobalLogState{
+	state := model.GlobalLogState{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaGlobalLogState,
 		TreeSize:       1,
 		RootHash:       []byte{9},
 		Frontier:       [][]byte{{9}},
 		UpdatedAtUnixN: 102,
 	}
-	sth := model.SignedTreeHead{
+	sth := model.SignedTreeHead{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeSize:       1,
 		RootHash:       []byte{9},
@@ -887,10 +889,10 @@ func testGlobalLogPublishedBatchWithAnchorCandidateOptional(t *testing.T, newSto
 	batchIDs := []string{"anchor-batch-1", "anchor-batch-2"}
 	sths := []model.SignedTreeHead{scheduleSTH(key, 1, 0x11), scheduleSTH(key, 2, 0x22)}
 	for i := range batchIDs {
-		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaGlobalLogOutbox,
 			BatchID:       batchIDs[i],
-			BatchRoot:     model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: batchIDs[i], BatchRoot: []byte{byte(i + 1)}, TreeSize: 1},
+			BatchRoot:     model.BatchRoot{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchRoot, BatchID: batchIDs[i], BatchRoot: []byte{byte(i + 1)}, TreeSize: 1},
 			Status:        model.AnchorStatePending,
 		}); err != nil {
 			t.Fatalf("EnqueueGlobalLog %s: %v", batchIDs[i], err)
@@ -915,9 +917,9 @@ func testGlobalLogPublishedBatchWithAnchorCandidateOptional(t *testing.T, newSto
 	}
 
 	const nextBatchID = "anchor-batch-3"
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: nextBatchID,
-		BatchRoot: model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: nextBatchID, BatchRoot: []byte{3}, TreeSize: 1},
+		BatchRoot: model.BatchRoot{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchRoot, BatchID: nextBatchID, BatchRoot: []byte{3}, TreeSize: 1},
 		Status:    model.AnchorStatePending,
 	}); err != nil {
 		t.Fatalf("EnqueueGlobalLog next: %v", err)
@@ -940,7 +942,7 @@ func testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t *testing.T
 	ctx := context.Background()
 
 	err := store.CommitGlobalLogAppend(ctx, model.GlobalLogAppend{
-		Leaf: model.GlobalLogLeaf{
+		Leaf: model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 			SchemaVersion:      model.SchemaGlobalLogLeaf,
 			BatchID:            "batch-invalid-node",
 			BatchRoot:          []byte{1, 2, 3},
@@ -952,19 +954,20 @@ func testGlobalLogAppendCommitRejectsInvalidNodeWithoutPartialWrite(t *testing.T
 		},
 		Nodes: []model.GlobalLogNode{{
 			SchemaVersion:  model.SchemaGlobalLogNode,
+			CryptoSuite:    "INTL_V1",
 			Level:          0,
 			StartIndex:     0,
 			Hash:           []byte{9},
 			CreatedAtUnixN: 101,
 		}},
-		State: model.GlobalLogState{
+		State: model.GlobalLogState{CryptoSuite: "INTL_V1",
 			SchemaVersion:  model.SchemaGlobalLogState,
 			TreeSize:       1,
 			RootHash:       []byte{9},
 			Frontier:       [][]byte{{9}},
 			UpdatedAtUnixN: 102,
 		},
-		STH: model.SignedTreeHead{
+		STH: model.SignedTreeHead{CryptoSuite: "INTL_V1",
 			SchemaVersion:  model.SchemaSignedTreeHead,
 			TreeSize:       1,
 			RootHash:       []byte{9},
@@ -994,7 +997,7 @@ func testGlobalLogTileRoundTrip(t *testing.T, newStore Factory) {
 	defer cleanup()
 	ctx := context.Background()
 
-	tile := model.GlobalLogTile{
+	tile := model.GlobalLogTile{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogTile,
 		Level:         0,
 		StartIndex:    0,
@@ -1021,7 +1024,7 @@ func testGlobalLogPagedStateRoundTrip(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for i := uint64(0); i < 2; i++ {
-		leaf := model.GlobalLogLeaf{
+		leaf := model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaGlobalLogLeaf,
 			BatchID:         []string{"batch-1", "batch-2"}[i],
 			LeafIndex:       i,
@@ -1031,7 +1034,7 @@ func testGlobalLogPagedStateRoundTrip(t *testing.T, newStore Factory) {
 		if err := store.PutGlobalLeaf(ctx, leaf); err != nil {
 			t.Fatalf("PutGlobalLeaf %d: %v", i, err)
 		}
-		node := model.GlobalLogNode{
+		node := model.GlobalLogNode{CryptoSuite: "INTL_V1",
 			SchemaVersion:  model.SchemaGlobalLogNode,
 			Level:          0,
 			StartIndex:     i,
@@ -1043,7 +1046,7 @@ func testGlobalLogPagedStateRoundTrip(t *testing.T, newStore Factory) {
 			t.Fatalf("PutGlobalLogNode %d: %v", i, err)
 		}
 	}
-	parent := model.GlobalLogNode{
+	parent := model.GlobalLogNode{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaGlobalLogNode,
 		Level:          1,
 		StartIndex:     0,
@@ -1054,7 +1057,7 @@ func testGlobalLogPagedStateRoundTrip(t *testing.T, newStore Factory) {
 	if err := store.PutGlobalLogNode(ctx, parent); err != nil {
 		t.Fatalf("PutGlobalLogNode parent: %v", err)
 	}
-	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{
+	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaGlobalLogState,
 		TreeSize:       2,
 		RootHash:       []byte{9},
@@ -1101,7 +1104,7 @@ func testGlobalLeafListPagePaginates(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for i := uint64(0); i < 3; i++ {
-		if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{
+		if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaGlobalLogLeaf,
 			BatchID:       "batch-" + itoa(int(i+1)),
 			LeafIndex:     i,
@@ -1151,7 +1154,7 @@ func testSignedTreeHeadListPagePaginates(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for _, size := range []uint64{1, 2, 3} {
-		if err := store.PutSignedTreeHead(ctx, model.SignedTreeHead{
+		if err := store.PutSignedTreeHead(ctx, model.SignedTreeHead{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaSignedTreeHead,
 			TreeSize:      size,
 			RootHash:      []byte{byte(size)},
@@ -1200,9 +1203,9 @@ func testGlobalLogTileListAfterPaginates(t *testing.T, newStore Factory) {
 	ctx := context.Background()
 
 	for _, tile := range []model.GlobalLogTile{
-		{SchemaVersion: model.SchemaGlobalLogTile, Level: 0, StartIndex: 0, Width: 2, Hashes: [][]byte{{1}, {2}}, Compressed: true},
-		{SchemaVersion: model.SchemaGlobalLogTile, Level: 0, StartIndex: 2, Width: 2, Hashes: [][]byte{{3}, {4}}, Compressed: true},
-		{SchemaVersion: model.SchemaGlobalLogTile, Level: 1, StartIndex: 0, Width: 1, Hashes: [][]byte{{9}}, Compressed: true},
+		{SchemaVersion: model.SchemaGlobalLogTile, CryptoSuite: "INTL_V1", Level: 0, StartIndex: 0, Width: 2, Hashes: [][]byte{{1}, {2}}, Compressed: true},
+		{SchemaVersion: model.SchemaGlobalLogTile, CryptoSuite: "INTL_V1", Level: 0, StartIndex: 2, Width: 2, Hashes: [][]byte{{3}, {4}}, Compressed: true},
+		{SchemaVersion: model.SchemaGlobalLogTile, CryptoSuite: "INTL_V1", Level: 1, StartIndex: 0, Width: 1, Hashes: [][]byte{{9}}, Compressed: true},
 	} {
 		if err := store.PutGlobalLogTile(ctx, tile); err != nil {
 			t.Fatalf("PutGlobalLogTile %+v: %v", tile, err)
@@ -1467,7 +1470,7 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	// any external re-publication.
 	backupKey := model.STHAnchorScheduleKey{NodeID: "node-backup", LogID: "log-backup", SinkName: "backup-sink"}
 	backupCandidate := scheduleCandidate(backupKey, 31, 0x31, 800, 800)
-	backupSchedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, backupCandidate, nil)
+	backupSchedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{CryptoSuite: "INTL_V1"}, false, backupCandidate, nil)
 	if err != nil {
 		t.Fatalf("MergeCandidate backup schedule: %v", err)
 	}
@@ -1492,7 +1495,7 @@ func testSTHAnchorScheduleStateMachineOptional(t *testing.T, newStore Factory) {
 	if err := resultWriter.PutSTHAnchorResult(ctx, scheduleResult(preexistingKey, preexistingCandidate.STH, "anchor-restore-37", 910)); err != nil {
 		t.Fatalf("PutSTHAnchorResult before restored schedule: %v", err)
 	}
-	preexistingSchedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{}, false, preexistingCandidate, nil)
+	preexistingSchedule, _, err := anchorschedule.MergeCandidate(model.STHAnchorSchedule{CryptoSuite: "INTL_V1"}, false, preexistingCandidate, nil)
 	if err != nil {
 		t.Fatalf("MergeCandidate preexisting result schedule: %v", err)
 	}
@@ -1700,8 +1703,8 @@ func testL5CoverageProjectionStateOptional(t *testing.T, newStore Factory) {
 	}
 
 	indexes := []model.RecordIndex{
-		{SchemaVersion: model.SchemaRecordIndex, RecordID: "l5-rec-a", BatchID: "l5-batch-a", ProofLevel: "L4", ReceivedAtUnixN: 100},
-		{SchemaVersion: model.SchemaRecordIndex, RecordID: "l5-rec-b", BatchID: "l5-batch-b", ProofLevel: "L4", ReceivedAtUnixN: 200},
+		{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: "INTL_V1", RecordID: "l5-rec-a", BatchID: "l5-batch-a", ProofLevel: "L4", ReceivedAtUnixN: 100},
+		{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: "INTL_V1", RecordID: "l5-rec-b", BatchID: "l5-batch-b", ProofLevel: "L4", ReceivedAtUnixN: 200},
 	}
 	for _, idx := range indexes {
 		if err := store.PutRecordIndex(ctx, idx); err != nil {
@@ -1735,7 +1738,7 @@ func scheduleCandidate(key model.STHAnchorScheduleKey, treeSize uint64, seed byt
 }
 
 func scheduleSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byte) model.SignedTreeHead {
-	return model.SignedTreeHead{
+	return model.SignedTreeHead{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
@@ -1752,7 +1755,7 @@ func scheduleSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byte) mod
 }
 
 func scheduleResult(key model.STHAnchorScheduleKey, sth model.SignedTreeHead, anchorID string, publishedAt int64) model.STHAnchorResult {
-	return model.STHAnchorResult{
+	return model.STHAnchorResult{CryptoSuite: "INTL_V1",
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           key.NodeID,
 		LogID:            key.LogID,
@@ -1771,12 +1774,12 @@ func idForWorker(worker, seq int) string {
 }
 
 func recordBundle(recordID, tenantID, clientID, batchID string, receivedAt int64) model.ProofBundle {
-	return model.ProofBundle{
+	return model.ProofBundle{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaProofBundle,
 		RecordID:      recordID,
-		SignedClaim: model.SignedClaim{
+		SignedClaim: model.SignedClaim{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaSignedClaim,
-			Claim: model.ClientClaim{
+			Claim: model.ClientClaim{CryptoSuite: "INTL_V1",
 				SchemaVersion: model.SchemaClientClaim,
 				TenantID:      tenantID,
 				ClientID:      clientID,
@@ -1791,7 +1794,7 @@ func recordBundle(recordID, tenantID, clientID, batchID string, receivedAt int64
 				Metadata: model.Metadata{EventType: "test.record", Source: clientID},
 			},
 		},
-		ServerRecord: model.ServerRecord{
+		ServerRecord: model.ServerRecord{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaServerRecord,
 			RecordID:        recordID,
 			TenantID:        tenantID,
@@ -1799,7 +1802,7 @@ func recordBundle(recordID, tenantID, clientID, batchID string, receivedAt int64
 			KeyID:           "client-key",
 			ReceivedAtUnixN: receivedAt,
 		},
-		CommittedReceipt: model.CommittedReceipt{
+		CommittedReceipt: model.CommittedReceipt{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaCommittedReceipt,
 			RecordID:      recordID,
 			BatchID:       batchID,

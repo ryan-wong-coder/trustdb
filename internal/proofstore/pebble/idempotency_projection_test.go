@@ -169,7 +169,7 @@ func TestGenericCommittedManifestInvalidatesAndRebuildsProjection(t *testing.T) 
 	if err := store.PutBundle(context.Background(), bundle); err != nil {
 		t.Fatalf("PutBundle() error = %v", err)
 	}
-	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{
+	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     1,
 		LastSequence:  2,
@@ -186,11 +186,11 @@ func TestGenericCommittedManifestInvalidatesAndRebuildsProjection(t *testing.T) 
 	if _, found, err := store.GetCheckpoint(context.Background()); err != nil || found {
 		t.Fatalf("GetCheckpoint() found=%v err=%v after invalidation", found, err)
 	}
-	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{SegmentID: 1, LastSequence: 3}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{CryptoSuite: "INTL_V1", SegmentID: 1, LastSequence: 3}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("PutCheckpoint(unready) error=%v, want failed_precondition", err)
 	}
 	called := false
-	ran, err := store.WithWALCheckpointPruneGuard(context.Background(), model.WALCheckpoint{LastSequence: 2}, func() error {
+	ran, err := store.WithWALCheckpointPruneGuard(context.Background(), model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 2}, func() error {
 		called = true
 		return nil
 	})
@@ -210,7 +210,7 @@ func TestWALCheckpointPruneGuardSerializesManifestInvalidation(t *testing.T) {
 	t.Parallel()
 	store := openProjectionStore(t, filepath.Join(t.TempDir(), "proofs"))
 	defer store.Close()
-	cp := model.WALCheckpoint{
+	cp := model.WALCheckpoint{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaWALCheckpointContiguous,
 		SegmentID:       2,
 		LastSequence:    4,
@@ -315,7 +315,7 @@ func TestLegacyPebbleSchemasAreRejectedWithoutCompatibilityMigration(t *testing.
 			if err := db.Close(); err != nil {
 				t.Fatalf("close seeded db: %v", err)
 			}
-			if _, err := Open(path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+			if _, err := OpenWithOptions(path, testStoreOptions(Options{})); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 				t.Fatalf("Open(%s) code=%s err=%v, want failed_precondition", schema, trusterr.CodeOf(err), err)
 			}
 		})
@@ -324,7 +324,7 @@ func TestLegacyPebbleSchemasAreRejectedWithoutCompatibilityMigration(t *testing.
 
 func openProjectionStore(t *testing.T, path string) *Store {
 	t.Helper()
-	store, err := Open(path)
+	store, err := OpenWithOptions(path, testStoreOptions(Options{}))
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -332,7 +332,7 @@ func openProjectionStore(t *testing.T, path string) *Store {
 }
 
 func projectionManifest(batchID string, recordIDs ...string) model.BatchManifest {
-	return model.BatchManifest{
+	return model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion:    model.SchemaBatchManifest,
 		BatchID:          batchID,
 		State:            model.BatchStateCommitted,
@@ -348,7 +348,7 @@ func projectionFixture(t testing.TB, batchID, idempotencyKey string, seed byte, 
 	t.Helper()
 	clientPrivate := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
 	serverPrivate := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{99}, ed25519.SeedSize))
-	clientClaim := model.ClientClaim{
+	clientClaim := model.ClientClaim{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaClientClaim,
 		TenantID:        "tenant-a",
 		ClientID:        "client-a",
@@ -374,7 +374,7 @@ func projectionFixture(t testing.TB, batchID, idempotencyKey string, seed byte, 
 	claimHash, _ := trustcrypto.HashBytes(model.DefaultHashAlg, canonical)
 	signatureHash, _ := trustcrypto.HashBytes(model.DefaultHashAlg, signed.Signature.Signature)
 	position := model.WALPosition{SegmentID: 1, Offset: int64(sequence * 64), Sequence: sequence}
-	record := model.ServerRecord{
+	record := model.ServerRecord{CryptoSuite: "INTL_V1",
 		SchemaVersion:       model.SchemaServerRecord,
 		RecordID:            claim.RecordID(canonical, signed.Signature),
 		TenantID:            clientClaim.TenantID,
@@ -385,7 +385,7 @@ func projectionFixture(t testing.TB, batchID, idempotencyKey string, seed byte, 
 		ReceivedAtUnixN:     time.Unix(20+int64(seed), 0).UnixNano(),
 		WAL:                 position,
 	}
-	accepted := model.AcceptedReceipt{
+	accepted := model.AcceptedReceipt{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaAcceptedReceipt,
 		RecordID:        record.RecordID,
 		Status:          "accepted",
@@ -401,14 +401,14 @@ func projectionFixture(t testing.TB, batchID, idempotencyKey string, seed byte, 
 	if err != nil {
 		t.Fatalf("BuildDecision() error = %v", err)
 	}
-	bundle := model.ProofBundle{
+	bundle := model.ProofBundle{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaProofBundle,
 		RecordID:        record.RecordID,
 		NodeID:          "server-a",
 		SignedClaim:     signed,
 		ServerRecord:    record,
 		AcceptedReceipt: accepted,
-		CommittedReceipt: model.CommittedReceipt{
+		CommittedReceipt: model.CommittedReceipt{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaCommittedReceipt,
 			RecordID:      record.RecordID,
 			Status:        "committed",

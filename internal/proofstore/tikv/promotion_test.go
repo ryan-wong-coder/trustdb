@@ -19,7 +19,7 @@ func TestStageRecordIndexPromotionMutationCounts(t *testing.T) {
 	t.Parallel()
 
 	const namespace = "promotion-count/"
-	store := &Store{
+	store := &Store{binding: testStoreBinding(),
 		db:              &tikvDB{namespace: []byte(namespace)},
 		recordIndexMode: RecordIndexModeFull,
 	}
@@ -94,7 +94,7 @@ func TestCollectRecordIndexPromotionsBatchGetsScanSnapshot(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, reads := newMockTiKVDB(t, "promotion-batch-get-"+strings.ReplaceAll(test.name, " ", "-")+"/")
-			store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+			store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 			records := seedPromotionReferences(t, store, "batch-read-count", test.count, -1)
 			if _, err := store.collectRecordIndexPromotions(context.Background(), records[0].BatchID, "L4"); err != nil {
 				t.Fatalf("prime committed record indexes: %v", err)
@@ -143,7 +143,7 @@ func TestCollectRecordIndexPromotionsBatchGetsScanSnapshot(t *testing.T) {
 
 func TestCollectRecordIndexPromotionsPreservesMixedOrderAndDuplicates(t *testing.T) {
 	db, reads := newMockTiKVDB(t, "promotion-mixed-read/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	const batchID = "batch-mixed-read"
 	first := minimalPromotionRecordIndex(batchID, 1)
 	inline := minimalPromotionRecordIndex(batchID, 2)
@@ -204,7 +204,7 @@ func TestCollectRecordIndexPromotionsPreservesMixedOrderAndDuplicates(t *testing
 
 func TestPromoteBatchRecordsBatchesReadAndTransactionGuard(t *testing.T) {
 	db, reads := newMockTiKVDB(t, "promotion-read-and-guard/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	records := seedPromotionReferences(t, store, "batch-read-and-guard", promotionReferenceBatchSize, -1)
 	if _, err := store.collectRecordIndexPromotions(context.Background(), records[0].BatchID, "L4"); err != nil {
 		t.Fatalf("prime committed record indexes: %v", err)
@@ -236,7 +236,7 @@ func TestPromoteBatchRecordsBatchesReadAndTransactionGuard(t *testing.T) {
 func TestPromoteBatchRecordsReadFailuresDoNotCommit(t *testing.T) {
 	t.Run("missing reference in later read batch", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "promotion-missing-ref/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		records := seedPromotionReferences(t, store, "batch-missing-ref", promotionReferenceBatchSize+1, promotionReferenceBatchSize)
 		_, _ = store.collectRecordIndexPromotions(context.Background(), records[0].BatchID, "L4")
 		reads.resetReadRequests()
@@ -265,7 +265,7 @@ func TestPromoteBatchRecordsReadFailuresDoNotCommit(t *testing.T) {
 
 	t.Run("malformed referenced primary", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "promotion-malformed-primary/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		records := seedPromotionReferences(t, store, "batch-malformed-primary", 2, -1)
 		if err := db.Set(recordByIDKey(records[1].RecordID), []byte{0xff}, syncWrite); err != nil {
 			t.Fatalf("write malformed primary: %v", err)
@@ -285,7 +285,7 @@ func TestPromoteBatchRecordsReadFailuresDoNotCommit(t *testing.T) {
 
 	t.Run("malformed legacy inline value", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "promotion-malformed-inline/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		records := seedPromotionReferences(t, store, "batch-malformed-inline", 1, -1)
 		malformedKey := appendRecordIndexEncodedPrefix(nil, prefixRecordByBatch, records[0].BatchID, 2, "malformed-inline")
 		if err := db.Set(malformedKey, []byte{0xff}, syncWrite); err != nil {
@@ -306,7 +306,7 @@ func TestPromoteBatchRecordsReadFailuresDoNotCommit(t *testing.T) {
 
 	t.Run("pre-canceled context", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "promotion-pre-canceled-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		records := seedPromotionReferences(t, store, "batch-pre-canceled-read", 1, -1)
 		if _, err := store.collectRecordIndexPromotions(context.Background(), records[0].BatchID, "L4"); err != nil {
 			t.Fatalf("prime committed record indexes: %v", err)
@@ -333,7 +333,7 @@ func TestPromoteBatchRecordsReadFailuresDoNotCommit(t *testing.T) {
 
 	t.Run("canceled later batch get", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "promotion-canceled-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		records := seedPromotionReferences(t, store, "batch-canceled-read", promotionReferenceBatchSize+1, -1)
 		if _, err := store.collectRecordIndexPromotions(context.Background(), records[0].BatchID, "L4"); err != nil {
 			t.Fatalf("prime committed record indexes: %v", err)
@@ -370,7 +370,7 @@ func TestPromoteBatchRecordsReadFailuresDoNotCommit(t *testing.T) {
 
 func TestCommitRecordIndexPromotionsDoesNotDowngradeConcurrentLevel(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "promotion-monotonic/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	records := seedPromotionReferences(t, store, "batch-monotonic", 1, -1)
 	updates, err := store.collectRecordIndexPromotions(context.Background(), records[0].BatchID, "L4")
 	if err != nil {
@@ -399,7 +399,7 @@ func TestCommitRecordIndexPromotionsDoesNotDowngradeConcurrentLevel(t *testing.T
 
 func TestCommitRecordIndexPromotionsRetriesWriteConflict(t *testing.T) {
 	db, reads := newMockTiKVDB(t, "promotion-conflict-retry/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	records := seedPromotionReferences(t, store, "batch-conflict-retry", 1, -1)
 	updates, err := store.collectRecordIndexPromotions(context.Background(), records[0].BatchID, "L5")
 	if err != nil {
@@ -458,7 +458,7 @@ func TestCommitRecordIndexPromotionsRetriesWriteConflict(t *testing.T) {
 
 func TestCommitRecordIndexPromotionsRepairsDivergedLegacyProjection(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "promotion-diverged-legacy/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	legacy := promotionRecordIndex(true)
 	legacy.RecordID = "tr-diverged-legacy"
 	legacy.BatchID = "batch-legacy-projection"
@@ -551,7 +551,7 @@ func TestCommitRecordIndexPromotionsRepairsDivergedLegacyProjection(t *testing.T
 func TestPromoteBatchRecordsPreservesIndexModeTransitions(t *testing.T) {
 	t.Run("no storage tokens to full backfills tokens", func(t *testing.T) {
 		db, _ := newMockTiKVDB(t, "promotion-backfill/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeNoStorageTokens}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeNoStorageTokens}
 		idx := promotionRecordIndex(true)
 		if err := store.PutRecordIndex(context.Background(), idx); err != nil {
 			t.Fatalf("PutRecordIndex: %v", err)
@@ -573,7 +573,7 @@ func TestPromoteBatchRecordsPreservesIndexModeTransitions(t *testing.T) {
 	for _, mode := range []string{RecordIndexModeNoStorageTokens, RecordIndexModeTimeOnly} {
 		t.Run("full to "+mode+" cleans stale indexes", func(t *testing.T) {
 			db, _ := newMockTiKVDB(t, "promotion-cleanup-"+mode+"/")
-			store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+			store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 			idx := promotionRecordIndex(true)
 			if err := store.PutRecordIndex(context.Background(), idx); err != nil {
 				t.Fatalf("PutRecordIndex: %v", err)
@@ -611,7 +611,7 @@ func TestPromoteBatchRecordsMigratesLegacyInlineIndexes(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, reads := newMockTiKVDB(t, "promotion-legacy-"+strings.ReplaceAll(test.name, " ", "-")+"/")
-			store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+			store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 			idx := promotionRecordIndex(true)
 			value, err := cborx.Marshal(idx)
 			if err != nil {
@@ -704,7 +704,7 @@ func seedPromotionReferences(t *testing.T, store *Store, batchID string, count, 
 }
 
 func minimalPromotionRecordIndex(batchID string, ordinal int) model.RecordIndex {
-	return model.RecordIndex{
+	return model.RecordIndex{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaRecordIndex,
 		RecordID:        fmt.Sprintf("tr-promotion-%06d", ordinal),
 		BatchID:         batchID,
@@ -742,7 +742,7 @@ func assertRecordProofLevel(t *testing.T, store *Store, recordID, want string) {
 }
 
 func promotionRecordIndex(withTokens bool) model.RecordIndex {
-	idx := model.RecordIndex{
+	idx := model.RecordIndex{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaRecordIndex,
 		RecordID:        "tr-promotion-0001",
 		BatchID:         "batch-promotion",

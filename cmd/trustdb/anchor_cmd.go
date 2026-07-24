@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trusterr"
-	"github.com/spf13/cobra"
 )
 
 const anchorResultLookupPageSize = 100
@@ -39,7 +39,7 @@ func newAnchorExportCommand(rt *runtimeConfig) *cobra.Command {
 			if treeSize == 0 {
 				return usageError("--tree-size is required")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKindStr, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKindStr, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -142,11 +142,11 @@ are silently skipped, previously-failed calendars are never re-submitted.
 			}
 
 			ctx := context.Background()
-			store, err := proofstore.Open(proofstore.Config{Kind: kind, Path: path})
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, string(kind), path, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInternal, "open proofstore", err)
+				return err
 			}
-			defer func() { _ = store.Close() }()
+			defer closeFn()
 
 			ar, ok, err := findSTHAnchorResultBySink(ctx, store, treeSize, anchor.OtsSinkName)
 			if err != nil {
@@ -201,6 +201,7 @@ are silently skipped, previously-failed calendars are never re-submitted.
 	cmd.Flags().StringVar(&metastoreKindStr, "metastore", "", "proof store backend: file (default) or pebble")
 	cmd.Flags().StringVar(&metastorePath, "metastore-path", "", "proof store path; falls back to --proof-dir when empty")
 	cmd.Flags().StringVar(&proofDir, "proof-dir", "", "proof store root directory (file backend). Ignored when --metastore-path is set")
+	cmd.Flags().String("crypto-suite", "", "expected proofstore cryptographic suite: INTL_V1 or CN_SM_V1 (required)")
 	cmd.Flags().StringVar(&userAgent, "user-agent", "", "override the HTTP User-Agent sent to calendars (empty = default)")
 	cmd.Flags().StringVar(&timeoutText, "timeout", "", "per-calendar GET timeout (default 30s)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "query calendars but do not persist upgraded bytes")

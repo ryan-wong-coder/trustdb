@@ -59,7 +59,7 @@ func Run(t *testing.T, newHarness HarnessFactory) {
 	})
 	t.Run("RejectUnknownMarkerSuite", func(t *testing.T) {
 		h := newHarness(t)
-		marker, err := proofstoremeta.New(cryptosuite.INTLV1)
+		marker, err := proofstoremeta.New(cryptosuite.INTLV1, "node-1", "log-1", "test")
 		if err != nil {
 			t.Fatal(err)
 		}

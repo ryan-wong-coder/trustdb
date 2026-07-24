@@ -18,6 +18,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/batch"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/httpapi"
@@ -396,8 +397,12 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 		Now:             func() time.Time { return time.Now().UTC() },
 	}
 	store, err := proofstore.Open(proofstore.Config{
-		Kind: proofstore.BackendPebble,
-		Path: filepath.Join(tmp, "pebble"),
+		Kind:        proofstore.BackendPebble,
+		Path:        filepath.Join(tmp, "pebble"),
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      engine.ServerID,
+		LogID:       engine.LogID,
+		NamespaceID: proofstoreNamespaceID("pebble", filepath.Join(tmp, "pebble"), "", ""),
 	})
 	if err != nil {
 		t.Fatalf("proofstore.Open(pebble): %v", err)

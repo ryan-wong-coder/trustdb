@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/anchor"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
 
@@ -136,7 +135,7 @@ func TestBuildOtsUpgrader_NilForNonOtsSink(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 	defer store.Close()
 	rt := newTestRuntime(t)
 
@@ -158,7 +157,7 @@ func TestBuildOtsUpgrader_DisabledByFlag(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 	defer store.Close()
 
 	u, err := buildOtsUpgrader(newTestRuntime(t), store, nil, "ots", otsUpgraderParams{Enabled: false})
@@ -176,7 +175,7 @@ func TestBuildOtsUpgrader_BuildsWhenEnabled(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 	defer store.Close()
 
 	u, err := buildOtsUpgrader(newTestRuntime(t), store, nil, "OPENTIMESTAMPS", otsUpgraderParams{
@@ -202,7 +201,7 @@ func TestBuildOtsUpgrader_RejectsBadDuration(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	store := &proofstore.LocalStore{Root: filepath.Join(tmp, "ps")}
+	store := newBoundTestLocalStore(t, filepath.Join(tmp, "ps"))
 	defer store.Close()
 
 	cases := []struct {

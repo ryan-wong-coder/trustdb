@@ -18,6 +18,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
@@ -372,6 +373,9 @@ func (r *Registry) LookupClientKeyAt(tenantID, clientID, keyID string, at time.T
 	registered := timeline.registered
 	atN := at.UTC().UnixNano()
 	key := clientKeyFromTimeline(tenantID, clientID, timeline)
+	if err := modelsuite.Require(r.manifest.CryptoSuite, key); err != nil {
+		return model.ClientKey{}, fmt.Errorf("keystore: resolved client key suite binding: %w", err)
+	}
 	if atN < registered.ValidFromUnixN {
 		return key, errors.New("keystore: key not valid yet")
 	}
@@ -552,6 +556,9 @@ func (r *Registry) validateNextLocked(event model.KeyEvent) error {
 }
 
 func validateEventShape(suiteID cryptosuite.ID, event model.KeyEvent) (keydescriptor.Descriptor, error) {
+	if err := modelsuite.Require(suiteID, event); err != nil {
+		return keydescriptor.Descriptor{}, fmt.Errorf("keystore: key event suite binding: %w", err)
+	}
 	if event.SchemaVersion != model.SchemaKeyEvent {
 		return keydescriptor.Descriptor{}, fmt.Errorf("keystore: key event schema must be %s", model.SchemaKeyEvent)
 	}

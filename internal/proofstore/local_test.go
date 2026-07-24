@@ -38,7 +38,7 @@ func TestWriteCBORAtomicDurabilityOrder(t *testing.T) {
 		}
 		return baseSyncDir(path)
 	}
-	if err := writeCBORAtomicWithOps(path, model.WALCheckpoint{LastSequence: 1}, ops); err != nil {
+	if err := writeCBORAtomicWithOps(path, model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 1}, ops); err != nil {
 		t.Fatalf("writeCBORAtomicWithOps: %v", err)
 	}
 	want := []string{"file-sync", "file-close", "replace", "directory-sync"}
@@ -69,7 +69,7 @@ func TestWriteCBORAtomicFailsClosedAtDurabilityBarriers(t *testing.T) {
 					return base(syncPath)
 				}
 			}
-			if err := writeCBORAtomicWithOps(path, model.WALCheckpoint{LastSequence: 1}, ops); !errors.Is(err, sentinel) {
+			if err := writeCBORAtomicWithOps(path, model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 1}, ops); !errors.Is(err, sentinel) {
 				t.Fatalf("error = %v, want injected failure", err)
 			}
 		})
@@ -135,7 +135,7 @@ func TestEnsureLocalDurableDirectorySyncsNewAncestry(t *testing.T) {
 
 func TestWALCheckpointPruneSafetyRejectsLocalStoreWithoutIdempotencyProjection(t *testing.T) {
 	t.Parallel()
-	if WALCheckpointPruneSafe(LocalStore{Root: t.TempDir()}) {
+	if WALCheckpointPruneSafe(testLocalStore(t.TempDir())) {
 		t.Fatal("LocalStore reported WAL checkpoint pruning without restart idempotency")
 	}
 	if WALCheckpointPruneSafe(struct{}{}) {
@@ -146,8 +146,8 @@ func TestWALCheckpointPruneSafetyRejectsLocalStoreWithoutIdempotencyProjection(t
 func TestLocalStoreBundleRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
-	bundle := model.ProofBundle{
+	store := testLocalStore(t.TempDir())
+	bundle := model.ProofBundle{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaProofBundle,
 		RecordID:      "tr1proof",
 	}
@@ -196,7 +196,7 @@ func TestWriteCBORAtomicRejectsDirectoryTarget(t *testing.T) {
 		t.Fatalf("Mkdir(target) error = %v", err)
 	}
 
-	err := writeCBORAtomic(path, model.ProofBundle{RecordID: "record-1"})
+	err := writeCBORAtomic(path, model.ProofBundle{CryptoSuite: "INTL_V1", RecordID: "record-1"})
 	if err == nil {
 		t.Fatalf("writeCBORAtomic() error = nil, want directory target error")
 	}
@@ -219,12 +219,12 @@ func TestWriteCBORAtomicRejectsDirectoryTarget(t *testing.T) {
 func TestLocalStoreBundleIDsDoNotCollideAfterEscaping(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
-	slashBundle := model.ProofBundle{
+	store := testLocalStore(t.TempDir())
+	slashBundle := model.ProofBundle{CryptoSuite: "INTL_V1",
 		SchemaVersion: "slash",
 		RecordID:      "rec/1",
 	}
-	underscoreBundle := model.ProofBundle{
+	underscoreBundle := model.ProofBundle{CryptoSuite: "INTL_V1",
 		SchemaVersion: "underscore",
 		RecordID:      "rec_1",
 	}
@@ -250,9 +250,9 @@ func TestLocalStoreBundleIDsDoNotCollideAfterEscaping(t *testing.T) {
 func TestLocalStoreListRecordIndexesRejectsSymlinkOutsideRoot(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	outside := t.TempDir()
-	idx := model.RecordIndex{
+	idx := model.RecordIndex{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaRecordIndex,
 		RecordID:        "outside-record",
 		TenantID:        "tenant-a",
@@ -261,7 +261,7 @@ func TestLocalStoreListRecordIndexesRejectsSymlinkOutsideRoot(t *testing.T) {
 	if err := writeCBORAtomic(filepath.Join(outside, "outside.tdrecord"), idx); err != nil {
 		t.Fatalf("write outside record: %v", err)
 	}
-	linkDir := filepath.Join(store.Root, "records", "by-tenant", "tenant-a")
+	linkDir := filepath.Join(store.RootPath(), "records", "by-tenant", "tenant-a")
 	if err := os.MkdirAll(filepath.Dir(linkDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -299,10 +299,10 @@ func TestSafeFileNameAvoidsLegacyCollisions(t *testing.T) {
 func TestLocalStoreRecordPagesOrderEncodedIDsByRawValue(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, recordID := range []string{"rec_1", "rec/1", "rec-1"} {
-		if err := store.PutRecordIndex(ctx, model.RecordIndex{
+		if err := store.PutRecordIndex(ctx, model.RecordIndex{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaRecordIndex,
 			RecordID:        recordID,
 			ReceivedAtUnixN: 100,
@@ -335,11 +335,11 @@ func TestLocalStoreRecordPagesOrderEncodedIDsByRawValue(t *testing.T) {
 func TestLocalStoreRecordPageStopsReadingAtLimit(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	var oldest model.RecordIndex
 	for i := range 101 {
-		idx := model.RecordIndex{
+		idx := model.RecordIndex{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaRecordIndex,
 			RecordID:        fmt.Sprintf("record-%03d", i),
 			ReceivedAtUnixN: int64(i + 1),
@@ -371,10 +371,10 @@ func TestLocalStoreRecordPageStopsReadingAtLimit(t *testing.T) {
 func TestLocalStoreRootRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	roots := []model.BatchRoot{
-		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-a", BatchRoot: bytes.Repeat([]byte{1}, 32), TreeSize: 1, ClosedAtUnixN: 100},
-		{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-b", BatchRoot: bytes.Repeat([]byte{2}, 32), TreeSize: 2, ClosedAtUnixN: 200},
+		{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: "INTL_V1", BatchID: "batch-a", BatchRoot: bytes.Repeat([]byte{1}, 32), TreeSize: 1, ClosedAtUnixN: 100},
+		{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: "INTL_V1", BatchID: "batch-b", BatchRoot: bytes.Repeat([]byte{2}, 32), TreeSize: 2, ClosedAtUnixN: 200},
 	}
 	for _, root := range roots {
 		if err := store.PutRoot(context.Background(), root); err != nil {
@@ -400,10 +400,10 @@ func TestLocalStoreRootRoundTrip(t *testing.T) {
 func TestLocalStoreRootPagesOrderEncodedIDsByRawValue(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, batchID := range []string{"batch_1", "batch/1", "batch-1"} {
-		if err := store.PutRoot(ctx, model.BatchRoot{
+		if err := store.PutRoot(ctx, model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       batchID,
 			BatchRoot:     bytes.Repeat([]byte{1}, 32),
@@ -438,11 +438,11 @@ func TestLocalStoreRootPagesOrderEncodedIDsByRawValue(t *testing.T) {
 func TestLocalStoreRootReadersSkipFilesOutsideRequestedRange(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	var oldest model.BatchRoot
 	for i := range 101 {
-		root := model.BatchRoot{
+		root := model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       fmt.Sprintf("batch-%03d", i),
 			BatchRoot:     bytes.Repeat([]byte{1}, 32),
@@ -480,7 +480,7 @@ func TestLocalStoreRootReadersSkipFilesOutsideRequestedRange(t *testing.T) {
 func TestLocalStoreMissingBundle(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	_, err := store.GetBundle(context.Background(), "missing")
 	if trusterr.CodeOf(err) != trusterr.CodeNotFound {
 		t.Fatalf("GetBundle() code = %s err=%v", trusterr.CodeOf(err), err)
@@ -490,8 +490,8 @@ func TestLocalStoreMissingBundle(t *testing.T) {
 func TestLocalStoreManifestRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
-	prepared := model.BatchManifest{
+	store := testLocalStore(t.TempDir())
+	prepared := model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaBatchManifest,
 		BatchID:         "batch-a",
 		State:           model.BatchStatePrepared,
@@ -531,10 +531,10 @@ func TestLocalStoreManifestRoundTrip(t *testing.T) {
 func TestLocalStoreManifestPagesOrderEncodedIDsByRawValue(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, batchID := range []string{"batch_1", "batch/1", "batch-1"} {
-		if err := store.PutManifest(ctx, model.BatchManifest{
+		if err := store.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchManifest,
 			BatchID:       batchID,
 			State:         model.BatchStateCommitted,
@@ -562,11 +562,11 @@ func TestLocalStoreManifestPagesOrderEncodedIDsByRawValue(t *testing.T) {
 func TestLocalStoreManifestPageSkipsFilesBeforeCursor(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for i := range 101 {
 		batchID := fmt.Sprintf("batch-%03d", i)
-		if err := store.PutManifest(ctx, model.BatchManifest{
+		if err := store.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchManifest,
 			BatchID:       batchID,
 			State:         model.BatchStateCommitted,
@@ -590,9 +590,9 @@ func TestLocalStoreManifestPageSkipsFilesBeforeCursor(t *testing.T) {
 func TestLocalStoreManifestListRejectsFilenameMismatch(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
-	manifest := model.BatchManifest{
+	manifest := model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "batch-a",
 		State:         model.BatchStateCommitted,
@@ -613,10 +613,10 @@ func TestLocalStoreManifestListRejectsFilenameMismatch(t *testing.T) {
 func TestLocalStoreGlobalNodePagesOrderByPosition(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, position := range [][2]uint64{{1, 0}, {0, 9}, {0, 5}} {
-		if err := store.PutGlobalLogNode(ctx, model.GlobalLogNode{
+		if err := store.PutGlobalLogNode(ctx, model.GlobalLogNode{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaGlobalLogNode,
 			Level:         position[0],
 			StartIndex:    position[1],
@@ -646,10 +646,10 @@ func TestLocalStoreGlobalNodePagesOrderByPosition(t *testing.T) {
 func TestLocalStoreGlobalNodePageSkipsFilesBeforeCursor(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for i := range 101 {
-		if err := store.PutGlobalLogNode(ctx, model.GlobalLogNode{
+		if err := store.PutGlobalLogNode(ctx, model.GlobalLogNode{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaGlobalLogNode,
 			Level:         0,
 			StartIndex:    uint64(i),
@@ -675,9 +675,9 @@ func TestLocalStoreGlobalNodePageSkipsFilesBeforeCursor(t *testing.T) {
 func TestLocalStoreGlobalNodeListRejectsFilenameMismatch(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
-	if err := store.PutGlobalLogNode(ctx, model.GlobalLogNode{
+	if err := store.PutGlobalLogNode(ctx, model.GlobalLogNode{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogNode,
 		Level:         0,
 		StartIndex:    1,
@@ -699,7 +699,7 @@ func TestLocalStoreGlobalNodeListRejectsFilenameMismatch(t *testing.T) {
 func TestLocalStoreMissingManifest(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	_, err := store.GetManifest(context.Background(), "missing")
 	if trusterr.CodeOf(err) != trusterr.CodeNotFound {
 		t.Fatalf("GetManifest() code = %s err=%v", trusterr.CodeOf(err), err)
@@ -709,8 +709,8 @@ func TestLocalStoreMissingManifest(t *testing.T) {
 func TestLocalStoreRejectsInvalidManifestState(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
-	err := store.PutManifest(context.Background(), model.BatchManifest{BatchID: "b", State: "pending"})
+	store := testLocalStore(t.TempDir())
+	err := store.PutManifest(context.Background(), model.BatchManifest{CryptoSuite: "INTL_V1", BatchID: "b", State: "pending"})
 	if trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
 		t.Fatalf("PutManifest() code = %s err=%v", trusterr.CodeOf(err), err)
 	}
@@ -719,8 +719,8 @@ func TestLocalStoreRejectsInvalidManifestState(t *testing.T) {
 func TestLocalStoreCheckpointRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
-	cp := model.WALCheckpoint{
+	store := testLocalStore(t.TempDir())
+	cp := model.WALCheckpoint{CryptoSuite: "INTL_V1",
 		SegmentID:    1,
 		LastSequence: 42,
 		LastOffset:   4096,
@@ -747,7 +747,7 @@ func TestLocalStoreCheckpointRoundTrip(t *testing.T) {
 	}
 
 	// Overwriting with a newer checkpoint must be observable.
-	newer := model.WALCheckpoint{SegmentID: 1, LastSequence: 100, LastOffset: 8192, BatchID: "batch-b"}
+	newer := model.WALCheckpoint{CryptoSuite: "INTL_V1", SegmentID: 1, LastSequence: 100, LastOffset: 8192, BatchID: "batch-b"}
 	if err := store.PutCheckpoint(context.Background(), newer); err != nil {
 		t.Fatalf("PutCheckpoint(newer) error = %v", err)
 	}
@@ -763,7 +763,7 @@ func TestLocalStoreCheckpointRoundTrip(t *testing.T) {
 func TestLocalStoreMissingCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	_, found, err := store.GetCheckpoint(context.Background())
 	if err != nil {
 		t.Fatalf("GetCheckpoint() error = %v, want nil for missing checkpoint", err)

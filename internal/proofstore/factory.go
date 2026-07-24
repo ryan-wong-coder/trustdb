@@ -44,11 +44,12 @@ type Config struct {
 	IndexStorageTokens           bool
 	IndexStorageTokensConfigured bool
 	CryptoSuite                  cryptosuite.ID
+	NodeID                       string
+	LogID                        string
+	NamespaceID                  string
 }
 
-// Open constructs a Store using cfg. An empty Kind defaults to the file
-// backend so existing deployments that only pass a proof directory keep
-// working without any CLI changes.
+// Open constructs a Store using an explicit V5 backend and namespace binding.
 func Open(cfg Config) (Store, error) {
 	if cfg.Path == "" && Backend(strings.ToLower(string(cfg.Kind))) != BackendTiKV {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "proofstore path is required")
@@ -57,13 +58,12 @@ func Open(cfg Config) (Store, error) {
 	if err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "invalid proofstore cryptographic suite", err)
 	}
+	if strings.TrimSpace(cfg.NodeID) == "" || strings.TrimSpace(cfg.LogID) == "" || strings.TrimSpace(cfg.NamespaceID) == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "proofstore node_id, log_id, and namespace_id are required")
+	}
 	switch Backend(strings.ToLower(string(cfg.Kind))) {
-	case "", BackendFile:
-		marker, err := ensureLocalStorageSchema(cfg.Path, suiteID)
-		if err != nil {
-			return nil, err
-		}
-		return &LocalStore{Root: cfg.Path, SuiteID: marker.CryptoSuite}, nil
+	case BackendFile:
+		return OpenLocalStore(cfg.Path, suiteID, cfg.NodeID, cfg.LogID, cfg.NamespaceID)
 	case BackendPebble:
 		return pebblestore.OpenWithOptions(cfg.Path, pebblestore.Options{
 			RecordIndexMode:              cfg.RecordIndexMode,
@@ -71,6 +71,9 @@ func Open(cfg Config) (Store, error) {
 			IndexStorageTokens:           cfg.IndexStorageTokens,
 			IndexStorageTokensConfigured: cfg.IndexStorageTokensConfigured,
 			CryptoSuite:                  suiteID,
+			NodeID:                       cfg.NodeID,
+			LogID:                        cfg.LogID,
+			NamespaceID:                  cfg.NamespaceID,
 		})
 	case BackendTiKV:
 		if !hasTiKVPDAddress(cfg) {
@@ -88,13 +91,33 @@ func Open(cfg Config) (Store, error) {
 			IndexStorageTokens:           cfg.IndexStorageTokens,
 			IndexStorageTokensConfigured: cfg.IndexStorageTokensConfigured,
 			CryptoSuite:                  suiteID,
+			NodeID:                       cfg.NodeID,
+			LogID:                        cfg.LogID,
+			NamespaceID:                  cfg.NamespaceID,
 		})
 	default:
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "unknown proofstore backend: "+string(cfg.Kind))
 	}
 }
 
-func ensureLocalStorageSchema(root string, expected cryptosuite.ID) (proofstoremeta.Marker, error) {
+// OpenLocalStore opens a file proofstore only after its complete V5 namespace
+// identity has been validated and durably bound.
+func OpenLocalStore(root string, suiteID cryptosuite.ID, nodeID, logID, namespaceID string) (*LocalStore, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "proofstore path is required")
+	}
+	requested, err := proofstoremeta.RequestedSuite(suiteID)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "invalid proofstore cryptographic suite", err)
+	}
+	marker, err := ensureLocalStorageSchema(root, requested, nodeID, logID, namespaceID)
+	if err != nil {
+		return nil, err
+	}
+	return newBoundLocalStore(root, marker), nil
+}
+
+func ensureLocalStorageSchema(root string, expected cryptosuite.ID, nodeID, logID, namespaceID string) (proofstoremeta.Marker, error) {
 	localStorageInitMu.Lock()
 	defer localStorageInitMu.Unlock()
 
@@ -108,7 +131,7 @@ func ensureLocalStorageSchema(root string, expected cryptosuite.ID) (proofstorem
 		if err != nil {
 			return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeDataLoss, "decode file proofstore suite marker", err)
 		}
-		if err := proofstoremeta.Validate(marker, expected); err != nil {
+		if err := proofstoremeta.ValidateBinding(marker, expected, nodeID, logID, namespaceID); err != nil {
 			return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "validate file proofstore suite marker", err)
 		}
 		return marker, nil
@@ -134,7 +157,7 @@ func ensureLocalStorageSchema(root string, expected cryptosuite.ID) (proofstorem
 	default:
 		return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeDataLoss, "inspect file proofstore contents", err)
 	}
-	marker, err := proofstoremeta.New(expected)
+	marker, err := proofstoremeta.New(expected, nodeID, logID, namespaceID)
 	if err != nil {
 		return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeInvalidArgument, "build file proofstore suite marker", err)
 	}

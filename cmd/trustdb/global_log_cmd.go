@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 
+	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/trusterr"
-	"github.com/spf13/cobra"
 )
 
 func newGlobalLogCommand(rt *runtimeConfig) *cobra.Command {
@@ -35,7 +35,7 @@ func newGlobalLogSTHLatestCommand(rt *runtimeConfig) *cobra.Command {
 		Use:   "latest",
 		Short: "Print the latest global log SignedTreeHead",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -64,7 +64,7 @@ func newGlobalLogSTHGetCommand(rt *runtimeConfig) *cobra.Command {
 			if treeSize == 0 {
 				return usageError("global-log sth get requires --tree-size")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -104,7 +104,7 @@ func newGlobalLogInclusionCommand(rt *runtimeConfig) *cobra.Command {
 			if batchID == "" {
 				return usageError("global-log proof inclusion requires --batch-id")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -155,7 +155,7 @@ func newGlobalLogConsistencyCommand(rt *runtimeConfig) *cobra.Command {
 			if from == 0 || to == 0 {
 				return usageError("global-log proof consistency requires --from and --to")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -206,7 +206,7 @@ func newGlobalLogCompactCommand(rt *runtimeConfig) *cobra.Command {
 			if tileSize == 0 {
 				tileSize = rt.cfg.History.TileSize
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}

@@ -13,14 +13,14 @@ import (
 func TestLocalStoreGlobalLeafPageUsesCommittedRange(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for index := uint64(0); index < 3; index++ {
-		if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{BatchID: "batch-" + strconv.FormatUint(index, 10), LeafIndex: index}); err != nil {
+		if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{CryptoSuite: "INTL_V1", BatchID: "batch-" + strconv.FormatUint(index, 10), LeafIndex: index}); err != nil {
 			t.Fatalf("PutGlobalLeaf(%d): %v", index, err)
 		}
 	}
-	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{TreeSize: 3}); err != nil {
+	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{CryptoSuite: "INTL_V1", TreeSize: 3}); err != nil {
 		t.Fatalf("PutGlobalLogState: %v", err)
 	}
 	if err := os.WriteFile(store.globalLeafPath(999), []byte("corrupt outside committed range"), 0o600); err != nil {
@@ -64,12 +64,12 @@ func TestLocalStoreGlobalLeafPageUsesCommittedRange(t *testing.T) {
 func TestLocalStoreGlobalLeafPageRejectsMissingCommittedLeaf(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
-	if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{BatchID: "batch-0", LeafIndex: 0}); err != nil {
+	if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{CryptoSuite: "INTL_V1", BatchID: "batch-0", LeafIndex: 0}); err != nil {
 		t.Fatalf("PutGlobalLeaf: %v", err)
 	}
-	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{TreeSize: 2}); err != nil {
+	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{CryptoSuite: "INTL_V1", TreeSize: 2}); err != nil {
 		t.Fatalf("PutGlobalLogState: %v", err)
 	}
 
@@ -82,10 +82,10 @@ func TestLocalStoreGlobalLeafPageRejectsMissingCommittedLeaf(t *testing.T) {
 func TestLocalStoreGlobalLeafPageFallsBackWithoutState(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for index := uint64(0); index < 3; index++ {
-		if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{BatchID: "batch-" + strconv.FormatUint(index, 10), LeafIndex: index}); err != nil {
+		if err := store.PutGlobalLeaf(ctx, model.GlobalLogLeaf{CryptoSuite: "INTL_V1", BatchID: "batch-" + strconv.FormatUint(index, 10), LeafIndex: index}); err != nil {
 			t.Fatalf("PutGlobalLeaf(%d): %v", index, err)
 		}
 	}

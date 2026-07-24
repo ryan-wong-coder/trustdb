@@ -41,7 +41,7 @@ func (s *failOnceAnchorPublicationStore) LatestSTHAnchorResultForKey(ctx context
 func TestOutboxWorkerReschedulesAppendFailure(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	root := model.BatchRoot{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "batch-retry",
@@ -117,7 +117,7 @@ func TestOutboxWorkerContextCancellationAllowsRestart(t *testing.T) {
 func TestOutboxWorkerPublishesBatch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	root := model.BatchRoot{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "batch-success",
@@ -175,7 +175,7 @@ func TestOutboxWorkerPublishesBatch(t *testing.T) {
 func TestOutboxWorkerAtomicallyStoresOnlyFinalAnchorCandidate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	roots := make([]model.BatchRoot, 3)
 	for i := range roots {
 		roots[i] = model.BatchRoot{CryptoSuite: cryptosuite.INTLV1,
@@ -240,7 +240,7 @@ func TestOutboxWorkerAtomicallyStoresOnlyFinalAnchorCandidate(t *testing.T) {
 func TestOutboxWorkerRetryPreservesOriginalFixedAnchorWindow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	base := &proofstore.LocalStore{Root: t.TempDir()}
+	base := newBoundTestLocalStore(t, t.TempDir())
 	marker, ok := any(base).(proofstore.GlobalLogPublishedBatchWithAnchorCandidateMarker)
 	if !ok {
 		t.Fatal("local proofstore does not support durable anchor publication")
@@ -312,7 +312,7 @@ func TestOutboxWorkerRetryPreservesOriginalFixedAnchorWindow(t *testing.T) {
 func TestOutboxWorkerNonMonotonicCoveredRetryUsesHighestNewSTH(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := &proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	oldRoot := model.BatchRoot{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
 		NodeID:        "node-1",
@@ -408,7 +408,7 @@ func TestOutboxWorkerNonMonotonicCoveredRetryUsesHighestNewSTH(t *testing.T) {
 func TestOutboxWorkerReplayPastInFlightStartsWindowAtFirstLaterSTH(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := &proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "outbox-inflight-replay", SinkName: "file"}
 	oldRoot := model.BatchRoot{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
@@ -505,7 +505,7 @@ func TestOutboxWorkerAnchorPathFailsClosedWithoutDurableMarker(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	base := proofstore.LocalStore{Root: t.TempDir()}
+	base := newBoundTestLocalStore(t, t.TempDir())
 	store := struct{ proofstore.Store }{Store: base}
 	root := model.BatchRoot{CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-anchor-unsupported", LogID: "unsupported-anchor", BatchRoot: bytes.Repeat([]byte{0x61}, 32), TreeSize: 1, ClosedAtUnixN: 1}
 	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{BatchID: root.BatchID, BatchRoot: root, Status: model.AnchorStatePending}); err != nil {

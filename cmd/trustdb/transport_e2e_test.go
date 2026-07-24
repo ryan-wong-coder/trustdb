@@ -170,7 +170,7 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Now().UTC() },
 	}
-	proofStore := proofstore.LocalStore{Root: filepath.Join(tmp, "proofs")}
+	proofStore := newBoundTestLocalStore(t, filepath.Join(tmp, "proofs"))
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 16, Workers: 2}, metrics)
 	t.Cleanup(func() { ingestSvc.Shutdown(context.Background()) })
 

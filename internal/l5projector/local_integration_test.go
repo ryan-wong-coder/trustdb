@@ -11,14 +11,13 @@ import (
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/l5projector"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 func TestLocalProjectorMaterializesOlderBatchesWithoutBlockingEvidence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	_, privateKey, err := trustcrypto.GenerateEd25519Key()
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key: %v", err)

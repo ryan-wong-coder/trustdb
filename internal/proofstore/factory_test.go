@@ -18,7 +18,7 @@ func TestFileSuiteBindingConformance(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "proofs")
 		return proofstoremetatest.Harness{
 			Open: func(suiteID cryptosuite.ID) (cryptosuite.ID, error) {
-				store, err := Open(Config{Kind: BackendFile, Path: root, CryptoSuite: suiteID})
+				store, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root, CryptoSuite: suiteID}))
 				if err != nil {
 					return "", err
 				}
@@ -45,7 +45,7 @@ func TestOpenFileBackendInitializesAndRequiresCurrentSchema(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "proofs")
 
-	if _, err := Open(Config{Kind: BackendFile, Path: root}); err != nil {
+	if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root})); err != nil {
 		t.Fatalf("Open(file) error = %v", err)
 	}
 	data, err := readStoredFileLimit(filepath.Join(root, localStorageSchemaFile), proofstoremeta.MaxMarkerBytes)
@@ -59,7 +59,7 @@ func TestOpenFileBackendInitializesAndRequiresCurrentSchema(t *testing.T) {
 	if err := proofstoremeta.Validate(marker, cryptosuite.INTLV1); err != nil {
 		t.Fatalf("marker = %+v: %v", marker, err)
 	}
-	store, err := Open(Config{Kind: BackendFile, Path: root})
+	store, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root}))
 	if err != nil {
 		t.Fatalf("reopen current file schema: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestOpenFileBackendRejectsMissingCorruptUnknownAndMismatchedMarkers(t *test
 	t.Parallel()
 	t.Run("missing on non-empty store", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "proofs")
-		store, err := Open(Config{Kind: BackendFile, Path: root})
+		store, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root}))
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -84,7 +84,7 @@ func TestOpenFileBackendRejectsMissingCorruptUnknownAndMismatchedMarkers(t *test
 		if err := os.Remove(filepath.Join(root, localStorageSchemaFile)); err != nil {
 			t.Fatalf("remove marker: %v", err)
 		}
-		if _, err := Open(Config{Kind: BackendFile, Path: root}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root})); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("Open missing marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
@@ -96,29 +96,29 @@ func TestOpenFileBackendRejectsMissingCorruptUnknownAndMismatchedMarkers(t *test
 		if err := os.WriteFile(filepath.Join(root, localStorageSchemaFile), []byte{0xff}, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Open(Config{Kind: BackendFile, Path: root}); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root})); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 			t.Fatalf("Open corrupt marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
 	t.Run("unknown", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "proofs")
-		marker, _ := proofstoremeta.New(cryptosuite.INTLV1)
+		marker, _ := proofstoremeta.New(cryptosuite.INTLV1, "node-1", "log-1", "test")
 		marker.CryptoSuite = cryptosuite.ID("UNKNOWN")
 		if err := writeCBORAtomic(filepath.Join(root, localStorageSchemaFile), marker); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Open(Config{Kind: BackendFile, Path: root}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root})); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("Open unknown marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
 	t.Run("mismatch", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "proofs")
-		store, err := Open(Config{Kind: BackendFile, Path: root, CryptoSuite: cryptosuite.INTLV1})
+		store, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root, CryptoSuite: cryptosuite.INTLV1}))
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = store.Close()
-		if _, err := Open(Config{Kind: BackendFile, Path: root, CryptoSuite: cryptosuite.CNSMV1}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root, CryptoSuite: cryptosuite.CNSMV1})); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("Open mismatched marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
@@ -134,7 +134,7 @@ func TestOpenFileBackendRecoversInterruptedMarkerTemp(t *testing.T) {
 	if err := os.WriteFile(tempPath, []byte{0xff}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := Open(Config{Kind: BackendFile, Path: root})
+	store, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root}))
 	if err != nil {
 		t.Fatalf("Open after interrupted temp: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestOpenFileBackendSerializesConflictingConcurrentInitialization(t *testing
 		go func() {
 			defer wg.Done()
 			<-start
-			store, err := Open(Config{Kind: BackendFile, Path: root, CryptoSuite: suiteID})
+			store, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root, CryptoSuite: suiteID}))
 			if err == nil {
 				err = store.Close()
 			}
@@ -186,7 +186,7 @@ func TestOpenFileBackendSerializesConflictingConcurrentInitialization(t *testing
 
 func TestOpenRejectsUnknownConfiguredSuite(t *testing.T) {
 	t.Parallel()
-	if _, err := Open(Config{Kind: BackendFile, Path: t.TempDir(), CryptoSuite: cryptosuite.ID("unknown")}); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
+	if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: t.TempDir(), CryptoSuite: cryptosuite.ID("unknown")})); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
 		t.Fatalf("Open unknown configured suite code=%s err=%v", trusterr.CodeOf(err), err)
 	}
 }
@@ -202,7 +202,7 @@ func TestOpenFileBackendRejectsUnversionedData(t *testing.T) {
 		t.Fatalf("seed legacy queue item: %v", err)
 	}
 
-	if _, err := Open(Config{Kind: BackendFile, Path: root}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+	if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root})); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("Open(unversioned file) code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
 	}
 }
@@ -214,7 +214,7 @@ func TestOpenFileBackendRejectsLegacySchema(t *testing.T) {
 		t.Fatalf("seed legacy schema: %v", err)
 	}
 
-	if _, err := Open(Config{Kind: BackendFile, Path: root}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+	if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root})); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("Open(v3 file) code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
 	}
 }
@@ -222,7 +222,7 @@ func TestOpenFileBackendRejectsLegacySchema(t *testing.T) {
 func TestOpenTiKVBackendRequiresPDEndpoints(t *testing.T) {
 	t.Parallel()
 
-	if _, err := Open(Config{Kind: BackendTiKV}); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
+	if _, err := Open(testStoreConfig(Config{Kind: BackendTiKV})); trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
 		t.Fatalf("Open(tikv without PD) error code = %s, want %s", trusterr.CodeOf(err), trusterr.CodeInvalidArgument)
 	}
 }

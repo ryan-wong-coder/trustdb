@@ -124,7 +124,7 @@ func newTestService(t *testing.T, store proofstore.Store, sink Sink, key model.S
 
 func TestServiceWaitsForFixedDeadline(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	sth := testSTH(key, 1, 0x11)
 	offer(t, store, key, sth, 100, 200)
@@ -144,7 +144,7 @@ func TestServiceWaitsForFixedDeadline(t *testing.T) {
 
 func TestServicePublishesExpiredPendingAndCompletes(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	sth := testSTH(key, 2, 0x22)
 	offer(t, store, key, sth, 100, 200)
@@ -165,7 +165,7 @@ func TestServicePublishesExpiredPendingAndCompletes(t *testing.T) {
 
 func TestServiceRefreshesPendingMetricAfterCanceledCompletion(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	sth := testSTH(key, 12, 0x12)
 	offer(t, store, key, sth, 100, 100)
@@ -193,7 +193,7 @@ func TestServiceRefreshesPendingMetricAfterCanceledCompletion(t *testing.T) {
 
 func TestServicePendingMetricIncludesCandidateAddedDuringPublish(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	oldSTH := testSTH(key, 13, 0x13)
 	newSTH := testSTH(key, 14, 0x14)
@@ -221,7 +221,7 @@ func TestServicePendingMetricIncludesCandidateAddedDuringPublish(t *testing.T) {
 
 func TestServiceRetriesSameImmutableInFlight(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	sth := testSTH(key, 3, 0x33)
 	offer(t, store, key, sth, 100, 100)
@@ -247,7 +247,7 @@ func TestServiceRetriesSameImmutableInFlight(t *testing.T) {
 
 func TestServicePermanentFailureIsTerminal(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	offer(t, store, key, testSTH(key, 4, 0x44), 100, 100)
 	now := time.Unix(0, 100)
@@ -277,7 +277,7 @@ func (emptyPermanentError) Unwrap() error { return ErrPermanent }
 
 func TestServiceEmptyProviderErrorPersistsTerminalFailure(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	offer(t, store, key, testSTH(key, 17, 0x17), 100, 100)
 	now := time.Unix(0, 100)
@@ -318,7 +318,7 @@ func (s *invalidSuccessfulSink) Publish(_ context.Context, sth model.SignedTreeH
 
 func TestServiceInvalidSuccessfulResultIsTerminal(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("invalid-success")
 	offer(t, store, key, testSTH(key, 15, 0x15), 100, 100)
 	now := time.Unix(0, 100)
@@ -342,7 +342,7 @@ func TestServiceInvalidSuccessfulResultIsTerminal(t *testing.T) {
 
 func TestServicePreservesPendingWhileOlderInFlightPublishes(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	scheduler := proofstore.STHAnchorScheduleStore(store)
 	key := testScheduleKey("fake")
 	oldSTH := testSTH(key, 5, 0x55)
@@ -421,7 +421,7 @@ func (s *failCompletionStore) CompleteSTHAnchorAttempt(ctx context.Context, key 
 }
 
 func TestServiceLeaseCoversPublishAndCompletionBudgets(t *testing.T) {
-	base := proofstore.LocalStore{Root: t.TempDir()}
+	base := newBoundTestLocalStore(t, t.TempDir())
 	wrapped := &failCompletionStore{
 		Store:             base,
 		schedule:          base,
@@ -502,7 +502,7 @@ func TestServiceLeaseCoversPublishAndCompletionBudgets(t *testing.T) {
 
 func TestServiceRetriesAfterProviderSuccessBeforeLocalCompletion(t *testing.T) {
 	t.Parallel()
-	base := proofstore.LocalStore{Root: t.TempDir()}
+	base := newBoundTestLocalStore(t, t.TempDir())
 	wrapped := &failCompletionStore{Store: base, schedule: base, failOnce: true}
 	key := testScheduleKey("fake")
 	sth := testSTH(key, 9, 0x99)
@@ -532,7 +532,7 @@ func TestServiceRetriesAfterProviderSuccessBeforeLocalCompletion(t *testing.T) {
 
 func TestServiceStopDoesNotFlushPending(t *testing.T) {
 	t.Parallel()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	offer(t, store, key, testSTH(key, 10, 0xaa), 100, 1_000)
 	now := time.Unix(0, 100)
@@ -573,7 +573,7 @@ func (s *blockingSink) Publish(ctx context.Context, _ model.SignedTreeHead) (mod
 }
 
 func TestServiceStopRejectsOverlappingRestart(t *testing.T) {
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("blocking")
 	offer(t, store, key, testSTH(key, 11, 0xbb), 100, 100)
 	now := time.Unix(0, 100)
@@ -629,7 +629,7 @@ func TestServiceStopRejectsOverlappingRestart(t *testing.T) {
 }
 
 func TestServiceContextCancellationAllowsRestart(t *testing.T) {
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey("fake")
 	now := time.Unix(0, 100)
 	sink := &fakeSink{name: "fake", results: []fakeResult{{result: model.STHAnchorResult{AnchorID: "unused"}}}}

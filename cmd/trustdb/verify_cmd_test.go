@@ -26,7 +26,6 @@ import (
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
@@ -388,7 +387,7 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Unix(500, 0) },
 	}
-	proofStore := proofstore.LocalStore{Root: proofDir}
+	proofStore := newBoundTestLocalStore(t, proofDir)
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 4, Workers: 1}, metrics)
 	t.Cleanup(func() { _ = ingestSvc.Shutdown(context.Background()) })
 

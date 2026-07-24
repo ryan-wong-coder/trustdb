@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -31,7 +32,23 @@ func Require(expected cryptosuite.ID, value any) error {
 	case model.CommittedReceipt:
 		return require("committed receipt", v.CryptoSuite)
 	case model.ProofBundle:
-		return require("proof bundle", v.CryptoSuite, v.SignedClaim.CryptoSuite, v.SignedClaim.Claim.CryptoSuite, v.ServerRecord.CryptoSuite, v.AcceptedReceipt.CryptoSuite, v.CommittedReceipt.CryptoSuite)
+		actual := []cryptosuite.ID{v.CryptoSuite}
+		if v.SignedClaim.SchemaVersion != "" {
+			actual = append(actual, v.SignedClaim.CryptoSuite)
+			if v.SignedClaim.Claim.SchemaVersion != "" {
+				actual = append(actual, v.SignedClaim.Claim.CryptoSuite)
+			}
+		}
+		if v.ServerRecord.SchemaVersion != "" {
+			actual = append(actual, v.ServerRecord.CryptoSuite)
+		}
+		if v.AcceptedReceipt.SchemaVersion != "" {
+			actual = append(actual, v.AcceptedReceipt.CryptoSuite)
+		}
+		if v.CommittedReceipt.SchemaVersion != "" {
+			actual = append(actual, v.CommittedReceipt.CryptoSuite)
+		}
+		return require("proof bundle", actual...)
 	case model.RecordIndex:
 		return require("record index", v.CryptoSuite)
 	case model.RecordStatus:
@@ -48,6 +65,8 @@ func Require(expected cryptosuite.ID, value any) error {
 		return require("batch tree leaf", v.CryptoSuite)
 	case model.BatchTreeNode:
 		return require("batch tree node", v.CryptoSuite)
+	case model.BatchTreeSnapshot:
+		return require("batch tree snapshot", v.CryptoSuite)
 	case model.GlobalLogLeaf:
 		return require("global log leaf", v.CryptoSuite)
 	case model.GlobalLogNode:
@@ -61,7 +80,10 @@ func Require(expected cryptosuite.ID, value any) error {
 	case model.GlobalLogTile:
 		return require("global log tile", v.CryptoSuite)
 	case model.GlobalLogOutboxItem:
-		actual := []cryptosuite.ID{v.CryptoSuite, v.BatchRoot.CryptoSuite}
+		actual := []cryptosuite.ID{v.CryptoSuite}
+		if v.BatchRoot.SchemaVersion != "" {
+			actual = append(actual, v.BatchRoot.CryptoSuite)
+		}
 		if v.STH.TreeSize != 0 {
 			actual = append(actual, v.STH.CryptoSuite)
 		}
@@ -94,6 +116,26 @@ func Require(expected cryptosuite.ID, value any) error {
 		return require("L5 coverage checkpoint", v.CryptoSuite)
 	case model.IdempotencyDecision:
 		return require("idempotency decision", v.CryptoSuite, v.Record.CryptoSuite, v.Accepted.CryptoSuite)
+	case model.ClientKey:
+		actual := []cryptosuite.ID{v.CryptoSuite}
+		if len(v.KeyDescriptor) != 0 {
+			descriptor, err := keydescriptor.Unmarshal(v.KeyDescriptor)
+			if err != nil {
+				return fmt.Errorf("client key descriptor: %w", err)
+			}
+			actual = append(actual, descriptor.CryptoSuite)
+		}
+		return require("client key", actual...)
+	case model.KeyEvent:
+		actual := []cryptosuite.ID{v.CryptoSuite}
+		if len(v.KeyDescriptor) != 0 {
+			descriptor, err := keydescriptor.Unmarshal(v.KeyDescriptor)
+			if err != nil {
+				return fmt.Errorf("key event descriptor: %w", err)
+			}
+			actual = append(actual, descriptor.CryptoSuite)
+		}
+		return require("key event", actual...)
 	default:
 		return fmt.Errorf("unsupported suite-bound model type %T", value)
 	}

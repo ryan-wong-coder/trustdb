@@ -4,10 +4,11 @@ import (
 	"context"
 	"strings"
 
+	"github.com/spf13/cobra"
 	trustbackup "github.com/wowtrust/trustdb/internal/backup"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trusterr"
-	"github.com/spf13/cobra"
 )
 
 func newBackupCommand(rt *runtimeConfig) *cobra.Command {
@@ -31,7 +32,7 @@ func newBackupCreateCommand(rt *runtimeConfig) *cobra.Command {
 				return usageError("backup create requires --out")
 			}
 			compression = stringOrLiteral(cmd, "compression", compression, rt.cfg.Backup.Compression)
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -82,7 +83,7 @@ func newBackupRestoreCommand(rt *runtimeConfig) *cobra.Command {
 			if filePath == "" {
 				return usageError("backup restore requires --file")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -108,9 +109,10 @@ func addProofStoreFlags(cmd *cobra.Command, kind, path, proofDir *string) {
 	cmd.Flags().StringVar(kind, "metastore", "", "proof store backend: file (default) or pebble")
 	cmd.Flags().StringVar(path, "metastore-path", "", "proof store path; falls back to --proof-dir")
 	cmd.Flags().StringVar(proofDir, "proof-dir", "", "file backend proof directory")
+	cmd.Flags().String("crypto-suite", "", "expected proofstore cryptographic suite: INTL_V1 or CN_SM_V1 (required)")
 }
 
-func openProofStoreForCLI(kindText, path, proofDir, defaultProofDir string) (proofstore.Store, func(), error) {
+func openProofStoreForCLI(cmd *cobra.Command, rt *runtimeConfig, kindText, path, proofDir, defaultProofDir string) (proofstore.Store, func(), error) {
 	kind := proofstore.Backend(strings.TrimSpace(kindText))
 	if kind == "" {
 		kind = proofstore.BackendFile
@@ -125,7 +127,30 @@ func openProofStoreForCLI(kindText, path, proofDir, defaultProofDir string) (pro
 	if storePath == "" {
 		return nil, nil, usageError("--metastore-path or --proof-dir is required")
 	}
-	store, err := proofstore.Open(proofstore.Config{Kind: kind, Path: storePath})
+	suiteText, err := cmd.Flags().GetString("crypto-suite")
+	if err != nil {
+		return nil, nil, trusterr.Wrap(trusterr.CodeInternal, "read --crypto-suite", err)
+	}
+	suiteID := cryptosuite.ID(strings.TrimSpace(suiteText))
+	if suiteID == "" {
+		return nil, nil, usageError("--crypto-suite is required")
+	}
+	if _, err := cryptosuite.RequireKnown(suiteID); err != nil {
+		return nil, nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "validate --crypto-suite", err)
+	}
+	nodeID := strings.TrimSpace(rt.cfg.Server.ID)
+	logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
+	if nodeID == "" || logID == "" {
+		return nil, nil, trusterr.New(trusterr.CodeInvalidArgument, "configured server.id and global_log.log_id are required")
+	}
+	store, err := proofstore.Open(proofstore.Config{
+		Kind:        kind,
+		Path:        storePath,
+		CryptoSuite: suiteID,
+		NodeID:      nodeID,
+		LogID:       logID,
+		NamespaceID: proofstoreNamespaceID(string(kind), storePath, "", ""),
+	})
 	if err != nil {
 		return nil, nil, trusterr.Wrap(trusterr.CodeInternal, "open proofstore", err)
 	}

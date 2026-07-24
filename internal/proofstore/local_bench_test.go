@@ -12,7 +12,7 @@ import (
 )
 
 func BenchmarkLocalStoreLatestRoot4096(b *testing.B) {
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.rootDir(), 0o755); err != nil {
 		b.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func BenchmarkLocalStoreLatestRoot4096(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	latest := model.BatchRoot{
+	latest := model.BatchRoot{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "batch-4096",
 		BatchRoot:     make([]byte, 32),
@@ -55,12 +55,12 @@ func BenchmarkLocalStoreLatestRoot4096(b *testing.B) {
 }
 
 func BenchmarkLocalStoreLatestSignedTreeHead4096(b *testing.B) {
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.sthDir(), 0o755); err != nil {
 		b.Fatal(err)
 	}
 	for i := range 4096 {
-		sth := model.SignedTreeHead{
+		sth := model.SignedTreeHead{CryptoSuite: "INTL_V1",
 			SchemaVersion:  model.SchemaSignedTreeHead,
 			TreeSize:       uint64(i + 1),
 			RootHash:       make([]byte, 32),
@@ -92,12 +92,12 @@ func BenchmarkLocalStoreLatestSignedTreeHead4096(b *testing.B) {
 }
 
 func BenchmarkLocalStoreGlobalLeafFirstPage4096(b *testing.B) {
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.globalLeafDir(), 0o755); err != nil {
 		b.Fatal(err)
 	}
 	for i := range 4096 {
-		leaf := model.GlobalLogLeaf{
+		leaf := model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaGlobalLogLeaf,
 			LeafIndex:     uint64(i),
 			BatchID:       fmt.Sprintf("batch-%04d", i),
@@ -111,7 +111,7 @@ func BenchmarkLocalStoreGlobalLeafFirstPage4096(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	if err := writeCBORAtomic(store.globalStatePath(), model.GlobalLogState{
+	if err := writeCBORAtomic(store.globalStatePath(), model.GlobalLogState{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogState,
 		TreeSize:      4096,
 	}); err != nil {
@@ -132,12 +132,12 @@ func BenchmarkLocalStoreGlobalLeafFirstPage4096(b *testing.B) {
 }
 
 func BenchmarkLocalStoreRecordFirstPage4096(b *testing.B) {
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.recordByTimeDir(), 0o755); err != nil {
 		b.Fatal(err)
 	}
 	for i := range 4096 {
-		idx := model.RecordIndex{
+		idx := model.RecordIndex{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaRecordIndex,
 			RecordID:        fmt.Sprintf("tr1record-%04d", i),
 			ReceivedAtUnixN: int64(i + 1),
@@ -200,12 +200,12 @@ func BenchmarkLocalStoreRootsAfterLateCursor4096(b *testing.B) {
 
 func localRootBenchStore(b *testing.B, count int) LocalStore {
 	b.Helper()
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.rootDir(), 0o755); err != nil {
 		b.Fatal(err)
 	}
 	for i := range count {
-		root := model.BatchRoot{
+		root := model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       fmt.Sprintf("batch-%04d", i),
 			BatchRoot:     make([]byte, 32),
@@ -225,12 +225,12 @@ func localRootBenchStore(b *testing.B, count int) LocalStore {
 }
 
 func BenchmarkLocalStoreManifestsAfterLateCursor4096(b *testing.B) {
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.manifestDir(), 0o755); err != nil {
 		b.Fatal(err)
 	}
 	for i := range 4096 {
-		manifest := model.BatchManifest{
+		manifest := model.BatchManifest{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchManifest,
 			BatchID:       fmt.Sprintf("batch-%04d", i),
 			State:         model.BatchStateCommitted,
@@ -257,12 +257,12 @@ func BenchmarkLocalStoreManifestsAfterLateCursor4096(b *testing.B) {
 }
 
 func BenchmarkLocalStoreGlobalNodesAfterLateCursor4096(b *testing.B) {
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.globalNodeDir(), 0o755); err != nil {
 		b.Fatal(err)
 	}
 	for i := range 4096 {
-		node := model.GlobalLogNode{
+		node := model.GlobalLogNode{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaGlobalLogNode,
 			Level:         0,
 			StartIndex:    uint64(i),
@@ -291,12 +291,12 @@ func BenchmarkLocalStoreGlobalNodesAfterLateCursor4096(b *testing.B) {
 }
 
 func BenchmarkLocalStorePendingGlobalLogWithPublishedHistory4096(b *testing.B) {
-	store := LocalStore{Root: b.TempDir()}
+	store := testLocalStore(b.TempDir())
 	if err := os.MkdirAll(store.globalOutboxStatusDir(model.AnchorStatePublished), 0o755); err != nil {
 		b.Fatal(err)
 	}
 	for index := range 4096 {
-		item := model.GlobalLogOutboxItem{
+		item := model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaGlobalLogOutbox,
 			BatchID:         fmt.Sprintf("batch-%08d", index),
 			Status:          model.AnchorStatePublished,
@@ -310,7 +310,7 @@ func BenchmarkLocalStorePendingGlobalLogWithPublishedHistory4096(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	pending := model.GlobalLogOutboxItem{
+	pending := model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaGlobalLogOutbox,
 		BatchID:         "batch-pending",
 		Status:          model.AnchorStatePending,

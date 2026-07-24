@@ -39,7 +39,7 @@ func (s *conflictingBatchStore) CommitGlobalLogAppends(ctx context.Context, appe
 
 func newTestService(t testing.TB) (*Service, proofstore.LocalStore) {
 	t.Helper()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	return newTestServiceForStore(t, store), store
 }
 
@@ -224,7 +224,7 @@ func TestEvidenceUsesLatestCoveringAnchoredSTH(t *testing.T) {
 func TestEvidenceUsesConfiguredAnchorSinkStream(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	_, priv, err := trustcrypto.GenerateEd25519Key()
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key: %v", err)
@@ -340,7 +340,7 @@ func TestAppendBatchRootRejectsForeignStream(t *testing.T) {
 func TestAppendBatchRootSameIdentityReplayKeepsOriginalSigner(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	newService := func(keyID string) *Service {
 		_, privateKey, err := trustcrypto.GenerateEd25519Key()
 		if err != nil {
@@ -376,7 +376,7 @@ func TestAppendBatchRootSameIdentityReplayKeepsOriginalSigner(t *testing.T) {
 func TestAppendBatchRootRetriesConflictBeforeWinningStateIsVisible(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	conflictingStore := &conflictingBatchStore{Store: store}
 	conflictingStore.conflict = func() error {
 		return trusterr.New(trusterr.CodeFailedPrecondition, "global log append lost concurrent write")
@@ -399,7 +399,7 @@ func TestAppendBatchRootRetriesConflictBeforeWinningStateIsVisible(t *testing.T)
 func TestAppendBatchRootReplansAfterConcurrentWriterAdvancesTree(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	_, privateKey, err := trustcrypto.GenerateEd25519Key()
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key: %v", err)

@@ -355,7 +355,7 @@ func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 	if record.RecordID == "" {
 		record.RecordID = bundle.RecordID
 	}
-	return RecordIndexFromBatchInputs(
+	idx := RecordIndexFromBatchInputs(
 		bundle.SignedClaim,
 		record,
 		bundle.AcceptedReceipt,
@@ -366,6 +366,10 @@ func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 		bundle.CommittedReceipt.ClosedAtUnixN,
 		"L3",
 	)
+	if idx.CryptoSuite == "" {
+		idx.CryptoSuite = bundle.CryptoSuite
+	}
+	return idx
 }
 
 func RecordIndexFromBatchInputs(

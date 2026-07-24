@@ -53,7 +53,7 @@ func (e *retryMaterializeEngine) CommitBatch(batchID string, closedAt time.Time,
 }
 
 func TestAsyncMaterializerRetriesPreparedManifest(t *testing.T) {
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	items := []Accepted{{Signed: signed("retry-record"), Record: recordWithWAL("retry-record", 91), Accepted: accepted("retry-record")}}
 	engine := &retryMaterializeEngine{}
 	svc := New(engine, store, Options{
@@ -76,7 +76,7 @@ func TestAsyncMaterializerRetriesPreparedManifest(t *testing.T) {
 }
 
 func TestAsyncMaterializerMarksPermanentFailure(t *testing.T) {
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	engine := &retryMaterializeEngine{permanent: true}
 	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync, MaterializerWorkers: 1, MaterializerQueueSize: 1, MaterializerPollInterval: 10 * time.Millisecond}, nil)
 	defer svc.Shutdown(context.Background())
@@ -91,7 +91,7 @@ func TestAsyncMaterializerMarksPermanentFailure(t *testing.T) {
 }
 
 func TestAsyncMaterializerKeepsItemsVisibleWhenScannerWinsPublicationRace(t *testing.T) {
-	store := preparedManifestCallbackStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := preparedManifestCallbackStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	var svc *Service
 	store.onPrepared = func() {
 		svc.schedulePreparedManifests(context.Background())

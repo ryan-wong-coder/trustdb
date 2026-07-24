@@ -153,7 +153,7 @@ func TestTiKVL5CoverageCheckpointIsVisibleAcrossStores(t *testing.T) {
 func tikvScheduleCandidate(key model.STHAnchorScheduleKey, treeSize uint64, seed byte, observedAt, dueAt int64) model.STHAnchorCandidate {
 	return model.STHAnchorCandidate{
 		Key: key,
-		STH: model.SignedTreeHead{
+		STH: model.SignedTreeHead{CryptoSuite: "INTL_V1",
 			SchemaVersion:  model.SchemaSignedTreeHead,
 			TreeAlg:        model.DefaultMerkleTreeAlg,
 			TreeSize:       treeSize,
@@ -182,7 +182,7 @@ func TestTiKVSharedCheckpointScopeAcrossStores(t *testing.T) {
 	nodeB := openIntegrationStore(t, namespace)
 	defer nodeB.Close()
 
-	want := model.WALCheckpoint{
+	want := model.WALCheckpoint{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaWALCheckpoint,
 		SegmentID:       7,
 		LastSequence:    42,
@@ -212,7 +212,7 @@ func TestTiKVCheckpointScopesAreIndependent(t *testing.T) {
 	nodeB := openIntegrationStoreWithScope(t, namespace, "node-b", "wal-b")
 	defer nodeB.Close()
 
-	if err := nodeA.PutCheckpoint(ctx, model.WALCheckpoint{LastSequence: 42}); err != nil {
+	if err := nodeA.PutCheckpoint(ctx, model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: 42}); err != nil {
 		t.Fatalf("nodeA PutCheckpoint: %v", err)
 	}
 	if _, found, err := nodeB.GetCheckpoint(ctx); err != nil || found {
@@ -240,7 +240,7 @@ func TestTiKVCheckpointConcurrentAdvancementIsMonotonic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := store.PutCheckpoint(ctx, model.WALCheckpoint{LastSequence: sequence}); err != nil {
+			if err := store.PutCheckpoint(ctx, model.WALCheckpoint{CryptoSuite: "INTL_V1", LastSequence: sequence}); err != nil {
 				t.Errorf("PutCheckpoint(%d): %v", sequence, err)
 			}
 		}()
@@ -264,7 +264,7 @@ func TestTiKVProjectionFenceAcrossStoreInstances(t *testing.T) {
 	if err := initializer.EnsureIdempotencyProjection(ctx); err != nil {
 		t.Fatalf("EnsureIdempotencyProjection: %v", err)
 	}
-	if err := writer.PutManifest(ctx, model.BatchManifest{
+	if err := writer.PutManifest(ctx, model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       "generic-commit",
 		State:         model.BatchStateCommitted,
@@ -282,7 +282,7 @@ func TestTiKVNamespaceIsolationAcrossStores(t *testing.T) {
 	nodeB := openIntegrationStore(t, integrationNamespace(t, "isolation-b"))
 	defer nodeB.Close()
 
-	if err := nodeA.PutCheckpoint(ctx, model.WALCheckpoint{
+	if err := nodeA.PutCheckpoint(ctx, model.WALCheckpoint{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaWALCheckpoint,
 		SegmentID:       1,
 		LastSequence:    1,
@@ -351,25 +351,25 @@ func TestTiKVPreparedManifestIndexIntegration(t *testing.T) {
 
 func tikvCommittedManifestFixture(batchID string) (model.BatchManifest, model.ProofBundle) {
 	recordID := batchID + "-record"
-	manifest := model.BatchManifest{
+	manifest := model.BatchManifest{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchManifest,
 		BatchID:       batchID,
 		State:         model.BatchStateCommitted,
 		RecordIDs:     []string{recordID},
 		TreeSize:      1,
 	}
-	bundle := model.ProofBundle{
+	bundle := model.ProofBundle{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaProofBundle,
 		RecordID:      recordID,
-		ServerRecord: model.ServerRecord{
+		ServerRecord: model.ServerRecord{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaServerRecord,
 			RecordID:      recordID,
 		},
-		AcceptedReceipt: model.AcceptedReceipt{
+		AcceptedReceipt: model.AcceptedReceipt{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaAcceptedReceipt,
 			RecordID:      recordID,
 		},
-		CommittedReceipt: model.CommittedReceipt{
+		CommittedReceipt: model.CommittedReceipt{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaCommittedReceipt,
 			RecordID:      recordID,
 			Status:        "committed",
@@ -392,7 +392,7 @@ func TestTiKVBatchTreeSnapshotIntegration(t *testing.T) {
 	store := openIntegrationStore(t, integrationNamespace(t, "batch-tree-tiles"))
 	defer store.Close()
 	const leafCount = 1024
-	snapshot := model.BatchTreeSnapshot{
+	snapshot := model.BatchTreeSnapshot{CryptoSuite: "INTL_V1",
 		BatchID:        "batch-tree-tiles",
 		CreatedAtUnixN: time.Now().UnixNano(),
 		RecordIDs:      make([]string, leafCount),
@@ -469,7 +469,7 @@ func TestTiKVGlobalLogConcurrentServicesRetryConflicts(t *testing.T) {
 				defer wg.Done()
 				<-start
 				batchID := fmt.Sprintf("node-%d-batch-%d", serviceIndex, appendIndex)
-				_, err := svc.AppendBatchRoot(ctx, model.BatchRoot{
+				_, err := svc.AppendBatchRoot(ctx, model.BatchRoot{CryptoSuite: "INTL_V1",
 					SchemaVersion: model.SchemaBatchRoot,
 					BatchID:       batchID,
 					BatchRoot:     bytes.Repeat([]byte{byte(serviceIndex*appendsPerService + appendIndex + 1)}, 32),

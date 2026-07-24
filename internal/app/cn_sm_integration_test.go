@@ -11,7 +11,6 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/receipt"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
@@ -127,7 +126,7 @@ func TestCNSMV1ClaimReceiptBatchAndSTHEndToEnd(t *testing.T) {
 	if err := receipt.VerifyCommittedWithProvider(ctx, commit.Bundles[0].CommittedReceipt, serverDescriptor, provider); err != nil {
 		t.Fatalf("verify committed receipt: %v", err)
 	}
-	store := proofstore.LocalStore{Root: t.TempDir(), SuiteID: cryptosuite.CNSMV1}
+	store := newBoundTestLocalStoreForSuite(t, t.TempDir(), cryptosuite.CNSMV1)
 	global, err := globallog.New(globallog.Options{
 		Store: store, NodeID: "node-cn", LogID: "log-cn", Signer: serverSigner, CryptoProvider: provider,
 		Clock: func() time.Time { return time.Unix(400, 0) },

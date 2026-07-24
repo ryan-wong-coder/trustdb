@@ -15,13 +15,13 @@ import (
 
 func TestRequireMatchingMigrationSuitesRejectsCrossSuiteCopy(t *testing.T) {
 	t.Parallel()
-	src := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src"), SuiteID: cryptosuite.CNSMV1}
-	dst := &proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst"), SuiteID: cryptosuite.INTLV1}
+	src := newBoundTestLocalStoreForSuite(t, filepath.Join(t.TempDir(), "src"), cryptosuite.CNSMV1)
+	dst := newBoundTestLocalStoreForSuite(t, filepath.Join(t.TempDir(), "dst"), cryptosuite.INTLV1)
 	if _, err := requireMatchingMigrationSuites(src, dst); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("mismatch code=%s err=%v", trusterr.CodeOf(err), err)
 	}
-	dst.SuiteID = cryptosuite.CNSMV1
-	if suiteID, err := requireMatchingMigrationSuites(src, dst); err != nil || suiteID != cryptosuite.CNSMV1 {
+	matching := newBoundTestLocalStoreForSuite(t, filepath.Join(t.TempDir(), "matching"), cryptosuite.CNSMV1)
+	if suiteID, err := requireMatchingMigrationSuites(src, matching); err != nil || suiteID != cryptosuite.CNSMV1 {
 		t.Fatalf("matching suite = %q, err=%v", suiteID, err)
 	}
 }
@@ -48,7 +48,7 @@ type seedCounts struct {
 func seedFileStore(t *testing.T, dir string) seedCounts {
 	t.Helper()
 	ctx := context.Background()
-	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: dir})
+	store, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendFile, dir))
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestMetastoreMigrateCopiesEverything(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"metastore", "migrate", "--from", fromDir, "--to", toDir})
+	cmd.SetArgs([]string{"metastore", "migrate", "--from", fromDir, "--to", toDir, "--crypto-suite", "INTL_V1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("metastore migrate error = %v stderr=%s", err, errOut.String())
 	}
@@ -293,7 +293,7 @@ func TestMetastoreMigrateCopiesEverything(t *testing.T) {
 
 	// Verify destination content.
 	ctx := context.Background()
-	dst, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	dst, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendPebble, toDir))
 	if err != nil {
 		t.Fatalf("open pebble dst: %v", err)
 	}
@@ -383,12 +383,12 @@ func TestMetastoreMigrateResumesAfterManifestOnlyInterruption(t *testing.T) {
 	toDir := filepath.Join(tmp, "pebble")
 	_ = seedFileStore(t, fromDir)
 	ctx := context.Background()
-	src := &proofstore.LocalStore{Root: fromDir}
+	src := newBoundTestLocalStore(t, fromDir)
 	manifest, err := src.GetManifest(ctx, "batch-1")
 	if err != nil {
 		t.Fatalf("source GetManifest() error = %v", err)
 	}
-	dst, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	dst, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendPebble, toDir))
 	if err != nil {
 		t.Fatalf("open interrupted destination error = %v", err)
 	}
@@ -401,11 +401,11 @@ func TestMetastoreMigrateResumesAfterManifestOnlyInterruption(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"metastore", "migrate", "--from", fromDir, "--to", toDir})
+	cmd.SetArgs([]string{"metastore", "migrate", "--from", fromDir, "--to", toDir, "--crypto-suite", "INTL_V1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("resumed metastore migrate error = %v stderr=%s", err, errOut.String())
 	}
-	dst, err = proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	dst, err = proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendPebble, toDir))
 	if err != nil {
 		t.Fatalf("reopen resumed destination error = %v", err)
 	}
@@ -432,7 +432,7 @@ func TestMetastoreMigrateIsIdempotent(t *testing.T) {
 	for run := 0; run < 2; run++ {
 		var out, errOut bytes.Buffer
 		cmd := newRootCommand(&out, &errOut)
-		cmd.SetArgs([]string{"metastore", "migrate", "--from", fromDir, "--to", toDir})
+		cmd.SetArgs([]string{"metastore", "migrate", "--from", fromDir, "--to", toDir, "--crypto-suite", "INTL_V1"})
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("run %d migrate error = %v stderr=%s", run, err, errOut.String())
 		}
@@ -450,7 +450,7 @@ func TestMetastoreMigrateIsIdempotent(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dst, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	dst, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendPebble, toDir))
 	if err != nil {
 		t.Fatalf("open dst: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestMetastoreMigrateOverwriteReplacesAnchorSchedule(t *testing.T) {
 		t.Helper()
 		var out, errOut bytes.Buffer
 		cmd := newRootCommand(&out, &errOut)
-		args := []string{"metastore", "migrate", "--from", fromDir, "--to", toDir}
+		args := []string{"metastore", "migrate", "--from", fromDir, "--to", toDir, "--crypto-suite", "INTL_V1"}
 		if overwrite {
 			args = append(args, "--overwrite")
 		}
@@ -490,7 +490,7 @@ func TestMetastoreMigrateOverwriteReplacesAnchorSchedule(t *testing.T) {
 
 	runMigrate(false)
 	ctx := context.Background()
-	dst, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	dst, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendPebble, toDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func TestMetastoreMigrateOverwriteReplacesAnchorSchedule(t *testing.T) {
 	}
 
 	runMigrate(true)
-	dst, err = proofstore.Open(proofstore.Config{Kind: proofstore.BackendPebble, Path: toDir})
+	dst, err = proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendPebble, toDir))
 	if err != nil {
 		t.Fatal(err)
 	}

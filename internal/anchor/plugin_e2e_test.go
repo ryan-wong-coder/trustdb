@@ -11,7 +11,6 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 )
 
 func TestExamplePluginExecutablePublishAndVerify(t *testing.T) {
@@ -52,7 +51,7 @@ func TestExamplePluginExecutablePublishAndVerify(t *testing.T) {
 			Alg: model.DefaultSignatureAlg, KeyID: "server-key", Signature: bytes.Repeat([]byte{0x22}, 64),
 		},
 	}
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	offer(t, store, key, sth, 100, 100)
 	now := time.Unix(0, 100)
 	service := newTestService(t, store, sink, key, &now, nil)

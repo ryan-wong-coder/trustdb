@@ -93,7 +93,7 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 		WAL:             reopened,
 		Now:             func() time.Time { return time.Unix(300, 0) },
 	}
-	store := proofstore.LocalStore{Root: filepath.Join(dir, "proofs")}
+	store := newBoundTestLocalStore(t, filepath.Join(dir, "proofs"))
 	batchSvc := batch.New(
 		restartedEngine,
 		store,
@@ -372,7 +372,7 @@ func newRecoveryEnv(t *testing.T, numClaims int) *recoveryEnv {
 	return &recoveryEnv{
 		dir:       dir,
 		walPath:   walPath,
-		store:     proofstore.LocalStore{Root: filepath.Join(dir, "proofs")},
+		store:     newBoundTestLocalStore(t, filepath.Join(dir, "proofs")),
 		engine:    engine,
 		closedAt:  closedAt,
 		batchID:   batchID,
@@ -493,7 +493,7 @@ func (e *recoveryEnv) assertCommittedBatch(t *testing.T) {
 func (e *recoveryEnv) assertReplayIdempotent(t *testing.T) {
 	t.Helper()
 
-	before, err := snapshotStore(e.store.Root)
+	before, err := snapshotStore(e.store.RootPath())
 	if err != nil {
 		t.Fatalf("snapshotStore(before) error = %v", err)
 	}
@@ -501,7 +501,7 @@ func (e *recoveryEnv) assertReplayIdempotent(t *testing.T) {
 	if recovered != 0 || replayed != 0 || skipped != len(e.items) {
 		t.Fatalf("second runReplay() recovered=%d replayed=%d skipped=%d, want 0/0/%d", recovered, replayed, skipped, len(e.items))
 	}
-	after, err := snapshotStore(e.store.Root)
+	after, err := snapshotStore(e.store.RootPath())
 	if err != nil {
 		t.Fatalf("snapshotStore(after) error = %v", err)
 	}
@@ -737,7 +737,7 @@ func TestReplayRebuildsIdempotencyIndex(t *testing.T) {
 	restarted.Idempotency = app.NewIdempotencyIndex()
 	restarted.Now = func() time.Time { return time.Unix(9000, 0) }
 
-	store := proofstore.LocalStore{Root: filepath.Join(env.dir, "proofs")}
+	store := newBoundTestLocalStore(t, filepath.Join(env.dir, "proofs"))
 	batchSvc := batch.New(
 		restarted,
 		store,
@@ -827,7 +827,7 @@ func TestEmptyIdempotencyKeyExactRetrySurvivesRestart(t *testing.T) {
 	restarted := env.engine
 	restarted.WAL = reopened
 	restarted.Idempotency = app.NewIdempotencyIndex()
-	store := proofstore.LocalStore{Root: filepath.Join(env.dir, "proofs")}
+	store := newBoundTestLocalStore(t, filepath.Join(env.dir, "proofs"))
 	restarted.DurableRecords = store
 	svc := batch.New(restarted, store, batch.Options{QueueSize: 3, MaxRecords: 3, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
@@ -1185,7 +1185,7 @@ func TestReplayDirectoryModeRestoresRecord(t *testing.T) {
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Unix(300, 0) },
 	}
-	store := proofstore.LocalStore{Root: filepath.Join(dir, "proofs")}
+	store := newBoundTestLocalStore(t, filepath.Join(dir, "proofs"))
 	svc := batch.New(
 		restarted,
 		store,
@@ -1310,7 +1310,7 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 			segmentsFor(records))
 	}
 
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: filepath.Join(dir, "proofs")}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, filepath.Join(dir, "proofs"))}
 	const checkpointBatchID = "batch-checkpoint-skip"
 	closedAt := time.Unix(700, 0).UTC()
 	bundles, err := engine.CommitBatch(checkpointBatchID, closedAt, signedClaims, records, acceptedReceipts)
