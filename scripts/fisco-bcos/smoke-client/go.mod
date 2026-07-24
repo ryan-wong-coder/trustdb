@@ -1,6 +1,6 @@
 module github.com/wowtrust/trustdb/scripts/fisco-bcos/smoke-client
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/FISCO-BCOS/go-sdk/v3 v3.0.2
@@ -24,7 +24,7 @@ require (
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
-	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 )
