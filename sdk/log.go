@@ -99,7 +99,9 @@ func BuildSignedLogClaim(raw io.Reader, id Identity, opts LogClaimOptions) (Sign
 }
 
 // BuildSignedLogClaimContext is the cancellation-aware variant used by
-// submission, batching, and streaming paths.
+// submission, batching, and streaming paths. Cancellation is observed between
+// Reader calls; it cannot forcibly interrupt an arbitrary Reader while that
+// Reader is blocked inside Read.
 func BuildSignedLogClaimContext(ctx context.Context, raw io.Reader, id Identity, opts LogClaimOptions) (SignedClaim, error) {
 	if raw == nil {
 		return SignedClaim{}, errors.New("sdk: log content reader is nil")
@@ -124,7 +126,7 @@ func BuildSignedLogClaimContext(ctx context.Context, raw io.Reader, id Identity,
 	if hashAlg == "" {
 		hashAlg = suite.ContentHash.Algorithm
 	}
-	contentHash, n, err := trustcrypto.HashReaderWithProvider(provider, hashAlg, raw)
+	contentHash, n, err := trustcrypto.HashReaderWithProvider(provider, hashAlg, readerWithContext(ctx, raw))
 	if err != nil {
 		return SignedClaim{}, err
 	}

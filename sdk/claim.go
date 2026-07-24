@@ -20,7 +20,9 @@ func BuildSignedFileClaim(raw io.Reader, id Identity, opts FileClaimOptions) (Si
 }
 
 // BuildSignedFileClaimContext hashes and signs one file with the suite bound
-// to id. Cancellation is propagated to callback/HSM/remote signers.
+// to id. Cancellation is observed between Reader calls and propagated to
+// callback/HSM/remote signers. It cannot forcibly interrupt an arbitrary
+// Reader while that Reader is blocked inside Read.
 func BuildSignedFileClaimContext(ctx context.Context, raw io.Reader, id Identity, opts FileClaimOptions) (SignedClaim, error) {
 	if raw == nil {
 		return SignedClaim{}, errors.New("sdk: raw content reader is nil")
@@ -45,7 +47,7 @@ func BuildSignedFileClaimContext(ctx context.Context, raw io.Reader, id Identity
 	if hashAlg == "" {
 		hashAlg = suite.ContentHash.Algorithm
 	}
-	contentHash, n, err := trustcrypto.HashReaderWithProvider(provider, hashAlg, raw)
+	contentHash, n, err := trustcrypto.HashReaderWithProvider(provider, hashAlg, readerWithContext(ctx, raw))
 	if err != nil {
 		return SignedClaim{}, err
 	}
@@ -98,6 +100,26 @@ func BuildSignedFileClaimContext(ctx context.Context, raw io.Reader, id Identity
 		return SignedClaim{}, err
 	}
 	return claim.SignWithProvider(ctx, provider, c, signer)
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func readerWithContext(ctx context.Context, reader io.Reader) io.Reader {
+	return &contextReader{ctx: nonNilContext(ctx), reader: reader}
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(buffer)
+	if contextErr := r.ctx.Err(); contextErr != nil {
+		return n, contextErr
+	}
+	return n, err
 }
 
 func VerifySignedClaim(signed SignedClaim, publicKey KeyDescriptor) (string, error) {
