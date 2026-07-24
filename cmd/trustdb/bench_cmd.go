@@ -607,8 +607,7 @@ func waitForBenchProofLevel(ctx context.Context, client *sdk.Client, recordID, l
 		if ctx.Err() != nil {
 			return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "bench proof wait canceled", ctx.Err())
 		}
-		proof, err := client.ExportSingleProof(ctx, recordID)
-		if err == nil && benchProofReachedLevel(proof, level) {
+		if benchProofReachedLevel(ctx, client, recordID, level) {
 			return nil
 		}
 		select {
@@ -620,17 +619,26 @@ func waitForBenchProofLevel(ctx context.Context, client *sdk.Client, recordID, l
 	return errBenchProofTimeout
 }
 
-func benchProofReachedLevel(proof sdk.SingleProof, level string) bool {
-	switch level {
-	case sdk.ProofLevelL3:
-		return proof.ProofBundle.RecordID != ""
-	case sdk.ProofLevelL4:
-		return proof.ProofBundle.RecordID != "" && proof.GlobalProof != nil
-	case sdk.ProofLevelL5:
-		return proof.ProofBundle.RecordID != "" && proof.GlobalProof != nil && proof.AnchorResult != nil
-	default:
+func benchProofReachedLevel(ctx context.Context, client *sdk.Client, recordID, level string) bool {
+	bundle, err := client.GetProofBundle(ctx, recordID)
+	if err != nil || bundle.RecordID == "" {
 		return false
 	}
+	switch level {
+	case sdk.ProofLevelL3:
+		return true
+	}
+	if bundle.CommittedReceipt.BatchID == "" {
+		return false
+	}
+	evidence, err := client.GetGlobalEvidence(ctx, bundle.CommittedReceipt.BatchID)
+	if err != nil || evidence.GlobalProof.BatchID == "" {
+		return false
+	}
+	if level == sdk.ProofLevelL4 {
+		return true
+	}
+	return level == sdk.ProofLevelL5 && evidence.AnchorResult != nil
 }
 
 func benchProofLevelRank(level string) int {
