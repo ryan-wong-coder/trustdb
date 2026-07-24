@@ -23,10 +23,10 @@ func TestRegistryPinsCurrentAndReservedGenerations(t *testing.T) {
 	}{
 		ModelV1:       {FamilyModel, 1, AvailabilityReserved, MigrationRetireOnCutover, 0},
 		ModelV2:       {FamilyModel, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
-		SingleProofV1: {FamilySingleProof, 1, AvailabilityAvailable, MigrationRetireOnCutover, 16 << 20},
+		SingleProofV1: {FamilySingleProof, 1, AvailabilityReserved, MigrationRetireOnCutover, 16 << 20},
 		SingleProofV2: {FamilySingleProof, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxSingleProofBytesV2},
-		BackupV4:      {FamilyBackup, 4, AvailabilityReserved, MigrationRetireOnCutover, 128 << 20},
-		BackupV5:      {FamilyBackup, 5, AvailabilityAvailable, MigrationDestructiveCutover, MaxBackupEntryBytesV2},
+		BackupV4:      {FamilyBackup, 4, AvailabilityAvailable, MigrationRetireOnCutover, 128 << 20},
+		BackupV5:      {FamilyBackup, 5, AvailabilityReserved, MigrationDestructiveCutover, MaxBackupEntryBytesV2},
 		WALV1:         {FamilyWAL, 1, AvailabilityReserved, MigrationRetireOnCutover, 0},
 		WALV2:         {FamilyWAL, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
 		ProofstoreV4:  {FamilyProofstore, 4, AvailabilityReserved, MigrationRetireOnCutover, 64 << 20},
@@ -35,10 +35,10 @@ func TestRegistryPinsCurrentAndReservedGenerations(t *testing.T) {
 		HTTPV2:        {FamilyHTTP, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
 		GRPCV1:        {FamilyGRPC, 1, AvailabilityReserved, MigrationRetireOnCutover, 16 << 20},
 		GRPCV2:        {FamilyGRPC, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
-		NATSV1:        {FamilyNATS, 1, AvailabilityAvailable, MigrationRetireOnCutover, MaxNATSTransportBytesV1},
-		NATSV2:        {FamilyNATS, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
-		SDKV1:         {FamilySDK, 1, AvailabilityAvailable, MigrationRetireOnCutover, 16 << 20},
-		SDKV2:         {FamilySDK, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
+		NATSV1:        {FamilyNATS, 1, AvailabilityReserved, MigrationRetireOnCutover, MaxNATSTransportBytesV1},
+		NATSV2:        {FamilyNATS, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
+		SDKV1:         {FamilySDK, 1, AvailabilityReserved, MigrationRetireOnCutover, 16 << 20},
+		SDKV2:         {FamilySDK, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
 	}
 
 	all := All()
@@ -80,7 +80,11 @@ func TestRegistryPinsCurrentAndReservedGenerations(t *testing.T) {
 				t.Fatalf("single-suite descriptor %q has unexpected suite binding: %#v", descriptor.Identifier, descriptor)
 			}
 		} else {
-			if !reflect.DeepEqual(descriptor.AllowedSuites, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}) || descriptor.SuiteField != "crypto_suite" {
+			wantSuites := []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}
+			if descriptor.Identifier == SDKV2 {
+				wantSuites = []cryptosuite.ID{cryptosuite.INTLV1}
+			}
+			if !reflect.DeepEqual(descriptor.AllowedSuites, wantSuites) || descriptor.SuiteField != "crypto_suite" {
 				t.Fatalf("crypto-agile descriptor %q has unexpected suite binding: %#v", descriptor.Identifier, descriptor)
 			}
 		}
@@ -117,6 +121,27 @@ func TestRuntimeGatesRejectReservedFormatsAndSuites(t *testing.T) {
 	}
 	if _, _, err := RequireWritable(ModelV2, cryptosuite.CNSMV1); err != nil {
 		t.Fatalf("RequireWritable(V2 CN_SM_V1) error = %v", err)
+	}
+	if _, _, err := RequireWritable(BackupV5, cryptosuite.CNSMV1); !errors.Is(err, ErrUnavailableFormat) {
+		t.Fatalf("RequireWritable(unimplemented backup v5) error = %v, want ErrUnavailableFormat", err)
+	}
+	if _, _, err := RequireWritable(BackupV4, cryptosuite.INTLV1); err != nil {
+		t.Fatalf("RequireWritable(implemented backup v4) error = %v", err)
+	}
+	if _, _, err := RequireWritable(SingleProofV1, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
+		t.Fatalf("RequireWritable(retired sproof v1) error = %v, want ErrUnavailableFormat", err)
+	}
+	if _, _, err := RequireWritable(SingleProofV2, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
+		t.Fatalf("RequireWritable(unimplemented sproof v2) error = %v, want ErrUnavailableFormat", err)
+	}
+	if _, _, err := RequireWritable(SDKV1, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
+		t.Fatalf("RequireWritable(retired SDK v1) error = %v, want ErrUnavailableFormat", err)
+	}
+	if _, _, err := RequireWritable(SDKV2, cryptosuite.INTLV1); err != nil {
+		t.Fatalf("RequireWritable(SDK v2 INTL_V1) error = %v", err)
+	}
+	if _, _, err := RequireWritable(SDKV2, cryptosuite.CNSMV1); !errors.Is(err, ErrSuiteNotAllowed) {
+		t.Fatalf("RequireWritable(SDK v2 CN_SM_V1) error = %v, want ErrSuiteNotAllowed", err)
 	}
 	if err := RequireSuite(ModelV2, cryptosuite.CNSMV1); err != nil {
 		t.Fatalf("RequireSuite(reserved planned combination) error = %v", err)
@@ -259,7 +284,7 @@ func TestRegistrySnapshotCanonicalCBORGolden(t *testing.T) {
 		t.Fatalf("marshal registry snapshot: %v", err)
 	}
 	digest := sha256.Sum256(encoded)
-	const wantSHA256 = "b40681a39c1e6a23c3f34c14efb9a0985198d28c26810f08e4ab984d717f2c7d"
+	const wantSHA256 = "1aa845936223b439a3bba545fbaf551bc775842c6bafdd7eaee17d3ae4866d49"
 	if got := hex.EncodeToString(digest[:]); got != wantSHA256 {
 		t.Fatalf("registry snapshot SHA-256 = %s, want %s", got, wantSHA256)
 	}

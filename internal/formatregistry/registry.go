@@ -112,11 +112,11 @@ var registry = map[string]Descriptor{
 	ModelV1: descriptor(FamilyModel, ModelV1, 1, AvailabilityReserved, EncodingDeterministicCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 0),
 	ModelV2: descriptor(FamilyModel, ModelV2, 2, AvailabilityAvailable, EncodingDeterministicCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxStoredObjectBytesV2),
 
-	SingleProofV1: descriptor(FamilySingleProof, SingleProofV1, 1, AvailabilityAvailable, EncodingDeterministicCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 16<<20),
+	SingleProofV1: descriptor(FamilySingleProof, SingleProofV1, 1, AvailabilityReserved, EncodingDeterministicCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 16<<20),
 	SingleProofV2: descriptor(FamilySingleProof, SingleProofV2, 2, AvailabilityReserved, EncodingDeterministicCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxSingleProofBytesV2),
 
-	BackupV4: descriptorWithStrictness(FamilyBackup, BackupV4, 4, AvailabilityReserved, EncodingBackupArchiveV4, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 128<<20, false, false),
-	BackupV5: descriptorWithStrictness(FamilyBackup, BackupV5, 5, AvailabilityAvailable, EncodingBackupArchiveV5, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxBackupEntryBytesV2, true, true),
+	BackupV4: descriptorWithStrictness(FamilyBackup, BackupV4, 4, AvailabilityAvailable, EncodingBackupArchiveV4, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 128<<20, false, false),
+	BackupV5: descriptorWithStrictness(FamilyBackup, BackupV5, 5, AvailabilityReserved, EncodingBackupArchiveV5, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxBackupEntryBytesV2, true, true),
 
 	WALV1: descriptor(FamilyWAL, WALV1, 1, AvailabilityReserved, EncodingWALFrames, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 0),
 	WALV2: descriptor(FamilyWAL, WALV2, 2, AvailabilityAvailable, EncodingWALFrames, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxStoredObjectBytesV2),
@@ -130,11 +130,11 @@ var registry = map[string]Descriptor{
 	GRPCV1: descriptor(FamilyGRPC, GRPCV1, 1, AvailabilityReserved, EncodingGRPCCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 16<<20),
 	GRPCV2: descriptor(FamilyGRPC, GRPCV2, 2, AvailabilityAvailable, EncodingGRPCCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
 
-	NATSV1: descriptor(FamilyNATS, NATSV1, 1, AvailabilityAvailable, EncodingNATSJetStreamCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, MaxNATSTransportBytesV1),
-	NATSV2: descriptor(FamilyNATS, NATSV2, 2, AvailabilityReserved, EncodingNATSJetStreamCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
+	NATSV1: descriptor(FamilyNATS, NATSV1, 1, AvailabilityReserved, EncodingNATSJetStreamCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, MaxNATSTransportBytesV1),
+	NATSV2: descriptor(FamilyNATS, NATSV2, 2, AvailabilityAvailable, EncodingNATSJetStreamCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
 
-	SDKV1: descriptor(FamilySDK, SDKV1, 1, AvailabilityAvailable, EncodingGoSDKCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 16<<20),
-	SDKV2: descriptor(FamilySDK, SDKV2, 2, AvailabilityReserved, EncodingGoSDKCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
+	SDKV1: descriptor(FamilySDK, SDKV1, 1, AvailabilityReserved, EncodingGoSDKCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 16<<20),
+	SDKV2: descriptor(FamilySDK, SDKV2, 2, AvailabilityAvailable, EncodingGoSDKCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
 }
 
 func descriptor(
@@ -330,7 +330,7 @@ func RequireSuite(identifier string, suiteID cryptosuite.ID) error {
 }
 
 // RequireWritable combines the format and cryptographic-suite production
-// gates. Today only current INTL_V1 formats pass this function.
+// gates. Reserved formats remain discoverable but can never be emitted.
 func RequireWritable(identifier string, suiteID cryptosuite.ID) (Descriptor, cryptosuite.Suite, error) {
 	descriptor, err := RequireAvailable(identifier)
 	if err != nil {
