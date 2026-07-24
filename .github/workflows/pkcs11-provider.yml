@@ -34,6 +34,7 @@ jobs:
   linux-package-and-softhsm:
     name: Linux package and SoftHSM
     runs-on: ubuntu-24.04
+    container: golang:1.26-bookworm
     timeout-minutes: 20
 
     steps:
@@ -48,8 +49,8 @@ jobs:
 
       - name: Install PKCS11 interoperability tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends file softhsm2 opensc
+          apt-get update
+          apt-get install -y --no-install-recommends file softhsm2 opensc
 
       - name: Run portable and native contract tests
         run: |
@@ -88,29 +89,28 @@ jobs:
 
       - name: Provision isolated SoftHSM token
         shell: bash
-        env:
-          TOKEN_PIN: "846295"
-          TOKEN_SO_PIN: "84629500"
         run: |
           set -euo pipefail
           token_dir="$RUNNER_TEMP/trustdb-pkcs11/tokens"
           pin_file="$RUNNER_TEMP/trustdb-pkcs11/token.pin"
           config_file="$RUNNER_TEMP/trustdb-pkcs11/softhsm2.conf"
+          token_pin="$(openssl rand -hex 8)"
+          token_so_pin="$(openssl rand -hex 8)"
           mkdir -p "$token_dir"
           {
             echo "directories.tokendir = $token_dir"
             echo "objectstore.backend = file"
             echo "log.level = ERROR"
           } >"$config_file"
-          printf '%s\n' "$TOKEN_PIN" >"$pin_file"
+          printf '%s\n' "$token_pin" >"$pin_file"
           chmod 600 "$pin_file"
           export SOFTHSM2_CONF="$config_file"
           softhsm2-util --init-token --free --label trustdb \
-            --so-pin "$TOKEN_SO_PIN" --pin "$TOKEN_PIN"
-          module_path="$(dpkg -L libsofthsm2 | grep '/libsofthsm2\\.so$' | head -n 1)"
+            --so-pin "$token_so_pin" --pin "$token_pin"
+          module_path="$(find /usr/lib -name 'libsofthsm2.so' -print -quit)"
           test -n "$module_path"
           pkcs11-tool --module "$module_path" --token-label trustdb \
-            --login --pin "$TOKEN_PIN" --keypairgen --key-type EC:edwards25519 \
+            --login --pin "$token_pin" --keypairgen --key-type EC:edwards25519 \
             --id 01 --label receipt-key --usage-sign
           pkcs11-tool --module "$module_path" --token-label trustdb \
             --list-mechanisms | grep -i EDDSA

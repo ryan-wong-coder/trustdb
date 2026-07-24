@@ -139,7 +139,7 @@ must return a 64-byte RFC 8032 signature. Mechanism parameters are forbidden.
 
 The automated interoperability target is:
 
-- Ubuntu 24.04;
+- Debian 12 (`golang:1.26-bookworm`);
 - [SoftHSM 2.6.1](https://github.com/softhsm/SoftHSMv2/releases/tag/2.6.1);
 - OpenSC `pkcs11-tool`;
 - an Ed25519 key generated as `EC:edwards25519`;
