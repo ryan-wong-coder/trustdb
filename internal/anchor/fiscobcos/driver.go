@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	StandardSDKVersion = "fisco-bcos-go-sdk-v3.0.2"
+	StandardSDKVersion = "fisco-bcos-go-sdk-v3.0.2+c-sdk-v3.6.0@53240138c396c10cb0e1a2b7b4d5c0cdaa0ac539"
 	ReceiptStatusOK    = 0
 )
 

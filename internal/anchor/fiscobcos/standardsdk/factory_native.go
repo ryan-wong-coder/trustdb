@@ -52,20 +52,27 @@ const (
 	maxSDKParentBlocks          = 1024
 	maxSDKConsensusWeights      = 1024
 	maxSDKTransactionNonceBytes = 1024
+	supportedNativeVersion      = "3.6.0"
+	supportedNativeCommit       = "53240138c396c10cb0e1a2b7b4d5c0cdaa0ac539"
 )
 
 type nativeDriver struct {
-	endpoint  string
-	client    *client.Client
-	trust     fiscobcos.TrustConfig
-	signer    AccountSigner
-	publicKey []byte
-	sender    []byte
-	clock     func() time.Time
+	endpoint   string
+	client     *client.Client
+	trust      fiscobcos.TrustConfig
+	signer     AccountSigner
+	publicKey  []byte
+	sender     []byte
+	clock      func() time.Time
+	sdkVersion string
 }
 
 func (NativeFactory) NewDrivers(ctx context.Context, config Config) ([]fiscobcos.Driver, error) {
 	canonical, err := canonicalStandardTrust(config.TrustConfig)
+	if err != nil {
+		return nil, err
+	}
+	sdkVersion, err := observeAndVerifyNativeRuntime()
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +147,7 @@ func (NativeFactory) NewDrivers(ctx context.Context, config Config) ([]fiscobcos
 			endpoint: endpoint, client: sdkClient, trust: canonical, signer: signer,
 			publicKey: append([]byte(nil), publicKey...),
 			sender:    append([]byte(nil), sender...), clock: clock,
+			sdkVersion: sdkVersion,
 		})
 	}
 	return drivers, nil
@@ -177,7 +185,7 @@ func (d *nativeDriver) ProbeChain(ctx context.Context) (fiscobcos.ChainProbe, er
 	}
 	codeHash := legacyKeccak(code)
 	return fiscobcos.ChainProbe{
-		Endpoint: d.endpoint, SDKVersion: fiscobcos.StandardSDKVersion,
+		Endpoint: d.endpoint, SDKVersion: d.sdkVersion,
 		CryptoMode: fiscobcos.CryptoModeStandard, ChainID: chainID,
 		GroupID: d.client.GetGroupID(), GenesisHash: genesis.Bytes(),
 		CheckpointHash: checkpoint.Bytes(), Height: uint64(height),
@@ -462,11 +470,21 @@ func (d *nativeDriver) transactionIndex(ctx context.Context, blockNumber uint64,
 	}
 	for index, item := range block.Transactions {
 		text, ok := item.(string)
-		if ok && strings.EqualFold(text, hash.Hex()) {
+		if !ok || validateTransactionHashText(text) != nil {
+			return 0, fiscobcos.ErrDriverInvalid
+		}
+		if strings.EqualFold(text, hash.Hex()) {
 			return uint64(index), nil
 		}
 	}
 	return 0, fiscobcos.ErrIncompleteChainEvidence
+}
+
+func validateTransactionHashText(value string) error {
+	if len(value) != 2+common.HashLength*2 || !strings.HasPrefix(value, "0x") {
+		return fiscobcos.ErrDriverInvalid
+	}
+	return validateHexText(value, common.HashLength, false)
 }
 
 func validateSignerSignature(digest, signature, expectedPublicKey []byte) error {
