@@ -18,7 +18,6 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 )
 
 type fakeBCOSState struct {
@@ -421,7 +420,7 @@ func TestFISCOBCOSReadbackDisagreementRemainsRecoverOnlyAfterConvergence(t *test
 		t.Fatal(err)
 	}
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey(fiscobcos.SinkName)
 	sth := testSTH(key, 10, 0x1a)
 	offer(t, store, key, sth, 100, 100)
@@ -565,7 +564,7 @@ func TestFISCOBCOSReceiptStatusDispositionControlsServiceRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			store := proofstore.LocalStore{Root: t.TempDir()}
+			store := newBoundTestLocalStore(t, t.TempDir())
 			key := testScheduleKey(fiscobcos.SinkName)
 			sth := testSTH(key, 14, 0x1e)
 			offer(t, store, key, sth, 100, 100)
@@ -621,7 +620,7 @@ func TestFISCOBCOSPostSubmitValidationFailuresAreClassified(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			store := proofstore.LocalStore{Root: t.TempDir()}
+			store := newBoundTestLocalStore(t, t.TempDir())
 			key := testScheduleKey(fiscobcos.SinkName)
 			sth := testSTH(key, 11, 0x1b)
 			offer(t, store, key, sth, 100, 100)
@@ -656,7 +655,7 @@ func TestFISCOBCOSServiceRestartDoesNotRepeatImmediatelyVisibleUnknownSideEffect
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	key := testScheduleKey(fiscobcos.SinkName)
 	sth := testSTH(key, 9, 0x19)
 	offer(t, store, key, sth, 100, 100)

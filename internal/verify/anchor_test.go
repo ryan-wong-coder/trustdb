@@ -355,6 +355,7 @@ func TestAnchorConsistencyRejectsNonVerifiedEvidenceStages(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			ar := model.STHAnchorResult{
 				SchemaVersion: model.SchemaSTHAnchorResult,
+				CryptoSuite:   proof.CryptoSuite,
 				EvidenceStage: stage,
 				NodeID:        proof.STH.NodeID,
 				LogID:         proof.STH.LogID,
@@ -376,6 +377,7 @@ func TestAnchorBindingConsistencyRequiresExactNodeAndLogIdentity(t *testing.T) {
 	proof := newGlobalProofWithSTH(8, bytes.Repeat([]byte{0x81}, 32))
 	base := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
 		NodeID:        proof.STH.NodeID,
 		LogID:         proof.STH.LogID,

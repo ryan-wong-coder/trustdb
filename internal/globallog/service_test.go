@@ -257,8 +257,9 @@ func TestEvidenceDoesNotTreatConfiguredNoopStreamAsL5(t *testing.T) {
 	}
 	putResult(sths[1], anchor.NoopSinkName)
 	if err := writer.PutSTHAnchorResult(ctx, model.STHAnchorResult{
-		SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
-		NodeID: sths[2].NodeID, LogID: sths[2].LogID, TreeSize: sths[2].TreeSize,
+		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID:        sths[2].NodeID, LogID: sths[2].LogID, TreeSize: sths[2].TreeSize,
 		SinkName: anchor.FileSinkName, AnchorID: "file-anchor", RootHash: append([]byte(nil), sths[2].RootHash...),
 		STH: sths[2], PublishedAtUnixN: int64(sths[2].TreeSize),
 	}); err != nil {

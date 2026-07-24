@@ -368,7 +368,11 @@ func newOfflineE2EFixture(t *testing.T, suiteID cryptosuite.ID) offlineE2EFixtur
 	if err != nil {
 		t.Fatal(err)
 	}
-	anchorResult, err := anchor.NewNoopSink().Publish(ctx, sth)
+	fileSink, err := anchor.NewFileSink(filepath.Join(t.TempDir(), "anchors.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorResult, err := fileSink.Publish(ctx, sth)
 	if err != nil {
 		t.Fatal(err)
 	}

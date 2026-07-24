@@ -16,7 +16,6 @@ import (
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos/standardsdk"
 	trustconfig "github.com/wowtrust/trustdb/internal/config"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/wal"
 	"github.com/wowtrust/trustdb/sdk/signerplugin"
 )
