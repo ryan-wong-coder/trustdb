@@ -162,18 +162,7 @@ func TestNativeSessionCloseWaitsForInFlightCall(t *testing.T) {
 		_, randomErr := session.Random(context.Background(), 64)
 		randomDone <- randomErr
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, statErr := os.Stat(entered); statErr == nil {
-			break
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatal(statErr)
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("native random call did not enter adapter")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForFile(t, entered)
 	closeDone := make(chan error, 1)
 	go func() {
 		closeDone <- session.Close()
@@ -194,6 +183,153 @@ func TestNativeSessionCloseWaitsForInFlightCall(t *testing.T) {
 	}
 	if _, err := session.Random(context.Background(), 1); err == nil {
 		t.Fatal("Random() succeeded after Close()")
+	}
+}
+
+func TestNativeBackendCloseClosesSessionsBeforeDevice(t *testing.T) {
+	library := buildFakeNativeAdapter(t)
+	backend, err := OpenNativeBackend(library, []byte("normal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := backend.Discover(context.Background(), "sdf-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := device.OpenSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := device.OpenSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Close(); err != nil {
+		t.Fatalf("backend Close() = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close() after backend Close() = %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("second Close() after backend Close() = %v", err)
+	}
+	if err := backend.Close(); err != nil {
+		t.Fatalf("second backend Close() = %v", err)
+	}
+}
+
+func TestNativeBackendCloseWaitsForInFlightCall(t *testing.T) {
+	library := buildFakeNativeAdapter(t)
+	entered := filepath.Join(t.TempDir(), "entered")
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv("TRUSTDB_SDF_FAKE_RANDOM_ENTERED", entered)
+	t.Setenv("TRUSTDB_SDF_FAKE_RANDOM_RELEASE", release)
+	backend, err := OpenNativeBackend(library, []byte("random=blocking"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := backend.Discover(context.Background(), "sdf-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := device.OpenSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	randomDone := make(chan error, 1)
+	go func() {
+		_, randomErr := session.Random(context.Background(), 64)
+		randomDone <- randomErr
+	}()
+	waitForFile(t, entered)
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- backend.Close()
+	}()
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("backend Close() returned while native call was in flight: %v", closeErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-randomDone; err != nil {
+		t.Fatalf("Random() = %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("backend Close() = %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("session Close() after backend Close() = %v", err)
+	}
+}
+
+func TestNativeBackendCloseWaitsForOpeningSession(t *testing.T) {
+	library := buildFakeNativeAdapter(t)
+	entered := filepath.Join(t.TempDir(), "entered")
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv("TRUSTDB_SDF_FAKE_OPEN_SESSION_ENTERED", entered)
+	t.Setenv("TRUSTDB_SDF_FAKE_OPEN_SESSION_RELEASE", release)
+	backend, err := OpenNativeBackend(library, []byte("session=blocking"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := backend.Discover(context.Background(), "sdf-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionDone := make(chan Session, 1)
+	sessionError := make(chan error, 1)
+	go func() {
+		session, openErr := device.OpenSession(context.Background())
+		sessionDone <- session
+		sessionError <- openErr
+	}()
+	waitForFile(t, entered)
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- backend.Close()
+	}()
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("backend Close() returned while session was opening: %v", closeErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := <-sessionDone
+	if err := <-sessionError; err != nil {
+		t.Fatalf("OpenSession() = %v", err)
+	}
+	if session == nil {
+		t.Fatal("OpenSession() returned a nil session")
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("backend Close() = %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("session Close() after backend Close() = %v", err)
+	}
+	if _, err := device.OpenSession(context.Background()); err == nil {
+		t.Fatal("OpenSession() succeeded after backend Close()")
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", filepath.Base(path))
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -1,6 +1,7 @@
 #include "trustdb_sdf_adapter_v1.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -9,12 +10,40 @@ typedef struct fake_device {
   int health_busy;
   int bad_identity;
   int block_random;
+  int block_open_session;
+  atomic_uint_fast64_t open_sessions;
 } fake_device;
 
 typedef struct fake_session {
   fake_device *device;
   uint64_t active_keys;
 } fake_session;
+
+static trustdb_sdf_status_v1 fake_block(
+    const char *entered_variable, const char *release_variable) {
+  const char *entered_path = getenv(entered_variable);
+  const char *release_path = getenv(release_variable);
+  FILE *marker;
+  uint32_t index;
+  struct timespec delay = {0, 1000000};
+  if (entered_path == NULL || release_path == NULL) {
+    return TRUSTDB_SDF_INTERNAL;
+  }
+  marker = fopen(entered_path, "wb");
+  if (marker == NULL) {
+    return TRUSTDB_SDF_INTERNAL;
+  }
+  fclose(marker);
+  for (index = 0; index < 5000; index++) {
+    marker = fopen(release_path, "rb");
+    if (marker != NULL) {
+      fclose(marker);
+      return TRUSTDB_SDF_OK;
+    }
+    nanosleep(&delay, NULL);
+  }
+  return TRUSTDB_SDF_INTERNAL;
+}
 
 static trustdb_sdf_status_v1 fake_open_device(
     const uint8_t *config, uint32_t config_len,
@@ -36,6 +65,9 @@ static trustdb_sdf_status_v1 fake_open_device(
   if (config_len == 15 && memcmp(config, "random=blocking", 15) == 0) {
     value->block_random = 1;
   }
+  if (config_len == 16 && memcmp(config, "session=blocking", 16) == 0) {
+    value->block_open_session = 1;
+  }
   *device = value;
   return TRUSTDB_SDF_OK;
 }
@@ -44,6 +76,9 @@ static trustdb_sdf_status_v1 fake_close_device(
     trustdb_sdf_device_v1 device) {
   if (device == NULL) {
     return TRUSTDB_SDF_INVALID_ARGUMENT;
+  }
+  if (atomic_load(&((fake_device *)device)->open_sessions) != 0) {
+    return TRUSTDB_SDF_FAILED_PRECONDITION;
   }
   free(device);
   return TRUSTDB_SDF_OK;
@@ -92,11 +127,20 @@ static trustdb_sdf_status_v1 fake_open_session(
   if (device == NULL || session == NULL) {
     return TRUSTDB_SDF_INVALID_ARGUMENT;
   }
+  if (((fake_device *)device)->block_open_session) {
+    trustdb_sdf_status_v1 block_status = fake_block(
+        "TRUSTDB_SDF_FAKE_OPEN_SESSION_ENTERED",
+        "TRUSTDB_SDF_FAKE_OPEN_SESSION_RELEASE");
+    if (block_status != TRUSTDB_SDF_OK) {
+      return block_status;
+    }
+  }
   value = (fake_session *)calloc(1, sizeof(*value));
   if (value == NULL) {
     return TRUSTDB_SDF_INTERNAL;
   }
   value->device = (fake_device *)device;
+  atomic_fetch_add(&value->device->open_sessions, 1);
   *session = value;
   return TRUSTDB_SDF_OK;
 }
@@ -108,9 +152,11 @@ static trustdb_sdf_status_v1 fake_close_session(
     return TRUSTDB_SDF_INVALID_ARGUMENT;
   }
   if (value->active_keys != 0) {
+    atomic_fetch_sub(&value->device->open_sessions, 1);
     free(value);
     return TRUSTDB_SDF_FAILED_PRECONDITION;
   }
+  atomic_fetch_sub(&value->device->open_sessions, 1);
   free(value);
   return TRUSTDB_SDF_OK;
 }
@@ -183,28 +229,11 @@ static trustdb_sdf_status_v1 fake_random(
     return TRUSTDB_SDF_INVALID_ARGUMENT;
   }
   if (value->device->block_random) {
-    const char *entered_path = getenv("TRUSTDB_SDF_FAKE_RANDOM_ENTERED");
-    const char *release_path = getenv("TRUSTDB_SDF_FAKE_RANDOM_RELEASE");
-    FILE *marker;
-    struct timespec delay = {0, 1000000};
-    if (entered_path == NULL || release_path == NULL) {
-      return TRUSTDB_SDF_INTERNAL;
-    }
-    marker = fopen(entered_path, "wb");
-    if (marker == NULL) {
-      return TRUSTDB_SDF_INTERNAL;
-    }
-    fclose(marker);
-    for (index = 0; index < 5000; index++) {
-      marker = fopen(release_path, "rb");
-      if (marker != NULL) {
-        fclose(marker);
-        break;
-      }
-      nanosleep(&delay, NULL);
-    }
-    if (index == 5000) {
-      return TRUSTDB_SDF_INTERNAL;
+    trustdb_sdf_status_v1 block_status = fake_block(
+        "TRUSTDB_SDF_FAKE_RANDOM_ENTERED",
+        "TRUSTDB_SDF_FAKE_RANDOM_RELEASE");
+    if (block_status != TRUSTDB_SDF_OK) {
+      return block_status;
     }
   }
   for (index = 0; index < output_len; index++) {

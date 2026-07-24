@@ -171,6 +171,7 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"sync"
 	"unsafe"
@@ -179,11 +180,16 @@ import (
 // nativeBackend loads only TrustDB's adapter ABI. Vendor headers and libraries
 // are confined to the deployment-built adapter shared object.
 type nativeBackend struct {
-	mu      sync.RWMutex
-	library unsafe.Pointer
-	api     C.trustdb_sdf_api_v1
-	device  C.trustdb_sdf_device_v1
-	closed  bool
+	mu       sync.RWMutex
+	library  unsafe.Pointer
+	api      C.trustdb_sdf_api_v1
+	device   C.trustdb_sdf_device_v1
+	sessions map[*nativeSession]struct{}
+	closing  bool
+	closed   bool
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func OpenNativeBackend(adapterPath string, adapterConfig []byte) (Backend, error) {
@@ -193,7 +199,7 @@ func OpenNativeBackend(adapterPath string, adapterConfig []byte) (Backend, error
 	}
 	cPath := C.CString(adapterPath)
 	defer C.free(unsafe.Pointer(cPath))
-	backend := &nativeBackend{}
+	backend := &nativeBackend{sessions: make(map[*nativeSession]struct{})}
 	if C.trustdb_sdf_load(cPath, &backend.library, &backend.api) != 1 {
 		return nil, newFault(faultUnavailable)
 	}
@@ -227,7 +233,7 @@ func (b *nativeBackend) Discover(ctx context.Context, reference string) (Device,
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	if b.closed || b.library == nil || b.device == nil {
+	if b.closing || b.closed || b.library == nil || b.device == nil {
 		return nil, newFault(faultUnavailable)
 	}
 	return &nativeDevice{backend: b}, nil
@@ -237,15 +243,46 @@ func (b *nativeBackend) Close() error {
 	if b == nil {
 		return nil
 	}
+	b.closeOnce.Do(func() {
+		b.closeErr = b.close()
+	})
+	return b.closeErr
+}
+
+func (b *nativeBackend) close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return nil
 	}
-	b.closed = true
-	var closeErr error
+	b.closing = true
+	sessions := make([]*nativeSession, 0, len(b.sessions))
+	for session := range b.sessions {
+		sessions = append(sessions, session)
+	}
+	b.mu.Unlock()
+
+	var closeErrors []error
+	for _, session := range sessions {
+		if err := session.Close(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.sessions) != 0 {
+		closeErrors = append(closeErrors, newFault(faultInternal))
+	}
+	if len(closeErrors) != 0 {
+		b.closed = true
+		return errors.Join(closeErrors...)
+	}
 	if b.device != nil {
-		closeErr = classifyNativeStatus(C.trustdb_sdf_close_device(&b.api, b.device))
+		if err := classifyNativeStatus(C.trustdb_sdf_close_device(&b.api, b.device)); err != nil {
+			b.closed = true
+			return err
+		}
 		b.device = nil
 	}
 	if b.library != nil {
@@ -253,7 +290,17 @@ func (b *nativeBackend) Close() error {
 		b.library = nil
 	}
 	b.api = C.trustdb_sdf_api_v1{}
-	return closeErr
+	b.closed = true
+	return nil
+}
+
+func (b *nativeBackend) unregister(session *nativeSession) {
+	if b == nil || session == nil {
+		return
+	}
+	b.mu.Lock()
+	delete(b.sessions, session)
+	b.mu.Unlock()
 }
 
 type nativeDevice struct {
@@ -266,7 +313,7 @@ func (d *nativeDevice) Identity(ctx context.Context) (DeviceIdentity, error) {
 	}
 	d.backend.mu.RLock()
 	defer d.backend.mu.RUnlock()
-	if d.backend.closed || d.backend.device == nil {
+	if d.backend.closing || d.backend.closed || d.backend.device == nil {
 		return DeviceIdentity{}, newFault(faultUnavailable)
 	}
 	var native C.trustdb_sdf_device_identity_v1
@@ -304,7 +351,7 @@ func (d *nativeDevice) Capabilities(ctx context.Context) (Capability, error) {
 	}
 	d.backend.mu.RLock()
 	defer d.backend.mu.RUnlock()
-	if d.backend.closed || d.backend.device == nil {
+	if d.backend.closing || d.backend.closed || d.backend.device == nil {
 		return 0, newFault(faultUnavailable)
 	}
 	var capabilities C.uint64_t
@@ -323,9 +370,9 @@ func (d *nativeDevice) OpenSession(ctx context.Context) (Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	d.backend.mu.RLock()
-	defer d.backend.mu.RUnlock()
-	if d.backend.closed || d.backend.device == nil {
+	d.backend.mu.Lock()
+	defer d.backend.mu.Unlock()
+	if d.backend.closing || d.backend.closed || d.backend.device == nil {
 		return nil, newFault(faultUnavailable)
 	}
 	var session C.trustdb_sdf_session_v1
@@ -337,7 +384,9 @@ func (d *nativeDevice) OpenSession(ctx context.Context) (Session, error) {
 	if session == nil {
 		return nil, newFault(faultInternal)
 	}
-	return &nativeSession{backend: d.backend, session: session}, nil
+	native := &nativeSession{backend: d.backend, session: session}
+	d.backend.sessions[native] = struct{}{}
+	return native, nil
 }
 
 type nativeSession struct {
@@ -546,6 +595,7 @@ func (s *nativeSession) Close() error {
 		s.closeErr = classifyNativeStatus(C.trustdb_sdf_close_session(&s.backend.api, s.session))
 		s.session = nil
 	})
+	s.backend.unregister(s)
 	return s.closeErr
 }
 
@@ -560,7 +610,7 @@ func (s *nativeSession) call(ctx context.Context, operation func() C.trustdb_sdf
 	defer s.mu.Unlock()
 	s.backend.mu.RLock()
 	defer s.backend.mu.RUnlock()
-	if s.backend.closed || s.session == nil {
+	if s.backend.closing || s.backend.closed || s.session == nil {
 		return newFault(faultUnavailable)
 	}
 	err := classifyNativeStatus(operation())
