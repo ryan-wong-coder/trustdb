@@ -1,7 +1,9 @@
 package sdk
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/cborx"
@@ -40,18 +43,7 @@ func (t *exportEvidenceTransport) GetGlobalEvidence(context.Context, string) (Gl
 func TestClientSubmitSignedClaim(t *testing.T) {
 	t.Parallel()
 
-	signed := SignedClaim{
-		SchemaVersion: model.SchemaSignedClaim,
-		CryptoSuite:   cryptosuite.INTLV1,
-		Claim: model.ClientClaim{
-			SchemaVersion:  model.SchemaClientClaim,
-			CryptoSuite:    cryptosuite.INTLV1,
-			TenantID:       "tenant-1",
-			ClientID:       "client-1",
-			KeyID:          "key-1",
-			IdempotencyKey: "idem-1",
-		},
-	}
+	signed := intlSignedClaimFixture()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v2/claims" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
@@ -66,26 +58,10 @@ func TestClientSubmitSignedClaim(t *testing.T) {
 		if err := cborx.DecodeReaderLimit(r.Body, &decoded, 1<<20); err != nil {
 			t.Fatalf("DecodeReaderLimit: %v", err)
 		}
-		if decoded.Claim.IdempotencyKey != "idem-1" {
+		if decoded.Claim.IdempotencyKey != signed.Claim.IdempotencyKey {
 			t.Fatalf("decoded claim = %+v", decoded.Claim)
 		}
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:      "tr1record",
-			Status:        "accepted",
-			ProofLevel:    ProofLevelL2,
-			BatchEnqueued: true,
-			ServerRecord: ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1record",
-			},
-			AcceptedReceipt: AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1record",
-				Status:        "accepted",
-			},
-		})
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(decoded))
 	}))
 	defer server.Close()
 
@@ -97,7 +73,7 @@ func TestClientSubmitSignedClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitSignedClaim: %v", err)
 	}
-	if result.RecordID != "tr1record" || result.ProofLevel != ProofLevelL2 || !result.BatchEnqueued {
+	if result.RecordID == "" || result.ProofLevel != ProofLevelL2 || !result.BatchEnqueued {
 		t.Fatalf("result = %+v", result)
 	}
 }
@@ -116,23 +92,11 @@ func TestLoadBalancedClientFailsOver(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v2/claims" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:      "tr1record",
-			Status:        "accepted",
-			ProofLevel:    ProofLevelL2,
-			BatchEnqueued: true,
-			ServerRecord: ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1record",
-			},
-			AcceptedReceipt: AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1record",
-				Status:        "accepted",
-			},
-		})
+		var decoded SignedClaim
+		if err := cborx.DecodeReaderLimit(r.Body, &decoded, 1<<20); err != nil {
+			t.Fatalf("DecodeReaderLimit: %v", err)
+		}
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(decoded))
 	}))
 	defer secondary.Close()
 
@@ -147,7 +111,7 @@ func TestLoadBalancedClientFailsOver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitSignedClaim: %v", err)
 	}
-	if result.RecordID != "tr1record" {
+	if result.RecordID == "" {
 		t.Fatalf("result = %+v", result)
 	}
 	if primaryHits.Load() == 0 {
@@ -162,22 +126,11 @@ func TestLoadBalancedClientNilContextDoesNotPanic(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v2/claims" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:   "tr1record",
-			Status:     "accepted",
-			ProofLevel: ProofLevelL2,
-			ServerRecord: ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1record",
-			},
-			AcceptedReceipt: AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1record",
-				Status:        "accepted",
-			},
-		})
+		var decoded SignedClaim
+		if err := cborx.DecodeReaderLimit(r.Body, &decoded, 1<<20); err != nil {
+			t.Fatalf("DecodeReaderLimit: %v", err)
+		}
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(decoded))
 	}))
 	defer server.Close()
 
@@ -194,7 +147,7 @@ func TestLoadBalancedClientNilContextDoesNotPanic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitSignedClaim: %v", err)
 	}
-	if result.RecordID != "tr1record" {
+	if result.RecordID == "" {
 		t.Fatalf("result = %+v", result)
 	}
 }
@@ -693,12 +646,19 @@ func writeJSONForTest(t *testing.T, w http.ResponseWriter, status int, v any) {
 }
 
 func intlSignedClaimFixture() SignedClaim {
-	return SignedClaim{
-		SchemaVersion: model.SchemaSignedClaim,
-		CryptoSuite:   cryptosuite.INTLV1,
-		Claim: model.ClientClaim{
-			SchemaVersion: model.SchemaClientClaim,
-			CryptoSuite:   cryptosuite.INTLV1,
-		},
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+	identity, err := NewINTLV1Identity("tenant-fixture", "client-fixture", "client-key-fixture", privateKey)
+	if err != nil {
+		panic(err)
 	}
+	signed, err := BuildSignedFileClaim(bytes.NewReader([]byte("sdk fixture")), identity, FileClaimOptions{
+		ProducedAt:     time.Unix(1, 0),
+		Nonce:          bytes.Repeat([]byte{0x24}, 16),
+		IdempotencyKey: "sdk-fixture",
+		EventType:      "sdk.fixture",
+	})
+	if err != nil {
+		panic(err)
+	}
+	return signed
 }

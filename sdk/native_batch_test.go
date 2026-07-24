@@ -90,13 +90,15 @@ func TestNativeLogBatchPreservesOrderAroundBuildFailures(t *testing.T) {
 	if result.Submitted != 2 || result.Failed != 1 {
 		t.Fatalf("result counts = submitted:%d failed:%d, want 2/1", result.Submitted, result.Failed)
 	}
-	if result.Results[0].Result.RecordID != "record-first" {
+	if result.Results[0].Result.RecordID == "" ||
+		result.Results[0].Result.SignedClaim.Claim.IdempotencyKey != "first" {
 		t.Fatalf("result[0] = %+v", result.Results[0])
 	}
 	if result.Results[1].Err == nil {
 		t.Fatalf("result[1] = %+v, want build error", result.Results[1])
 	}
-	if result.Results[2].Result.RecordID != "record-third" {
+	if result.Results[2].Result.RecordID == "" ||
+		result.Results[2].Result.SignedClaim.Claim.IdempotencyKey != "third" {
 		t.Fatalf("result[2] = %+v", result.Results[2])
 	}
 	if got := transport.idempotencyKeys(); len(got) != 2 || got[0] != "first" || got[1] != "third" {
@@ -133,8 +135,9 @@ func TestCNSMV1NativeLogBatchPreservesSuiteAndOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitLogBatch: %v", err)
 	}
-	if result.Submitted != 2 || result.Results[0].Result.RecordID != "record-0" ||
-		result.Results[1].Result.RecordID != "record-1" {
+	if result.Submitted != 2 ||
+		result.Results[0].Result.SignedClaim.Claim.IdempotencyKey != "cn-first" ||
+		result.Results[1].Result.SignedClaim.Claim.IdempotencyKey != "cn-second" {
 		t.Fatalf("result = %+v", result)
 	}
 	transport.mu.Lock()

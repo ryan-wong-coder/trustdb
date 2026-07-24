@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
-	"github.com/wowtrust/trustdb/internal/cryptosuite"
-	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
@@ -260,32 +258,16 @@ func TestClientSubmitLogBatchPreservesOrder(t *testing.T) {
 		}
 		results := make([]submitClaimsBatchItemEnvelope, len(batch.Claims))
 		for index, signed := range batch.Claims {
-			logID := signed.Claim.Metadata.Custom["log_id"]
 			if signed.Claim.Metadata.EventType != "payment.audit" {
 				t.Fatalf("event type = %q", signed.Claim.Metadata.EventType)
 			}
 			if signed.Claim.IdempotencyKey == "" {
 				t.Fatal("idempotency key is empty")
 			}
+			envelope := validSubmitClaimEnvelope(signed)
 			results[index] = submitClaimsBatchItemEnvelope{
-				Index: index,
-				Result: &submitClaimEnvelope{
-					RecordID:      "tr1" + logID,
-					Status:        "accepted",
-					ProofLevel:    ProofLevelL2,
-					BatchEnqueued: true,
-					ServerRecord: ServerRecord{
-						SchemaVersion: model.SchemaServerRecord,
-						CryptoSuite:   cryptosuite.INTLV1,
-						RecordID:      "tr1" + logID,
-					},
-					AcceptedReceipt: AcceptedReceipt{
-						SchemaVersion: model.SchemaAcceptedReceipt,
-						CryptoSuite:   cryptosuite.INTLV1,
-						RecordID:      "tr1" + logID,
-						Status:        "accepted",
-					},
-				},
+				Index:  index,
+				Result: &envelope,
 			}
 		}
 		writeJSONForTest(t, w, http.StatusAccepted, submitClaimsBatchEnvelope{Results: results, Submitted: len(results)})
@@ -315,10 +297,10 @@ func TestClientSubmitLogBatchPreservesOrder(t *testing.T) {
 	if result.Submitted != 3 || result.Failed != 0 {
 		t.Fatalf("result = %+v", result)
 	}
-	want := []string{"tr1one", "tr1two", "tr1three"}
-	for i, recordID := range want {
-		if got := result.Results[i].Result.RecordID; got != recordID {
-			t.Fatalf("result[%d].record_id = %q", i, got)
+	want := []string{"one", "two", "three"}
+	for i, logID := range want {
+		if got := result.Results[i].Result.SignedClaim.Claim.Metadata.Custom["log_id"]; got != logID {
+			t.Fatalf("result[%d].log_id = %q", i, got)
 		}
 	}
 }
@@ -349,22 +331,8 @@ func TestClientSubmitLogBatchReportsPartialFailure(t *testing.T) {
 				failed++
 				continue
 			}
-			results[index].Result = &submitClaimEnvelope{
-				RecordID:   "tr1" + logID,
-				Status:     "accepted",
-				ProofLevel: ProofLevelL2,
-				ServerRecord: ServerRecord{
-					SchemaVersion: model.SchemaServerRecord,
-					CryptoSuite:   cryptosuite.INTLV1,
-					RecordID:      "tr1" + logID,
-				},
-				AcceptedReceipt: AcceptedReceipt{
-					SchemaVersion: model.SchemaAcceptedReceipt,
-					CryptoSuite:   cryptosuite.INTLV1,
-					RecordID:      "tr1" + logID,
-					Status:        model.RecordStatusAccepted,
-				},
-			}
+			envelope := validSubmitClaimEnvelope(signed)
+			results[index].Result = &envelope
 			submitted++
 		}
 		writeJSONForTest(t, w, http.StatusMultiStatus, submitClaimsBatchEnvelope{Results: results, Submitted: submitted, Failed: failed})
@@ -407,23 +375,7 @@ func TestClientSubmitLogStream(t *testing.T) {
 		if err := cborx.DecodeReaderLimit(r.Body, &signed, 1<<20); err != nil {
 			t.Fatalf("DecodeReaderLimit: %v", err)
 		}
-		logID := signed.Claim.Metadata.Custom["log_id"]
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:   "tr1" + logID,
-			Status:     "accepted",
-			ProofLevel: ProofLevelL2,
-			ServerRecord: ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1" + logID,
-			},
-			AcceptedReceipt: AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1" + logID,
-				Status:        model.RecordStatusAccepted,
-			},
-		})
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(signed))
 	}))
 	defer server.Close()
 
@@ -451,21 +403,21 @@ func TestClientSubmitLogStream(t *testing.T) {
 		entries <- LogEntry{Body: []byte(`{"n":3}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "three"}}}
 	}()
 
-	var recordIDs []string
+	var logIDs []string
 	for item := range out {
 		if item.Err != nil {
 			t.Fatalf("stream item error: %v", item.Err)
 		}
-		recordIDs = append(recordIDs, item.Result.RecordID)
+		logIDs = append(logIDs, item.Result.SignedClaim.Claim.Metadata.Custom["log_id"])
 	}
-	sort.Strings(recordIDs)
-	want := []string{"tr1one", "tr1three", "tr1two"}
-	if len(recordIDs) != len(want) {
-		t.Fatalf("record ids = %v", recordIDs)
+	sort.Strings(logIDs)
+	want := []string{"one", "three", "two"}
+	if len(logIDs) != len(want) {
+		t.Fatalf("log ids = %v", logIDs)
 	}
 	for i := range want {
-		if recordIDs[i] != want[i] {
-			t.Fatalf("record ids = %v", recordIDs)
+		if logIDs[i] != want[i] {
+			t.Fatalf("log ids = %v", logIDs)
 		}
 	}
 }
@@ -482,23 +434,7 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 		if err := cborx.DecodeReaderLimit(r.Body, &signed, 1<<20); err != nil {
 			t.Fatalf("DecodeReaderLimit: %v", err)
 		}
-		logID := signed.Claim.Metadata.Custom["log_id"]
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:   "tr1" + logID,
-			Status:     "accepted",
-			ProofLevel: ProofLevelL2,
-			ServerRecord: ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1" + logID,
-			},
-			AcceptedReceipt: AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.INTLV1,
-				RecordID:      "tr1" + logID,
-				Status:        model.RecordStatusAccepted,
-			},
-		})
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(signed))
 	}))
 	defer server.Close()
 
@@ -529,7 +465,8 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 	if got[0].Err != nil {
 		t.Fatalf("stream item error: %v", got[0].Err)
 	}
-	if got[0].Result.RecordID != "tr1nilctx" {
+	if got[0].Result.RecordID == "" ||
+		got[0].Result.SignedClaim.Claim.Metadata.Custom["log_id"] != "nilctx" {
 		t.Fatalf("stream result = %+v", got[0].Result)
 	}
 }

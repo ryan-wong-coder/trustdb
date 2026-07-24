@@ -9,14 +9,17 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/formatregistry"
+	"github.com/wowtrust/trustdb/internal/idempotency"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/sproof"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/transporttls"
 )
@@ -329,7 +332,7 @@ func (c *Client) SubmitSignedClaim(ctx context.Context, signed SignedClaim) (Sub
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	if err := c.validateSubmitResult("submit signed claim", result); err != nil {
+	if err := c.validateSubmitResult("submit signed claim", signed, result); err != nil {
 		return SubmitResult{}, err
 	}
 	return result, nil
@@ -688,7 +691,7 @@ func (c *Client) mismatch(op string, actual CryptoSuite) error {
 	}
 }
 
-func (c *Client) validateSubmitResult(op string, result SubmitResult) error {
+func (c *Client) validateSubmitResult(op string, expected SignedClaim, result SubmitResult) error {
 	malformed := func(message string) error {
 		return &Error{
 			Op:      op,
@@ -720,6 +723,9 @@ func (c *Client) validateSubmitResult(op string, result SubmitResult) error {
 	if err := c.requireSuite(op, result.SignedClaim); err != nil {
 		return err
 	}
+	if !reflect.DeepEqual(result.SignedClaim, expected) {
+		return malformed("server returned a signed claim that differs from the submitted claim")
+	}
 	if result.RecordID == "" {
 		return malformed("server returned an empty record_id")
 	}
@@ -744,6 +750,18 @@ func (c *Client) validateSubmitResult(op string, result SubmitResult) error {
 	}
 	if result.BatchEnqueued && result.BatchError != "" {
 		return malformed("server returned batch_enqueued with batch_error")
+	}
+	provider, err := trustcrypto.ProviderForSuite(c.cryptoSuite)
+	if err != nil {
+		return malformed(fmt.Sprintf("initialize response crypto provider: %v", err))
+	}
+	if err := idempotency.ValidateAcceptedResponseWithProvider(
+		provider,
+		expected,
+		result.ServerRecord,
+		result.AcceptedReceipt,
+	); err != nil {
+		return malformed(fmt.Sprintf("server returned an invalid accepted response: %v", err))
 	}
 	return nil
 }

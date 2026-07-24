@@ -470,7 +470,7 @@ func (c *Client) submitLogBatchNative(ctx context.Context, entries []LogEntry, i
 		}
 		originalIndex := originalIndexes[item.Index]
 		if item.Err == nil {
-			if err := c.validateSubmitResult("submit log batch", item.Result); err != nil {
+			if err := c.validateSubmitResult("submit log batch", signed[item.Index], item.Result); err != nil {
 				item.Err = err
 			}
 		}
@@ -593,6 +593,7 @@ func (c *Client) submitLogStreamNative(ctx context.Context, entries <-chan LogEn
 		}
 	}
 	jobs := make(chan indexedLogEntry)
+	var expected sync.Map
 	var workers sync.WaitGroup
 	var completion sync.WaitGroup
 	workers.Add(workerCount)
@@ -604,9 +605,11 @@ func (c *Client) submitLogStreamNative(ctx context.Context, entries <-chan LogEn
 			for job := range jobs {
 				signed, err := buildSignedLogEntry(workCtx, job.entry, id, opts.Claim)
 				if err == nil {
+					expected.Store(job.index, signed)
 					select {
 					case signedIn <- signedClaimStreamItem{Index: job.index, SignedClaim: signed}:
 					case <-workCtx.Done():
+						expected.Delete(job.index)
 						return
 					}
 					continue
@@ -651,9 +654,14 @@ func (c *Client) submitLogStreamNative(ctx context.Context, entries <-chan LogEn
 		defer cancel()
 		for item := range nativeOut {
 			if item.Err == nil {
-				if err := c.validateSubmitResult("submit log stream", item.Result); err != nil {
+				expectedValue, found := expected.LoadAndDelete(item.Index)
+				if !found {
+					item.Err = fmt.Errorf("sdk: native log stream returned unknown result index %d", item.Index)
+				} else if err := c.validateSubmitResult("submit log stream", expectedValue.(SignedClaim), item.Result); err != nil {
 					item.Err = err
 				}
+			} else {
+				expected.Delete(item.Index)
 			}
 			if !emit(LogSubmitItemResult{Index: item.Index, Result: item.Result, Err: item.Err}) {
 				return

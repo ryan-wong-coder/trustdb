@@ -156,9 +156,8 @@ func TestGRPCTransportSubmitLogStream(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	processor := grpcProcessorFunc(func(ctx context.Context, signed model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error) {
-		logID := signed.Claim.Metadata.Custom["log_id"]
-		recordID := "tr1" + logID
-		return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, CryptoSuite: signed.CryptoSuite, RecordID: recordID}, model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, CryptoSuite: signed.CryptoSuite, RecordID: recordID, Status: "accepted"}, false, nil
+		result := validSDKSubmitResult(signed, "")
+		return result.ServerRecord, result.AcceptedReceipt, false, nil
 	})
 	ingestSvc := ingest.New(processor, ingest.Options{QueueSize: 8, Workers: 2}, nil)
 	defer ingestSvc.Shutdown(context.Background())
@@ -185,12 +184,13 @@ func TestGRPCTransportSubmitLogStream(t *testing.T) {
 		if item.Err != nil {
 			t.Fatalf("stream item error: %v", item.Err)
 		}
-		got[item.Result.RecordID] = true
-		if item.Result.SignedClaim.Claim.Metadata.Custom["log_id"] == "" {
+		logID := item.Result.SignedClaim.Claim.Metadata.Custom["log_id"]
+		got[logID] = true
+		if logID == "" {
 			t.Fatalf("signed claim was not attached to result: %+v", item.Result)
 		}
 	}
-	if !got["tr1one"] || !got["tr1two"] || len(got) != 2 {
+	if !got["one"] || !got["two"] || len(got) != 2 {
 		t.Fatalf("records = %v", got)
 	}
 }

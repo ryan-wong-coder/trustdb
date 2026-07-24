@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/claim"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/submission"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 func TestCNSMV1HTTPSubmitPreservesSuite(t *testing.T) {
@@ -43,22 +45,7 @@ func TestCNSMV1HTTPSubmitPreservesSuite(t *testing.T) {
 		if _, err := VerifySignedClaim(decoded, descriptor); err != nil {
 			t.Fatalf("VerifySignedClaim: %v", err)
 		}
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:   "tr1-cn-http",
-			Status:     "accepted",
-			ProofLevel: ProofLevelL2,
-			ServerRecord: ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.CNSMV1,
-				RecordID:      "tr1-cn-http",
-			},
-			AcceptedReceipt: AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.CNSMV1,
-				RecordID:      "tr1-cn-http",
-				Status:        "accepted",
-			},
-		})
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(decoded))
 	}))
 	defer server.Close()
 
@@ -102,6 +89,8 @@ func TestClientRejectsRequestSuiteMismatchBeforeNetwork(t *testing.T) {
 func TestClientRejectsIncompleteSubmitContract(t *testing.T) {
 	t.Parallel()
 
+	signed := intlSignedClaimFixture()
+	valid := validSubmitClaimEnvelope(signed)
 	tests := []struct {
 		name string
 		env  submitClaimEnvelope
@@ -143,6 +132,25 @@ func TestClientRejectsIncompleteSubmitContract(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "schema-only evidence shells",
+			env: submitClaimEnvelope{
+				RecordID:   valid.RecordID,
+				Status:     valid.Status,
+				ProofLevel: valid.ProofLevel,
+				ServerRecord: ServerRecord{
+					SchemaVersion: model.SchemaServerRecord,
+					CryptoSuite:   cryptosuite.INTLV1,
+					RecordID:      valid.RecordID,
+				},
+				AcceptedReceipt: AcceptedReceipt{
+					SchemaVersion: model.SchemaAcceptedReceipt,
+					CryptoSuite:   cryptosuite.INTLV1,
+					RecordID:      valid.RecordID,
+					Status:        model.RecordStatusAccepted,
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -156,13 +164,43 @@ func TestClientRejectsIncompleteSubmitContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = client.SubmitSignedClaim(context.Background(), intlSignedClaimFixture())
+			_, err = client.SubmitSignedClaim(context.Background(), signed)
 			var sdkErr *Error
 			if !errors.As(err, &sdkErr) || sdkErr.Code != "DATA_LOSS" {
 				t.Fatalf("SubmitSignedClaim error=%v, want SDK DATA_LOSS", err)
 			}
 		})
 	}
+}
+
+func TestClientRejectsSubmitResultForDifferentSignedClaim(t *testing.T) {
+	t.Parallel()
+
+	expected := intlSignedClaimFixture()
+	other := expected
+	other.Claim.IdempotencyKey = "different-request"
+	transport := mismatchedSubmitTransport{
+		stubTransport: stubTransport{},
+		result:        validSDKSubmitResult(other, ""),
+	}
+	client, err := NewClientWithTransport(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.SubmitSignedClaim(context.Background(), expected)
+	var sdkErr *Error
+	if !errors.As(err, &sdkErr) || sdkErr.Code != "DATA_LOSS" {
+		t.Fatalf("SubmitSignedClaim error=%v, want SDK DATA_LOSS", err)
+	}
+}
+
+type mismatchedSubmitTransport struct {
+	stubTransport
+	result SubmitResult
+}
+
+func (t mismatchedSubmitTransport) SubmitSignedClaim(context.Context, SignedClaim) (SubmitResult, error) {
+	return t.result, nil
 }
 
 func TestClientRejectsMismatchedSuiteBoundTransport(t *testing.T) {
@@ -249,24 +287,13 @@ func TestCNSMV1LoadBalancedClientRetriesTransientEndpoint(t *testing.T) {
 		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 	}))
 	defer primary.Close()
-	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		secondaryHits.Add(1)
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:   "tr1-cn-secondary",
-			Status:     model.RecordStatusAccepted,
-			ProofLevel: ProofLevelL2,
-			ServerRecord: ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.CNSMV1,
-				RecordID:      "tr1-cn-secondary",
-			},
-			AcceptedReceipt: AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.CNSMV1,
-				RecordID:      "tr1-cn-secondary",
-				Status:        model.RecordStatusAccepted,
-			},
-		})
+		var decoded SignedClaim
+		if err := cborx.DecodeReaderLimit(r.Body, &decoded, 1<<20); err != nil {
+			t.Fatalf("DecodeReaderLimit: %v", err)
+		}
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(decoded))
 	}))
 	defer secondary.Close()
 
@@ -295,7 +322,7 @@ func TestCNSMV1LoadBalancedClientRetriesTransientEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitFile: %v", err)
 	}
-	if result.RecordID != "tr1-cn-secondary" || primaryHits.Load() != 1 || secondaryHits.Load() != 1 {
+	if result.RecordID == "" || primaryHits.Load() != 1 || secondaryHits.Load() != 1 {
 		t.Fatalf("result=%+v hits primary=%d secondary=%d", result, primaryHits.Load(), secondaryHits.Load())
 	}
 }
@@ -356,21 +383,14 @@ func TestCNSMV1GRPCSubmitPreservesSuite(t *testing.T) {
 			t.Fatalf("received non-CN claim: %+v", signed)
 		}
 		received.Add(1)
+		result := validSDKSubmitResult(signed, "")
 		return submission.Outcome{
-			RecordID:   "tr1-cn-grpc",
-			Status:     "accepted",
-			ProofLevel: ProofLevelL2,
-			ServerRecord: model.ServerRecord{
-				SchemaVersion: model.SchemaServerRecord,
-				CryptoSuite:   cryptosuite.CNSMV1,
-				RecordID:      "tr1-cn-grpc",
-			},
-			AcceptedReceipt: model.AcceptedReceipt{
-				SchemaVersion: model.SchemaAcceptedReceipt,
-				CryptoSuite:   cryptosuite.CNSMV1,
-				RecordID:      "tr1-cn-grpc",
-				Status:        "accepted",
-			},
+			RecordID:        result.RecordID,
+			Status:          result.Status,
+			ProofLevel:      result.ProofLevel,
+			BatchEnqueued:   result.BatchEnqueued,
+			ServerRecord:    result.ServerRecord,
+			AcceptedReceipt: result.AcceptedReceipt,
 		}, nil
 	})
 	conn := newBufconnConnection(t, grpcapi.NewServerWithSubmitter(submitter, grpcTestBatch{}, nil, nil, nil))
@@ -429,23 +449,82 @@ func (t *capturingSuiteStreamTransport) SubmitSignedClaimStream(
 	return output, nil
 }
 
-func validSDKSubmitResult(signed SignedClaim, recordID string) SubmitResult {
+func validSDKSubmitResult(signed SignedClaim, _ string) SubmitResult {
+	provider, err := trustcrypto.ProviderForSuite(signed.CryptoSuite)
+	if err != nil {
+		panic(err)
+	}
+	suite, err := cryptosuite.RequireAvailable(signed.CryptoSuite)
+	if err != nil {
+		panic(err)
+	}
+	canonical, err := claim.Canonical(signed.Claim)
+	if err != nil {
+		panic(err)
+	}
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, canonical)
+	if err != nil {
+		panic(err)
+	}
+	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
+	if err != nil {
+		panic(err)
+	}
+	recordID, err := claim.RecordIDWithProvider(provider, canonical, signed.Signature)
+	if err != nil {
+		panic(err)
+	}
+	serverSignature := []byte{0x30, 0x01}
+	if signed.CryptoSuite == cryptosuite.INTLV1 {
+		serverSignature = bytes.Repeat([]byte{0x5a}, 64)
+	}
+	const receivedAtUnixN = int64(1)
+	position := model.WALPosition{SegmentID: 1, Offset: 1, Sequence: 1}
 	return SubmitResult{
 		RecordID:      recordID,
 		Status:        model.RecordStatusAccepted,
 		ProofLevel:    ProofLevelL2,
 		BatchEnqueued: true,
 		ServerRecord: ServerRecord{
-			SchemaVersion: model.SchemaServerRecord,
-			CryptoSuite:   signed.CryptoSuite,
-			RecordID:      recordID,
+			SchemaVersion:       model.SchemaServerRecord,
+			CryptoSuite:         signed.CryptoSuite,
+			RecordID:            recordID,
+			TenantID:            signed.Claim.TenantID,
+			ClientID:            signed.Claim.ClientID,
+			KeyID:               signed.Claim.KeyID,
+			ClaimHash:           claimHash,
+			ClientSignatureHash: signatureHash,
+			ReceivedAtUnixN:     receivedAtUnixN,
+			WAL:                 position,
 		},
 		AcceptedReceipt: AcceptedReceipt{
-			SchemaVersion: model.SchemaAcceptedReceipt,
-			CryptoSuite:   signed.CryptoSuite,
-			RecordID:      recordID,
-			Status:        model.RecordStatusAccepted,
+			SchemaVersion:   model.SchemaAcceptedReceipt,
+			CryptoSuite:     signed.CryptoSuite,
+			RecordID:        recordID,
+			Status:          model.RecordStatusAccepted,
+			ServerID:        "server-test",
+			ReceivedAtUnixN: receivedAtUnixN,
+			WAL:             position,
+			ServerSig: model.Signature{
+				Alg:       suite.Signature.Algorithm,
+				KeyID:     "server-key-test",
+				Signature: serverSignature,
+			},
 		},
 		SignedClaim: signed,
+	}
+}
+
+func validSubmitClaimEnvelope(signed SignedClaim) submitClaimEnvelope {
+	result := validSDKSubmitResult(signed, "")
+	return submitClaimEnvelope{
+		RecordID:        result.RecordID,
+		Status:          result.Status,
+		ProofLevel:      result.ProofLevel,
+		Idempotent:      result.Idempotent,
+		BatchEnqueued:   result.BatchEnqueued,
+		BatchError:      result.BatchError,
+		ServerRecord:    result.ServerRecord,
+		AcceptedReceipt: result.AcceptedReceipt,
 	}
 }

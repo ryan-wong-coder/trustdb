@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/claim"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
@@ -288,22 +288,61 @@ func (f *fakeBenchTransport) SubmitSignedClaim(_ context.Context, signed sdk.Sig
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.submits++
-	recordID := fmt.Sprintf("tr-bench-%03d", f.submits)
+	provider, err := trustcrypto.ProviderForSuite(signed.CryptoSuite)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	suite, err := cryptosuite.RequireAvailable(signed.CryptoSuite)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	canonical, err := claim.Canonical(signed.Claim)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, canonical)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	recordID, err := claim.RecordIDWithProvider(provider, canonical, signed.Signature)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	position := model.WALPosition{SegmentID: 1, Offset: int64(f.submits), Sequence: uint64(f.submits)}
 	return sdk.SubmitResult{
 		RecordID:      recordID,
 		Status:        "accepted",
 		ProofLevel:    sdk.ProofLevelL2,
 		BatchEnqueued: true,
 		ServerRecord: model.ServerRecord{
-			SchemaVersion: model.SchemaServerRecord,
-			CryptoSuite:   cryptosuite.INTLV1,
-			RecordID:      recordID,
+			SchemaVersion:       model.SchemaServerRecord,
+			CryptoSuite:         cryptosuite.INTLV1,
+			RecordID:            recordID,
+			TenantID:            signed.Claim.TenantID,
+			ClientID:            signed.Claim.ClientID,
+			KeyID:               signed.Claim.KeyID,
+			ClaimHash:           claimHash,
+			ClientSignatureHash: signatureHash,
+			ReceivedAtUnixN:     int64(f.submits),
+			WAL:                 position,
 		},
 		AcceptedReceipt: model.AcceptedReceipt{
-			SchemaVersion: model.SchemaAcceptedReceipt,
-			CryptoSuite:   cryptosuite.INTLV1,
-			RecordID:      recordID,
-			Status:        model.RecordStatusAccepted,
+			SchemaVersion:   model.SchemaAcceptedReceipt,
+			CryptoSuite:     cryptosuite.INTLV1,
+			RecordID:        recordID,
+			Status:          model.RecordStatusAccepted,
+			ServerID:        "bench-server",
+			ReceivedAtUnixN: int64(f.submits),
+			WAL:             position,
+			ServerSig: model.Signature{
+				Alg:       cryptosuite.SignatureEd25519,
+				KeyID:     "bench-server-key",
+				Signature: bytes.Repeat([]byte{0x5a}, ed25519.SignatureSize),
+			},
 		},
 		SignedClaim: signed,
 	}, nil
