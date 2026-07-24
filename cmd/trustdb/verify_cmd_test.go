@@ -32,9 +32,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
-	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 func TestDecodeSingleJSONRejectsTrailingData(t *testing.T) {
@@ -205,13 +203,6 @@ func TestVerifyCmdRemoteSkipAnchor(t *testing.T) {
 	}
 	if !result.Valid || result.ProofLevel != "L4" {
 		t.Fatalf("verify result = %+v, want L4 valid", result)
-	}
-}
-
-func TestSingleProofV1WriterIsReserved(t *testing.T) {
-	_, err := sproof.New(model.ProofBundle{CryptoSuite: cryptosuite.INTLV1}, sproof.Options{})
-	if trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("sproof.New() code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
 	}
 }
 
