@@ -28,6 +28,7 @@ type fakeBCOSState struct {
 	receipt             fiscobcos.ReceiptWithProof
 	submitCalls         int
 	failAfterEffectOnce bool
+	hideRecordReads     int
 }
 
 type fakeBCOSDriver struct {
@@ -105,6 +106,10 @@ func (d *fakeBCOSDriver) SubmitAnchor(_ context.Context, request fiscobcos.Submi
 func (d *fakeBCOSDriver) ReadAnchor(context.Context, []byte) (fiscobcos.AnchorRecord, error) {
 	d.state.mu.Lock()
 	defer d.state.mu.Unlock()
+	if d.state.hideRecordReads > 0 {
+		d.state.hideRecordReads--
+		return fiscobcos.AnchorRecord{}, nil
+	}
 	return cloneAnchorRecord(d.state.record), nil
 }
 func (d *fakeBCOSDriver) GetReceiptWithProof(context.Context, fiscobcos.TransactionSubmission) (fiscobcos.ReceiptWithProof, error) {
@@ -643,7 +648,7 @@ func TestFISCOBCOSPostSubmitValidationFailuresAreClassified(t *testing.T) {
 	}
 }
 
-func TestFISCOBCOSServiceRestartDoesNotRepeatUnknownSideEffect(t *testing.T) {
+func TestFISCOBCOSServiceRestartDoesNotRepeatImmediatelyVisibleUnknownSideEffect(t *testing.T) {
 	trust, drivers := fakeBCOSFixture(t)
 	state := drivers[0].(*fakeBCOSDriver).state
 	state.failAfterEffectOnce = true
@@ -680,7 +685,37 @@ func TestFISCOBCOSServiceRestartDoesNotRepeatUnknownSideEffect(t *testing.T) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.submitCalls != 1 {
-		t.Fatalf("submit calls=%d, unknown outcome must not be resubmitted", state.submitCalls)
+		t.Fatalf("submit calls=%d, visible exact record must not be resubmitted", state.submitCalls)
+	}
+}
+
+func TestFISCOBCOSDelayedUnknownOutcomeRecoveryRemainsDeferred(t *testing.T) {
+	trust, drivers := fakeBCOSFixture(t)
+	state := drivers[0].(*fakeBCOSDriver).state
+	state.failAfterEffectOnce = true
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sth := testSTH(testScheduleKey(fiscobcos.SinkName), 15, 0x1f)
+	if _, err := sink.Publish(context.Background(), sth); err == nil {
+		t.Fatal("lost submission response was reported as success")
+	}
+
+	// Hide the committed record for one complete two-endpoint preflight. This
+	// captures the deliberate #464 boundary: without the persisted immutable
+	// attempt and deterministic lookup added by #465/#470, delayed visibility
+	// can still cause a replacement submission.
+	state.mu.Lock()
+	state.hideRecordReads = len(drivers)
+	state.mu.Unlock()
+	if _, err := sink.Publish(context.Background(), sth); err != nil {
+		t.Fatalf("replacement publication failed: %v", err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.submitCalls != 2 {
+		t.Fatalf("submit calls=%d, want the documented pre-#465 delayed-visibility boundary", state.submitCalls)
 	}
 }
 

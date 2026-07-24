@@ -224,6 +224,9 @@ func (d *nativeDriver) SubmitAnchor(ctx context.Context, request fiscobcos.Submi
 	if len(encoded) == 0 || len(encoded) > maxSDKRawTransactionBytes {
 		return fiscobcos.Submission{}, fiscobcos.ErrDriverInvalid
 	}
+	// #464 deliberately does not claim durable recovery of this exact attempt
+	// when the transport loses the response. #465 persists attempts and #470
+	// performs deterministic lookup/rebroadcast before any replacement.
 	receipt, err := d.client.SendEncodedTransaction(ctx, encoded, true)
 	if err != nil {
 		return fiscobcos.Submission{}, &fiscobcos.DriverError{

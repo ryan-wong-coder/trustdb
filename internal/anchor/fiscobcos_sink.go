@@ -181,6 +181,9 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 		return model.STHAnchorResult{}, mapSinkError(err)
 	}
 	if existing {
+		// An exact visible record prevents another side effect, but #464 does
+		// not reconstruct the missing immutable transaction evidence. That
+		// recovery belongs to #465/#470.
 		return model.STHAnchorResult{}, &fiscobcos.DriverError{
 			Operation: "recover_existing_anchor",
 			Class:     fiscobcos.FailureAmbiguous,
