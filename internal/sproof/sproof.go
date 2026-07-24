@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -29,6 +30,8 @@ const (
 	MaxCertificateStatuses    = formatregistry.MaxCertificateCountV2
 	MaxCertificateStatusBytes = 4 << 20
 	MaxRegistryEvidenceBytes  = 8 << 20
+	MaxCollectionElements     = 4096
+	MaxMapPairs               = 4096
 )
 
 type Options struct {
@@ -323,11 +326,18 @@ func requireWritableGeneration(suiteID cryptosuite.ID) error {
 
 func Unmarshal(data []byte) (model.SingleProof, error) {
 	var proof model.SingleProof
-	if err := cborx.UnmarshalLimit(data, &proof, MaxBytes); err != nil {
+	if err := cborx.UnmarshalLimits(data, &proof, MaxBytes, MaxCollectionElements, MaxMapPairs); err != nil {
 		return model.SingleProof{}, err
 	}
 	if err := Validate(proof); err != nil {
 		return model.SingleProof{}, err
+	}
+	canonical, err := Marshal(proof)
+	if err != nil {
+		return model.SingleProof{}, err
+	}
+	if !bytes.Equal(data, canonical) {
+		return model.SingleProof{}, errors.New("sproof: non-canonical v2 encoding")
 	}
 	return proof, nil
 }
@@ -338,11 +348,20 @@ func ReadFile(path string) (model.SingleProof, error) {
 		return model.SingleProof{}, err
 	}
 	defer f.Close()
-	var proof model.SingleProof
-	if err := cborx.DecodeReaderLimit(f, &proof, MaxBytes); err != nil {
+	data, err := io.ReadAll(io.LimitReader(f, MaxBytes+1))
+	if err != nil {
 		return model.SingleProof{}, fmt.Errorf("read sproof %s: %w", filepath.Base(path), err)
 	}
-	if err := Validate(proof); err != nil {
+	if len(data) > MaxBytes {
+		return model.SingleProof{}, fmt.Errorf(
+			"read sproof %s: payload too large: %d > %d",
+			filepath.Base(path),
+			len(data),
+			MaxBytes,
+		)
+	}
+	proof, err := Unmarshal(data)
+	if err != nil {
 		return model.SingleProof{}, fmt.Errorf("read sproof %s: %w", filepath.Base(path), err)
 	}
 	return proof, nil

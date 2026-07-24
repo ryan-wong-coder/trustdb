@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
@@ -192,6 +194,46 @@ func TestUnmarshalRejectsMissingAndCrossSuiteBindings(t *testing.T) {
 	}
 	if _, err := Unmarshal(raw); err == nil || !strings.Contains(err.Error(), "crypto_suite") {
 		t.Fatalf("Unmarshal(cross suite) error = %v", err)
+	}
+}
+
+func TestUnmarshalRejectsNonCanonicalV2Encoding(t *testing.T) {
+	t.Parallel()
+
+	proof := vectorProof()
+	canonical, err := Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := cbor.CoreDetEncOptions()
+	options.Sort = cbor.SortNone
+	mode, err := options.EncMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonical, err := mode.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(nonCanonical, canonical) {
+		t.Fatal("non-canonical test encoder unexpectedly matched canonical bytes")
+	}
+	if _, err := Unmarshal(nonCanonical); err == nil || !strings.Contains(err.Error(), "non-canonical") {
+		t.Fatalf("Unmarshal(non-canonical) error = %v", err)
+	}
+}
+
+func TestUnmarshalRejectsOversizedCollectionsBeforeValidation(t *testing.T) {
+	t.Parallel()
+
+	proof := vectorProof()
+	proof.IdentityEvidence = make([]model.ProofIdentityEvidence, MaxCollectionElements+1)
+	raw, err := cborx.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Unmarshal(raw); err == nil || !strings.Contains(err.Error(), "exceeded max number of elements") {
+		t.Fatalf("Unmarshal(oversized collection) error = %v", err)
 	}
 }
 
