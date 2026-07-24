@@ -72,7 +72,7 @@ func EncodeDeadLetter(deadLetter DeadLetter) ([]byte, error) {
 
 func DecodeDeadLetter(data []byte) (DeadLetter, error) {
 	var deadLetter DeadLetter
-	if err := cborx.UnmarshalLimit(data, &deadLetter, MaxDeadLetterBytes); err != nil {
+	if err := cborx.UnmarshalLimits(data, &deadLetter, MaxDeadLetterBytes, maxCBORArrayItems, maxCBORMapPairs); err != nil {
 		return DeadLetter{}, fmt.Errorf("decode NATS dead-letter message: %w", err)
 	}
 	if err := deadLetter.Validate(); err != nil {

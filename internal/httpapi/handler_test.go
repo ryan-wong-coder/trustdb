@@ -113,6 +113,23 @@ func TestSubmitClaimsBatch(t *testing.T) {
 	}
 }
 
+func TestSubmitClaimsBatchRejectsOversizedDeclaredCollection(t *testing.T) {
+	t.Parallel()
+
+	body, err := cborx.Marshal(submitClaimsBatchRequest{
+		Claims: make([]model.SignedClaim, maxClaimBatchItems+1),
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims/batch", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	New(nil, nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "max number of elements 1000") {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func BenchmarkHTTPClaimBatchDecode1000(b *testing.B) {
 	claims := make([]model.SignedClaim, maxClaimBatchItems)
 	for i := range claims {

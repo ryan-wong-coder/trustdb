@@ -32,6 +32,7 @@ const (
 	maxClaimBatchBytes        = 16 << 20
 	maxClaimBatchItems        = 1000
 	maxClaimBatchWorkers      = 64
+	maxClaimCBORMapPairs      = 4096
 	maxPooledRequestBodyBytes = maxClaimBytes
 )
 
@@ -523,13 +524,13 @@ func decodeCBORRequest(body io.Reader, contentLength int64, maxBytes int, out an
 		if err := readKnownLengthRequestBody(body, contentLength, *buffer); err != nil {
 			return err
 		}
-		return cborx.UnmarshalLimit(*buffer, out, maxBytes)
+		return cborx.UnmarshalLimits(*buffer, out, maxBytes, maxClaimBatchItems, maxClaimCBORMapPairs)
 	}
 	raw, err := readBoundedRequestBody(body, contentLength, maxBytes)
 	if err != nil {
 		return err
 	}
-	return cborx.UnmarshalLimit(raw, out, maxBytes)
+	return cborx.UnmarshalLimits(raw, out, maxBytes, maxClaimBatchItems, maxClaimCBORMapPairs)
 }
 
 func decodeJSONRequest(body io.Reader, maxBytes int64, out any) error {

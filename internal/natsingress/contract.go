@@ -33,6 +33,8 @@ const (
 
 	MaxMessageBytes    = 1 << 20
 	MaxDeadLetterBytes = MaxMessageBytes + (64 << 10)
+	maxCBORArrayItems  = 4096
+	maxCBORMapPairs    = 4096
 )
 
 const (
@@ -169,7 +171,7 @@ func EncodeRequest(request Request) ([]byte, error) {
 
 func DecodeRequest(data []byte) (Request, error) {
 	var request Request
-	if err := cborx.UnmarshalLimit(data, &request, MaxMessageBytes); err != nil {
+	if err := cborx.UnmarshalLimits(data, &request, MaxMessageBytes, maxCBORArrayItems, maxCBORMapPairs); err != nil {
 		return Request{}, fmt.Errorf("decode NATS ingress request: %w", err)
 	}
 	if err := request.Validate(); err != nil {
@@ -187,7 +189,7 @@ func EncodeResult(result Result) ([]byte, error) {
 
 func DecodeResult(data []byte) (Result, error) {
 	var result Result
-	if err := cborx.UnmarshalLimit(data, &result, MaxMessageBytes); err != nil {
+	if err := cborx.UnmarshalLimits(data, &result, MaxMessageBytes, maxCBORArrayItems, maxCBORMapPairs); err != nil {
 		return Result{}, fmt.Errorf("decode NATS ingress result: %w", err)
 	}
 	if err := result.Validate(); err != nil {
