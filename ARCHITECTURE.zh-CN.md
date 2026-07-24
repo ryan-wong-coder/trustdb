@@ -439,11 +439,11 @@ SDK 的 `VerifySingleProof`/`VerifyArtifacts` 最终调用统一 verifier：
 
 ### 10.1 Schema 与兼容策略
 
-- file、Pebble 和每个 TiKV namespace 使用 proofstore schema v4。
+- file、Pebble 和每个 TiKV namespace 使用 proofstore schema v5。
 - 空存储可以初始化 schema marker。
 - 非空但无 marker、或 marker 版本不匹配时，启动明确失败。
-- 当前实现不自动迁移、不双读旧 Anchor queue 布局。
-- 升级时应使用受支持的新存储，或从当前逻辑备份恢复。
+- 当前实现不扫描、不自动迁移、不双读旧 key/Anchor queue 布局。
+- 切换时必须使用空 V5 namespace 和新的 LogID。
 
 ### 10.2 TiKV namespace 和身份
 
@@ -523,11 +523,11 @@ SDK 在客户端侧并行构造/签名日志 claim，再通过支持的 transpor
 HTTP 主要资源族：
 
 - 健康：`/healthz`；
-- 写入：`POST /v1/claims`、`POST /v1/claims/batch`；
-- record/proof：`/v1/records`、`/v1/proofs/{record_id}`；
-- Batch/tree：`/v1/roots`、`/v1/batches/...`；
-- Global Log：`/v1/sth`、`/v1/global-log/leaves`、inclusion、evidence、consistency；
-- Anchor：`/v1/anchors/sth`；
+- 写入：`POST /v2/claims`、`POST /v2/claims/batch`；
+- record/proof：`/v2/records`、`/v2/proofs/{record_id}`；
+- Batch/tree：`/v2/roots`、`/v2/batches/...`；
+- Global Log：`/v2/sth`、`/v2/global-log/leaves`、inclusion、evidence、consistency；
+- Anchor：`/v2/anchors/sth`；
 - 可观测性：`/metrics`。
 
 列表接口使用有方向的 cursor pagination。cursor 包含稳定排序所需的复合位置，例如时间戳加 ID，或 Anchor 的 stream/sink/tree 组合键；实现不能通过先扫描全量数据再截断来伪装分页。
