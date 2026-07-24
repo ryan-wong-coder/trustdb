@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
@@ -293,6 +295,41 @@ func TestStrictCBORRejectsUnknownTrustAndProofFields(t *testing.T) {
 	}
 	if _, err := UnmarshalProof(withUnknownField(t, proofBytes)); err == nil {
 		t.Fatal("anchor proof accepted an unknown field")
+	}
+}
+
+func TestUnmarshalProofRejectsNonCanonicalDeterministicCBOR(t *testing.T) {
+	t.Parallel()
+
+	sth := testSTH(cryptosuite.INTLV1)
+	payload, err := NewAnchorPayload(cryptosuite.INTLV1, sth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBytes, err := MarshalPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := testProof(t, testTrustConfig(t, CryptoModeStandard), payloadBytes, sth)
+	canonical, err := MarshalProof(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := cbor.CoreDetEncOptions()
+	options.Sort = cbor.SortNone
+	mode, err := options.EncMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonical, err := mode.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(nonCanonical, canonical) {
+		t.Fatal("non-canonical test encoder unexpectedly matched canonical bytes")
+	}
+	if _, err := UnmarshalProof(nonCanonical); err == nil || !strings.Contains(err.Error(), "non-canonical") {
+		t.Fatalf("UnmarshalProof(non-canonical) error = %v", err)
 	}
 }
 
