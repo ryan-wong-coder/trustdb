@@ -517,7 +517,7 @@ func TestReplayFailsWhenLegacyCheckpointMigrationCannotPersist(t *testing.T) {
 
 func TestReplayRejectsLegacyCheckpointWithPrunedPrefix(t *testing.T) {
 	walDir := filepath.Join(t.TempDir(), "wal")
-	writer, err := wal.OpenDirWriter(walDir, wal.Options{MaxSegmentBytes: 128})
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{MaxSegmentBytes: 128}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -533,7 +533,7 @@ func TestReplayRejectsLegacyCheckpointWithPrunedPrefix(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 	cutoff := positions[2].SegmentID
-	if removed, _, err := wal.PruneSegmentsBefore(walDir, cutoff); err != nil || removed == 0 {
+	if removed, _, err := wal.PruneSegmentsBefore(walDir, cutoff, newBoundTestWALOptions(t, walDir, wal.Options{})); err != nil || removed == 0 {
 		t.Fatalf("PruneSegmentsBefore(%d) removed=%d err=%v", cutoff, removed, err)
 	}
 
@@ -710,7 +710,7 @@ func TestReplayUnsafeSharedStoreAcceptsCommittedProofFromAnotherNodeWAL(t *testi
 
 func TestReplayRejectsZeroTrustedCheckpointWithPrunedPrefix(t *testing.T) {
 	walDir := filepath.Join(t.TempDir(), "wal")
-	writer, err := wal.OpenDirWriter(walDir, wal.Options{MaxSegmentBytes: 128})
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{MaxSegmentBytes: 128}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -725,7 +725,7 @@ func TestReplayRejectsZeroTrustedCheckpointWithPrunedPrefix(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if removed, _, err := wal.PruneSegmentsBefore(walDir, positions[2].SegmentID); err != nil || removed == 0 {
+	if removed, _, err := wal.PruneSegmentsBefore(walDir, positions[2].SegmentID, newBoundTestWALOptions(t, walDir, wal.Options{})); err != nil || removed == 0 {
 		t.Fatalf("PruneSegmentsBefore(%d) removed=%d err=%v", positions[2].SegmentID, removed, err)
 	}
 
@@ -785,7 +785,7 @@ func TestReplayRejectsCorruptTrustedCheckpointProof(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("PutCheckpoint(v2) error = %v", err)
 			}
-			before, err := wal.Inspect(env.walPath)
+			before, err := wal.Inspect(env.walPath, newBoundTestWALOptions(t, env.walPath, wal.Options{}))
 			if err != nil {
 				t.Fatalf("Inspect(before) error = %v", err)
 			}
@@ -800,7 +800,7 @@ func TestReplayRejectsCorruptTrustedCheckpointProof(t *testing.T) {
 			if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 				t.Fatalf("replayWALAccepted() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
 			}
-			after, inspectErr := wal.Inspect(env.walPath)
+			after, inspectErr := wal.Inspect(env.walPath, newBoundTestWALOptions(t, env.walPath, wal.Options{}))
 			if inspectErr != nil {
 				t.Fatalf("Inspect(after) error = %v", inspectErr)
 			}
@@ -1020,7 +1020,7 @@ func TestReplayRejectsDuplicateRecordIDAtDifferentWALPosition(t *testing.T) {
 	env.writeBundles(t, 1)
 	env.writeRoot(t)
 	env.writeCommittedManifest(t)
-	writer, err := wal.OpenWriter(env.walPath, 1)
+	writer, err := wal.OpenWriterWithOptions(env.walPath, 1, newBoundTestWALOptions(t, env.walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}

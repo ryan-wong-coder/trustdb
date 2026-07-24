@@ -52,6 +52,7 @@ func TestSubmitSignerFailureLeavesNoWALRecordAndExactRetryConverges(t *testing.T
 		t.Fatal(err)
 	}
 	defer writer.Close()
+	walBinding := writer.BindingOptions()
 	delegate := trustcrypto.MustNewEd25519Signer("server-key", serverPrivate)
 	serverSigner := &failCountSigner{delegate: delegate, remainingFailures: 1}
 	engine := LocalEngine{
@@ -66,7 +67,7 @@ func TestSubmitSignerFailureLeavesNoWALRecordAndExactRetryConverges(t *testing.T
 	if _, _, _, err := engine.Submit(context.Background(), signed); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("first Submit() error = %v, want DeadlineExceeded", err)
 	}
-	records, err := wal.ReadAll(path)
+	records, err := wal.ReadAll(path, walBinding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +92,7 @@ func TestSubmitSignerFailureLeavesNoWALRecordAndExactRetryConverges(t *testing.T
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	records, err = wal.ReadAll(path)
+	records, err = wal.ReadAll(path, walBinding)
 	if err != nil {
 		t.Fatal(err)
 	}

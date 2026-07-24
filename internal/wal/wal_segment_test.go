@@ -85,14 +85,14 @@ func TestWriterAutoRotatesOnMaxBytes(t *testing.T) {
 		t.Fatalf("writer stayed on segment 1 after 5 writes of 200 bytes with max=700")
 	}
 
-	segs, err := ListSegments(dir)
+	segs, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
 	if len(segs) < 2 {
 		t.Fatalf("ListSegments() = %v, want at least 2 segments", segs)
 	}
-	records, err := ReadAllDir(dir)
+	records, err := ReadAllDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDir() error = %v", err)
 	}
@@ -130,7 +130,7 @@ func TestReadAllDirFromSkipsEarlySegments(t *testing.T) {
 		}
 	}
 
-	segs, err := ListSegments(dir)
+	segs, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -138,11 +138,11 @@ func TestReadAllDirFromSkipsEarlySegments(t *testing.T) {
 		t.Fatalf("want >= 3 segments, got %v", segs)
 	}
 
-	all, err := ReadAllDirFrom(dir, 0)
+	all, err := ReadAllDirFrom(dir, 0, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDirFrom(0) error = %v", err)
 	}
-	tail, err := ReadAllDirFrom(dir, segs[1])
+	tail, err := ReadAllDirFrom(dir, segs[1], testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDirFrom(%d) error = %v", segs[1], err)
 	}
@@ -172,19 +172,19 @@ func TestScanDirFromStreamsLikeReadAllDirFrom(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	segs, err := ListSegments(dir)
+	segs, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
 	if len(segs) < 2 {
 		t.Fatalf("want rotated WAL, got %v", segs)
 	}
-	want, err := ReadAllDirFrom(dir, segs[1])
+	want, err := ReadAllDirFrom(dir, segs[1], testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDirFrom() error = %v", err)
 	}
 	var got []Record
-	if err := ScanDirFrom(dir, segs[1], func(rec Record) error {
+	if err := ScanDirFrom(dir, segs[1], testWALOptions(Options{}), func(rec Record) error {
 		got = append(got, rec)
 		return nil
 	}); err != nil {
@@ -246,7 +246,7 @@ func TestOpenDirWriterResumesAfterRestart(t *testing.T) {
 		t.Fatalf("second Close() error = %v", err)
 	}
 
-	records, err := ReadAllDir(dir)
+	records, err := ReadAllDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDir() error = %v", err)
 	}
@@ -286,7 +286,7 @@ func TestReadAllDirDetectsHashChainBreak(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	segs, err := ListSegments(dir)
+	segs, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -305,7 +305,7 @@ func TestReadAllDirDetectsHashChainBreak(t *testing.T) {
 	if err := os.WriteFile(secondSeg, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	if _, err := ReadAllDir(dir); err == nil {
+	if _, err := ReadAllDir(dir, testWALOptions(Options{})); err == nil {
 		t.Fatal("ReadAllDir() error = nil, want hash chain break")
 	}
 }
@@ -329,7 +329,7 @@ func TestOpenDirWriterRejectsChainBreakOnOpen(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	segs, _ := ListSegments(dir)
+	segs, _ := ListSegments(dir, testWALOptions(Options{}))
 	if len(segs) < 2 {
 		t.Fatalf("want >= 2 segments, got %v", segs)
 	}
@@ -396,7 +396,7 @@ func TestWriterRotatesPastOversizedRecord(t *testing.T) {
 	if _, _, err := w.Append(context.Background(), small); err != nil {
 		t.Fatalf("Append(small) error = %v", err)
 	}
-	records, err := ReadAllDir(dir)
+	records, err := ReadAllDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDir() error = %v", err)
 	}
@@ -428,7 +428,7 @@ func TestPruneSegmentsBeforeDeletesEarlySegments(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	segs, err := ListSegments(dir)
+	segs, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -436,7 +436,7 @@ func TestPruneSegmentsBeforeDeletesEarlySegments(t *testing.T) {
 		t.Fatalf("want >= 3 segments, got %v", segs)
 	}
 	cut := segs[len(segs)-1] // keep only the active segment
-	removed, bytesRemoved, err := PruneSegmentsBefore(dir, cut)
+	removed, bytesRemoved, err := PruneSegmentsBefore(dir, cut, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("PruneSegmentsBefore() error = %v", err)
 	}
@@ -447,7 +447,7 @@ func TestPruneSegmentsBeforeDeletesEarlySegments(t *testing.T) {
 		t.Fatalf("bytesRemoved = %d, want > 0", bytesRemoved)
 	}
 
-	after, err := ListSegments(dir)
+	after, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() after prune error = %v", err)
 	}
@@ -456,7 +456,7 @@ func TestPruneSegmentsBeforeDeletesEarlySegments(t *testing.T) {
 	}
 	// Remaining segment must still be readable, with ReadAllDirFrom
 	// accepting the stored prev_hash as the chain seed.
-	recs, err := ReadAllDirFrom(dir, cut)
+	recs, err := ReadAllDirFrom(dir, cut, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDirFrom() after prune error = %v", err)
 	}
@@ -484,26 +484,26 @@ func TestPruneSegmentsBeforeIsIdempotent(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if _, _, err := PruneSegmentsBefore(dir, 0); err != nil {
+	if _, _, err := PruneSegmentsBefore(dir, 0, testWALOptions(Options{})); err != nil {
 		t.Fatalf("PruneSegmentsBefore(0) error = %v", err)
 	}
-	if _, _, err := PruneSegmentsBefore(dir, 1); err != nil {
+	if _, _, err := PruneSegmentsBefore(dir, 1, testWALOptions(Options{})); err != nil {
 		t.Fatalf("PruneSegmentsBefore(1) error = %v", err)
 	}
-	segs, _ := ListSegments(dir)
+	segs, _ := ListSegments(dir, testWALOptions(Options{}))
 	before := len(segs)
 	cut := segs[len(segs)-1]
-	if _, _, err := PruneSegmentsBefore(dir, cut); err != nil {
+	if _, _, err := PruneSegmentsBefore(dir, cut, testWALOptions(Options{})); err != nil {
 		t.Fatalf("first PruneSegmentsBefore(cut) error = %v", err)
 	}
-	removed, bytesRemoved, err := PruneSegmentsBefore(dir, cut)
+	removed, bytesRemoved, err := PruneSegmentsBefore(dir, cut, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("second PruneSegmentsBefore(cut) error = %v", err)
 	}
 	if removed != 0 || bytesRemoved != 0 {
 		t.Fatalf("second prune removed=%d bytes=%d, want 0/0", removed, bytesRemoved)
 	}
-	after, _ := ListSegments(dir)
+	after, _ := ListSegments(dir, testWALOptions(Options{}))
 	if len(after) > before {
 		t.Fatalf("segment count grew from %d to %d", before, len(after))
 	}
@@ -513,7 +513,9 @@ func TestPruneSegmentsBeforeIsIdempotent(t *testing.T) {
 func TestEmptyDirReturnsNoRecords(t *testing.T) {
 	t.Parallel()
 
-	records, err := ReadAllDir(t.TempDir())
+	dir := t.TempDir()
+	writeTestDirBinding(t, dir, Options{})
+	records, err := ReadAllDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDir() error = %v", err)
 	}

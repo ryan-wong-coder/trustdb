@@ -55,7 +55,7 @@ func TestAppendPreparedAtDoesNotPersistWhenPreparationFails(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	records, err := ReadAll(path)
+	records, err := ReadAll(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestAppendPreparedAtReservesFIFOWhilePreparingConcurrently(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	records, err := ReadAll(path)
+	records, err := ReadAll(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}

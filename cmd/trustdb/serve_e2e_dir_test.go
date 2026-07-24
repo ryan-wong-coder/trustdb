@@ -60,13 +60,14 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	// Compact rotation threshold + small batch size so the test exercises
 	// rotation and commits in under a second while only submitting a
 	// handful of claims.
-	walOpts := wal.Options{
+	var walOpts wal.Options
+	walOpts = newBoundTestWALOptions(t, walDir, wal.Options{
 		MaxSegmentBytes: 280,
 		OnRotate: func(_, to uint64) {
 			metrics.WALActiveSegmentID.Set(float64(to))
-			_ = refreshWALSegmentsTotal(metrics, walDir)
+			metrics.WALSegmentsTotal.Inc()
 		},
-	}
+	})
 	writer, mode, err := openWALWriterWithOptions(walDir, walOpts)
 	if err != nil {
 		t.Fatalf("openWALWriterWithOptions() error = %v", err)
@@ -76,7 +77,7 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	}
 	defer writer.Close()
 	metrics.WALActiveSegmentID.Set(float64(writer.ActiveSegmentID()))
-	if err := refreshWALSegmentsTotal(metrics, walDir); err != nil {
+	if err := refreshWALSegmentsTotal(metrics, walDir, walOpts); err != nil {
 		t.Fatalf("refreshWALSegmentsTotal() error = %v", err)
 	}
 
@@ -98,7 +99,7 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 		QueueSize:            16,
 		MaxRecords:           2,
 		MaxDelay:             50 * time.Millisecond,
-		OnCheckpointAdvanced: newPruneHook(rt, walDir, 0, metrics),
+		OnCheckpointAdvanced: newPruneHook(rt, walDir, 0, metrics, walOpts),
 	}, metrics)
 	defer batchSvc.Shutdown(context.Background())
 
@@ -197,7 +198,7 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 
 	// Directory state matches the segments gauge so there is no drift
 	// between what the gauge reports and what is actually on disk.
-	segs, err := wal.ListSegments(walDir)
+	segs, err := wal.ListSegments(walDir, walOpts)
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -229,7 +230,8 @@ func TestPruneHookRefreshesSegmentGaugeWithoutRemoval(t *testing.T) {
 	t.Parallel()
 
 	walDir := t.TempDir()
-	writer, err := wal.OpenDirWriter(walDir, wal.Options{InitialSegmentID: 3})
+	walOpts := newBoundTestWALOptions(t, walDir, wal.Options{InitialSegmentID: 3})
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, walOpts))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -239,7 +241,7 @@ func TestPruneHookRefreshesSegmentGaugeWithoutRemoval(t *testing.T) {
 
 	_, metrics := observability.NewRegistry()
 	metrics.WALSegmentsTotal.Set(99)
-	hook := newPruneHook(&runtimeConfig{logger: silentLogger()}, walDir, 0, metrics)
+	hook := newPruneHook(&runtimeConfig{logger: silentLogger()}, walDir, 0, metrics, walOpts)
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3, LastSequence: 10})
 
 	if got := testutil.ToFloat64(metrics.WALSegmentsTotal); got != 1 {
@@ -264,7 +266,7 @@ func TestPruneHookCachesSuccessfulCutoffAndRetriesFailures(t *testing.T) {
 		}
 		return 0, 0, nil
 	}
-	hook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, pruner)
+	hook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, wal.Options{}, pruner)
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3}) // fails; must remain retryable
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3}) // succeeds and caches
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3}) // identical cutoff skips
@@ -277,7 +279,7 @@ func TestPruneHookCachesSuccessfulCutoffAndRetriesFailures(t *testing.T) {
 	}
 
 	panicCalls := 0
-	panicHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, func(_ string, _ uint64) (int, int64, error) {
+	panicHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, wal.Options{}, func(_ string, _ uint64) (int, int64, error) {
 		panicCalls++
 		if panicCalls == 1 {
 			panic("injected prune panic")
@@ -298,7 +300,7 @@ func TestPruneHookCachesSuccessfulCutoffAndRetriesFailures(t *testing.T) {
 	}
 
 	noPruneCalls := 0
-	noPruneHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 10, nil, func(string, uint64) (int, int64, error) {
+	noPruneHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 10, nil, wal.Options{}, func(string, uint64) (int, int64, error) {
 		noPruneCalls++
 		return 0, 0, nil
 	})

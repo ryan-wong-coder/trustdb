@@ -60,7 +60,7 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "trustdb.wal")
-	writer, err := wal.OpenWriter(walPath, 1)
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	reopened, err := wal.OpenWriter(walPath, 1)
+	reopened, err := wal.OpenWriterWithOptions(walPath, 1, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("reopen WAL error = %v", err)
 	}
@@ -284,7 +284,7 @@ func newRecoveryEnv(t *testing.T, numClaims int) *recoveryEnv {
 
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "trustdb.wal")
-	writer, err := wal.OpenWriter(walPath, 1)
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -419,7 +419,7 @@ func (e *recoveryEnv) writeRoot(t *testing.T) {
 
 func (e *recoveryEnv) restartedEngine(t *testing.T) (app.LocalEngine, *wal.Writer) {
 	t.Helper()
-	reopened, err := wal.OpenWriter(e.walPath, 1)
+	reopened, err := wal.OpenWriterWithOptions(e.walPath, 1, newBoundTestWALOptions(t, e.walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("reopen WAL error = %v", err)
 	}
@@ -575,7 +575,7 @@ func newIdempotencyEnv(t *testing.T) *idempotencyEnv {
 	}
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "trustdb.wal")
-	writer, err := wal.OpenWriter(walPath, 1)
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -633,7 +633,7 @@ func (e *idempotencyEnv) closeWAL(t *testing.T) {
 
 func (e *idempotencyEnv) reopen(t *testing.T) *wal.Writer {
 	t.Helper()
-	reopened, err := wal.OpenWriter(e.walPath, 1)
+	reopened, err := wal.OpenWriterWithOptions(e.walPath, 1, newBoundTestWALOptions(t, e.walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("reopen WAL error = %v", err)
 	}
@@ -642,7 +642,7 @@ func (e *idempotencyEnv) reopen(t *testing.T) *wal.Writer {
 
 func walRecordCount(t *testing.T, path string) int {
 	t.Helper()
-	records, err := wal.ReadAll(path)
+	records, err := wal.ReadAll(path, newBoundTestWALOptions(t, path, wal.Options{}))
 	if err != nil {
 		t.Fatalf("wal.ReadAll() error = %v", err)
 	}
@@ -1015,7 +1015,7 @@ func TestOpenWALWriterModes(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		walPath := filepath.Join(dir, "trustdb.wal")
-		w, err := wal.OpenWriter(walPath, 1)
+		w, err := wal.OpenWriterWithOptions(walPath, 1, newBoundTestWALOptions(t, walPath, wal.Options{}))
 		if err != nil {
 			t.Fatalf("seed OpenWriter() error = %v", err)
 		}
@@ -1156,7 +1156,7 @@ func TestReplayDirectoryModeRestoresRecord(t *testing.T) {
 		wantRecords = append(wantRecords, rec)
 		wantAccepted = append(wantAccepted, acc)
 	}
-	segs, err := wal.ListSegments(walDir)
+	segs, err := wal.ListSegments(walDir, newBoundTestWALOptions(t, walDir, wal.Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -1386,7 +1386,7 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 	// PruneSegmentsBefore is safe to call with the checkpoint cutoff: it
 	// deletes exactly the segments that the checkpoint already covers and
 	// leaves the active segment intact.
-	removed, bytesRemoved, err := wal.PruneSegmentsBefore(walDir, last.SegmentID)
+	removed, bytesRemoved, err := wal.PruneSegmentsBefore(walDir, last.SegmentID, newBoundTestWALOptions(t, walDir, wal.Options{}))
 	if err != nil {
 		t.Fatalf("PruneSegmentsBefore() error = %v", err)
 	}
@@ -1396,7 +1396,7 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 	if bytesRemoved <= 0 {
 		t.Fatalf("PruneSegmentsBefore() bytesRemoved = %d, want > 0", bytesRemoved)
 	}
-	after, err := wal.ListSegments(walDir)
+	after, err := wal.ListSegments(walDir, newBoundTestWALOptions(t, walDir, wal.Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}

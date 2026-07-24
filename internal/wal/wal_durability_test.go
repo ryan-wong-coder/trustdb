@@ -480,7 +480,7 @@ func TestOpenDirWriterRecoversEmptyHighestSegmentAtZeroOffset(t *testing.T) {
 	if err := reopened.Close(); err != nil {
 		t.Fatalf("reopened Close() error = %v", err)
 	}
-	records, err := ReadAllDir(dir)
+	records, err := ReadAllDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDir() error = %v", err)
 	}
@@ -561,7 +561,7 @@ func TestPruneSegmentsPersistsOldestFirstAndStopsOnSyncFailure(t *testing.T) {
 	if strings.Join(events, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("events:\n%s\nwant:\n%s", strings.Join(events, "\n"), strings.Join(want, "\n"))
 	}
-	afterFailure, err := ListSegments(dir)
+	afterFailure, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() after failure error = %v", err)
 	}
@@ -569,14 +569,14 @@ func TestPruneSegmentsPersistsOldestFirstAndStopsOnSyncFailure(t *testing.T) {
 		t.Fatalf("segments after failure = %v, want contiguous suffix starting at %d", afterFailure, segments[2])
 	}
 
-	removed, _, err = PruneSegmentsBefore(dir, cutoff)
+	removed, _, err = PruneSegmentsBefore(dir, cutoff, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("retry PruneSegmentsBefore() error = %v", err)
 	}
 	if removed != 2 {
 		t.Fatalf("retry removed = %d, want 2", removed)
 	}
-	afterRetry, err := ListSegments(dir)
+	afterRetry, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() after retry error = %v", err)
 	}
@@ -591,11 +591,11 @@ func TestPrunedSuffixSupportsEveryRecoveryAPI(t *testing.T) {
 	dir := t.TempDir()
 	segments := writeSegmentedWAL(t, dir, 6)
 	cutoff := segments[3]
-	if _, _, err := PruneSegmentsBefore(dir, cutoff); err != nil {
+	if _, _, err := PruneSegmentsBefore(dir, cutoff, testWALOptions(Options{})); err != nil {
 		t.Fatalf("PruneSegmentsBefore() error = %v", err)
 	}
 
-	records, err := ReadAllDir(dir)
+	records, err := ReadAllDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAllDir() after prune error = %v", err)
 	}
@@ -603,7 +603,7 @@ func TestPrunedSuffixSupportsEveryRecoveryAPI(t *testing.T) {
 		t.Fatalf("ReadAllDir() after prune positions = %+v", recordPositions(records))
 	}
 	var scanned []Record
-	if err := ScanDirFrom(dir, 0, func(record Record) error {
+	if err := ScanDirFrom(dir, 0, testWALOptions(Options{}), func(record Record) error {
 		scanned = append(scanned, record)
 		return nil
 	}); err != nil {
@@ -612,7 +612,7 @@ func TestPrunedSuffixSupportsEveryRecoveryAPI(t *testing.T) {
 	if len(scanned) != len(records) {
 		t.Fatalf("ScanDirFrom(0) records = %d, want %d", len(scanned), len(records))
 	}
-	inspection, err := InspectDir(dir)
+	inspection, err := InspectDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("InspectDir() after prune error = %v", err)
 	}
@@ -624,7 +624,7 @@ func TestPrunedSuffixSupportsEveryRecoveryAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tail before repair: %v", err)
 	}
-	repair, err := RepairDir(dir)
+	repair, err := RepairDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("RepairDir() after prune error = %v", err)
 	}
@@ -677,21 +677,21 @@ func TestPrunedSuffixSkipsLeadingEmptySegmentBeforeBoundarySeed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, segmentName(3)), encoded, 0o600); err != nil {
 		t.Fatalf("create segment 3: %v", err)
 	}
-	if _, _, err := PruneSegmentsBefore(dir, 2); err != nil {
+	if _, _, err := PruneSegmentsBefore(dir, 2, testWALOptions(Options{})); err != nil {
 		t.Fatalf("PruneSegmentsBefore() error = %v", err)
 	}
 
-	records, err := ReadAllDir(dir)
+	records, err := ReadAllDir(dir, testWALOptions(Options{}))
 	if err != nil || len(records) != 1 || records[0].Position.SegmentID != 3 {
 		t.Fatalf("ReadAllDir() = (%+v, %v), want segment 3 record", records, err)
 	}
-	if err := ScanDirFrom(dir, 0, nil); err != nil {
+	if err := ScanDirFrom(dir, 0, testWALOptions(Options{}), nil); err != nil {
 		t.Fatalf("ScanDirFrom() error = %v", err)
 	}
-	if _, err := InspectDir(dir); err != nil {
+	if _, err := InspectDir(dir, testWALOptions(Options{})); err != nil {
 		t.Fatalf("InspectDir() error = %v", err)
 	}
-	if repair, err := RepairDir(dir); err != nil || repair.TailRepair.Repaired {
+	if repair, err := RepairDir(dir, testWALOptions(Options{})); err != nil || repair.TailRepair.Repaired {
 		t.Fatalf("RepairDir() = (%+v, %v), want no-op", repair, err)
 	}
 	reopened, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch}))
@@ -727,10 +727,10 @@ func TestRecoveryAPIsRejectInternalSegmentGap(t *testing.T) {
 			}
 			return err
 		}},
-		{name: "read", run: func() error { _, err := ReadAllDir(dir); return err }},
-		{name: "scan", run: func() error { return ScanDirFrom(dir, 0, nil) }},
-		{name: "inspect", run: func() error { _, err := InspectDir(dir); return err }},
-		{name: "repair", run: func() error { _, err := RepairDir(dir); return err }},
+		{name: "read", run: func() error { _, err := ReadAllDir(dir, testWALOptions(Options{})); return err }},
+		{name: "scan", run: func() error { return ScanDirFrom(dir, 0, testWALOptions(Options{}), nil) }},
+		{name: "inspect", run: func() error { _, err := InspectDir(dir, testWALOptions(Options{})); return err }},
+		{name: "repair", run: func() error { _, err := RepairDir(dir, testWALOptions(Options{})); return err }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -745,6 +745,7 @@ func TestSegmentNamedSymlinkIsRejectedWithoutMutatingTarget(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	writeTestDirBinding(t, dir, Options{})
 	target := filepath.Join(t.TempDir(), "outside.wal")
 	want := []byte("outside data must not be repaired")
 	if err := os.WriteFile(target, want, 0o600); err != nil {
@@ -754,14 +755,14 @@ func TestSegmentNamedSymlinkIsRejectedWithoutMutatingTarget(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, err := ListSegments(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if _, err := ListSegments(dir, testWALOptions(Options{})); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("ListSegments() error = %v, want non-regular rejection", err)
 	}
 	if writer, err := OpenDirWriter(dir, testWALOptions(Options{})); err == nil {
 		_ = writer.Close()
 		t.Fatal("OpenDirWriter() accepted segment-named symlink")
 	}
-	if _, err := RepairDir(dir); err == nil {
+	if _, err := RepairDir(dir, testWALOptions(Options{})); err == nil {
 		t.Fatal("RepairDir() accepted segment-named symlink")
 	}
 	got, err := os.ReadFile(target)
@@ -788,10 +789,11 @@ func TestListSegmentsRejectsReservedAndNonCanonicalNames(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
+			writeTestDirBinding(t, dir, Options{})
 			if err := os.WriteFile(filepath.Join(dir, test.filename), nil, 0o600); err != nil {
 				t.Fatalf("write segment entry: %v", err)
 			}
-			if _, err := ListSegments(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := ListSegments(dir, testWALOptions(Options{})); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ListSegments() error = %v, want %q", err, test.want)
 			}
 		})
@@ -828,7 +830,7 @@ func TestRepairDirRejectsGapBeforeTailWithoutMutation(t *testing.T) {
 		}
 		before[path] = data
 	}
-	if _, err := RepairDir(dir); err == nil || !strings.Contains(err.Error(), "segment id gap") {
+	if _, err := RepairDir(dir, testWALOptions(Options{})); err == nil || !strings.Contains(err.Error(), "segment id gap") {
 		t.Fatalf("RepairDir() error = %v, want preflight segment gap", err)
 	}
 	for path, want := range before {
@@ -852,7 +854,7 @@ func TestRepairDirTruncatesTornFirstHeaderAtRetainedBoundary(t *testing.T) {
 	if err := os.WriteFile(tailPath, partialHeader, 0o600); err != nil {
 		t.Fatalf("write partial retained tail: %v", err)
 	}
-	if _, err := ReadAllDir(dir); err == nil {
+	if _, err := ReadAllDir(dir, testWALOptions(Options{})); err == nil {
 		t.Fatal("ReadAllDir() accepted partial first header before repair")
 	}
 	if writer, err := OpenDirWriter(dir, testWALOptions(Options{})); err == nil {
@@ -860,7 +862,7 @@ func TestRepairDirTruncatesTornFirstHeaderAtRetainedBoundary(t *testing.T) {
 		t.Fatal("OpenDirWriter() accepted partial first header before repair")
 	}
 
-	result, err := RepairDir(dir)
+	result, err := RepairDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("RepairDir() error = %v", err)
 	}
@@ -920,23 +922,24 @@ func TestDirectoryTailRepairsWithinFilePositionViolations(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
+			writeTestDirBinding(t, dir, Options{})
 			first, firstHash := encodeRecord(1, 1, 1, [32]byte{}, []byte("first"))
 			second, _ := encodeRecord(test.secondSegment, test.secondSeq, 2, firstHash, []byte("second"))
 			path := filepath.Join(dir, segmentName(1))
 			if err := os.WriteFile(path, append(first, second...), 0o600); err != nil {
 				t.Fatalf("write semantic fixture: %v", err)
 			}
-			if _, err := ReadAllDir(dir); err == nil {
+			if _, err := ReadAllDir(dir, testWALOptions(Options{})); err == nil {
 				t.Fatal("ReadAllDir() accepted position violation")
 			}
 			visits := 0
-			if err := ScanDirFrom(dir, 0, func(Record) error { visits++; return nil }); err == nil {
+			if err := ScanDirFrom(dir, 0, testWALOptions(Options{}), func(Record) error { visits++; return nil }); err == nil {
 				t.Fatal("ScanDirFrom() accepted position violation")
 			}
 			if visits != 1 {
 				t.Fatalf("ScanDirFrom() visits = %d, want only the valid prefix", visits)
 			}
-			if _, err := InspectDir(dir); err == nil {
+			if _, err := InspectDir(dir, testWALOptions(Options{})); err == nil {
 				t.Fatal("InspectDir() accepted position violation")
 			}
 			if writer, err := OpenDirWriter(dir, testWALOptions(Options{})); err == nil {
@@ -944,14 +947,14 @@ func TestDirectoryTailRepairsWithinFilePositionViolations(t *testing.T) {
 				t.Fatal("OpenDirWriter() accepted position violation")
 			}
 
-			repair, err := RepairDir(dir)
+			repair, err := RepairDir(dir, testWALOptions(Options{}))
 			if err != nil {
 				t.Fatalf("RepairDir() error = %v", err)
 			}
 			if !repair.TailRepair.Repaired || repair.TailRepair.ValidBytes != int64(len(first)) {
 				t.Fatalf("RepairDir() result = %+v, want truncation to valid first record", repair.TailRepair)
 			}
-			records, err := ReadAllDir(dir)
+			records, err := ReadAllDir(dir, testWALOptions(Options{}))
 			if err != nil || len(records) != 1 || !bytes.Equal(records[0].Payload, []byte("first")) {
 				t.Fatalf("records after repair = (%+v, %v)", records, err)
 			}
@@ -963,6 +966,7 @@ func TestCrossSegmentSequenceDiscontinuityIsRejectedBeforeTailMutation(t *testin
 	t.Parallel()
 
 	dir := t.TempDir()
+	writeTestDirBinding(t, dir, Options{})
 	first, firstHash := encodeRecord(1, 1, 1, [32]byte{}, []byte("first"))
 	second, _ := encodeRecord(2, 3, 2, firstHash, []byte("jumped"))
 	firstPath := filepath.Join(dir, segmentName(1))
@@ -973,11 +977,11 @@ func TestCrossSegmentSequenceDiscontinuityIsRejectedBeforeTailMutation(t *testin
 	if err := os.WriteFile(secondPath, second, 0o600); err != nil {
 		t.Fatalf("write segment 2: %v", err)
 	}
-	if _, err := ReadAllDir(dir); err == nil || !strings.Contains(err.Error(), "sequence discontinuity") {
+	if _, err := ReadAllDir(dir, testWALOptions(Options{})); err == nil || !strings.Contains(err.Error(), "sequence discontinuity") {
 		t.Fatalf("ReadAllDir() error = %v, want sequence discontinuity", err)
 	}
 	visits := 0
-	if err := ScanDirFrom(dir, 0, func(Record) error { visits++; return nil }); err == nil {
+	if err := ScanDirFrom(dir, 0, testWALOptions(Options{}), func(Record) error { visits++; return nil }); err == nil {
 		t.Fatal("ScanDirFrom() accepted cross-segment sequence jump")
 	}
 	if visits != 1 {
@@ -987,7 +991,7 @@ func TestCrossSegmentSequenceDiscontinuityIsRejectedBeforeTailMutation(t *testin
 	if err != nil {
 		t.Fatalf("read tail before repair: %v", err)
 	}
-	if _, err := RepairDir(dir); err == nil || !strings.Contains(err.Error(), "invalid position metadata") {
+	if _, err := RepairDir(dir, testWALOptions(Options{})); err == nil || !strings.Contains(err.Error(), "sequence discontinuity") {
 		t.Fatalf("RepairDir() error = %v, want position preflight rejection", err)
 	}
 	after, err := os.ReadFile(secondPath)
@@ -1009,15 +1013,15 @@ func TestFreshChainsRequireSequenceOne(t *testing.T) {
 		if err := os.WriteFile(path, record, 0o600); err != nil {
 			t.Fatalf("write directory fixture: %v", err)
 		}
-		if _, err := ReadAllDir(dir); err == nil {
+		if _, err := ReadAllDir(dir, testWALOptions(Options{})); err == nil {
 			t.Fatal("ReadAllDir() accepted sequence 42 fresh chain")
 		}
 		visits := 0
-		if err := ScanDirFrom(dir, 0, func(Record) error { visits++; return nil }); err == nil || visits != 0 {
+		if err := ScanDirFrom(dir, 0, testWALOptions(Options{}), func(Record) error { visits++; return nil }); err == nil || visits != 0 {
 			t.Fatalf("ScanDirFrom() = error %v visits %d, want rejection before visit", err, visits)
 		}
 		before, _ := os.ReadFile(path)
-		if _, err := RepairDir(dir); err == nil {
+		if _, err := RepairDir(dir, testWALOptions(Options{})); err == nil {
 			t.Fatal("RepairDir() accepted sequence 42 fresh chain")
 		}
 		after, _ := os.ReadFile(path)
@@ -1031,14 +1035,14 @@ func TestFreshChainsRequireSequenceOne(t *testing.T) {
 		if err := os.WriteFile(path, record, 0o600); err != nil {
 			t.Fatalf("write single-file fixture: %v", err)
 		}
-		if _, err := ReadAll(path); err == nil {
+		if _, err := ReadAll(path, testWALOptions(Options{})); err == nil {
 			t.Fatal("ReadAll() accepted sequence 42 fresh chain")
 		}
 		visits := 0
-		if err := Scan(path, func(Record) error { visits++; return nil }); err == nil || visits != 0 {
+		if err := Scan(path, testWALOptions(Options{}), func(Record) error { visits++; return nil }); err == nil || visits != 0 {
 			t.Fatalf("Scan() = error %v visits %d, want rejection before visit", err, visits)
 		}
-		if _, err := Inspect(path); err == nil {
+		if _, err := Inspect(path, testWALOptions(Options{})); err == nil {
 			t.Fatal("Inspect() accepted sequence 42 fresh chain")
 		}
 		if writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{})); err == nil {
@@ -1046,7 +1050,7 @@ func TestFreshChainsRequireSequenceOne(t *testing.T) {
 			t.Fatal("OpenWriter() accepted sequence 42 fresh chain")
 		}
 		before, _ := os.ReadFile(path)
-		if _, err := Repair(path); err == nil {
+		if _, err := Repair(path, testWALOptions(Options{})); err == nil {
 			t.Fatal("Repair() accepted sequence 42 fresh chain")
 		}
 		after, _ := os.ReadFile(path)
@@ -1071,23 +1075,24 @@ func TestStrictRecoveryRejectsExactPayloadAndTrailerEOF(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "records.wal")
+			writeTestSingleBinding(t, path, Options{})
 			if err := os.WriteFile(path, encoded[:test.cut], 0o600); err != nil {
 				t.Fatalf("write exact-EOF fixture: %v", err)
 			}
-			if _, err := ReadAll(path); err == nil {
+			if _, err := ReadAll(path, testWALOptions(Options{})); err == nil {
 				t.Fatal("ReadAll() accepted exact EOF inside record")
 			}
-			if err := Scan(path, nil); err == nil {
+			if err := Scan(path, testWALOptions(Options{}), nil); err == nil {
 				t.Fatal("Scan() accepted exact EOF inside record")
 			}
-			if _, err := Inspect(path); err == nil {
+			if _, err := Inspect(path, testWALOptions(Options{})); err == nil {
 				t.Fatal("Inspect() accepted exact EOF inside record")
 			}
 			if writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{})); err == nil {
 				_ = writer.Close()
 				t.Fatal("OpenWriter() accepted exact EOF inside record")
 			}
-			result, err := Repair(path)
+			result, err := Repair(path, testWALOptions(Options{}))
 			if err != nil {
 				t.Fatalf("Repair() error = %v", err)
 			}
@@ -1132,7 +1137,7 @@ func TestRepairRefusesUnknownInitialEncodingWithoutMutation(t *testing.T) {
 			if err := os.WriteFile(path, fixture, 0o600); err != nil {
 				t.Fatalf("write encoding fixture: %v", err)
 			}
-			if _, err := Repair(path); err == nil {
+			if _, err := Repair(path, testWALOptions(Options{})); err == nil {
 				t.Fatal("Repair() accepted unknown initial encoding")
 			}
 			after, err := os.ReadFile(path)
@@ -1188,7 +1193,7 @@ func TestWriterRejectsSequenceAndSegmentIDExhaustion(t *testing.T) {
 		if err := writer.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
 		}
-		segments, err := ListSegments(dir)
+		segments, err := ListSegments(dir, testWALOptions(Options{}))
 		if err != nil || len(segments) != 1 || segments[0] != ^uint64(0) {
 			t.Fatalf("segments = (%v, %v), want only max segment id", segments, err)
 		}
@@ -1221,14 +1226,15 @@ func TestEmptyPayloadRecordIsRejectedAndTailRepairable(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "records.wal")
+	writeTestSingleBinding(t, path, Options{})
 	record, _ := encodeRecord(1, 1, 1, [32]byte{}, nil)
 	if err := os.WriteFile(path, record, 0o600); err != nil {
 		t.Fatalf("write empty-payload record: %v", err)
 	}
-	if _, err := ReadAll(path); err == nil {
+	if _, err := ReadAll(path, testWALOptions(Options{})); err == nil {
 		t.Fatal("ReadAll() accepted empty-payload record")
 	}
-	result, err := Repair(path)
+	result, err := Repair(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("Repair() error = %v", err)
 	}
@@ -1368,7 +1374,7 @@ func writeSegmentedWAL(t *testing.T, dir string, count int) []uint64 {
 	if err := writer.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	segments, err := ListSegments(dir)
+	segments, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}

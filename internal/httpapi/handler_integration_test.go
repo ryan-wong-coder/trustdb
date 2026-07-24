@@ -17,9 +17,9 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -63,7 +63,13 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	}
 
 	walPath := filepath.Join(t.TempDir(), "trustdb.wal")
-	writer, err := wal.OpenWriter(walPath, 1)
+	walOptions := wal.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "server-http",
+		LogID:       "server-http",
+		NamespaceID: "wal:" + walPath,
+	}
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, walOptions)
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -126,7 +132,7 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatalf("WAL Close() error = %v", err)
 	}
-	records, err := wal.ReadAll(walPath)
+	records, err := wal.ReadAll(walPath, walOptions)
 	if err != nil {
 		t.Fatalf("ReadAll() error = %v", err)
 	}

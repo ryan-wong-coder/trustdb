@@ -159,6 +159,8 @@ type Writer struct {
 	fsyncErrorHook  func(string, error)
 	recordBuf       []byte
 	suiteID         cryptosuite.ID
+	binding         Binding
+	namespaceLock   *namespaceLock
 }
 
 type appendState struct {
@@ -481,6 +483,39 @@ func ensureBinding(path string, expected Binding, dataExists bool, ops walFileOp
 	return nil
 }
 
+func validateStoredBinding(path string, opts Options) (Binding, error) {
+	expected, err := bindingForOptions(opts)
+	if err != nil {
+		return Binding{}, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Binding{}, errors.New("wal: V2 namespace has no durable binding")
+		}
+		return Binding{}, fmt.Errorf("wal: open namespace binding: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxBindingBytes+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return Binding{}, fmt.Errorf("wal: read namespace binding: %w", readErr)
+	}
+	if closeErr != nil {
+		return Binding{}, fmt.Errorf("wal: close namespace binding: %w", closeErr)
+	}
+	if len(data) > maxBindingBytes {
+		return Binding{}, fmt.Errorf("wal: namespace binding exceeds %d bytes", maxBindingBytes)
+	}
+	var stored Binding
+	if err := cborx.UnmarshalLimit(data, &stored, maxBindingBytes); err != nil {
+		return Binding{}, fmt.Errorf("wal: decode namespace binding: %w", err)
+	}
+	if err := validateBinding(stored, expected); err != nil {
+		return Binding{}, err
+	}
+	return expected, nil
+}
+
 type segmentChainState struct {
 	trustBoundary bool
 	haveSegment   bool
@@ -572,7 +607,18 @@ func (chain *segmentChainState) accept(segmentID uint64, state scanState) error 
 // preserving sequence counters and the cross-segment hash chain. Setting
 // opts.MaxSegmentBytes > 0 enables automatic segment rotation on Append.
 func OpenDirWriter(dir string, opts Options) (*Writer, error) {
-	return openDirWriterWithOps(dir, opts, defaultWALFileOps())
+	lock, err := acquireDirectoryNamespaceLock(dir, true)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := openDirWriterWithOps(dir, opts, defaultWALFileOps())
+	if err != nil {
+		_ = lock.close()
+		return nil, err
+	}
+	writer.namespaceLock = lock
+	lock.setActiveSegment(writer.ActiveSegmentID)
+	return writer, nil
 }
 
 func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, error) {
@@ -586,7 +632,7 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 	if err := ensureDurableDirectory(dir, 0o755, ops); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
-	segments, err := ListSegments(dir)
+	segments, err := listSegments(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -679,6 +725,7 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 		fsyncErrorHook: opts.OnFsyncError,
 		closeDone:      make(chan struct{}),
 		suiteID:        suiteID,
+		binding:        binding,
 	}, nil
 }
 
@@ -690,12 +737,32 @@ func (w *Writer) ActiveSegmentID() uint64 {
 	return w.segmentID
 }
 
-func OpenWriter(path string, segmentID uint64) (*Writer, error) {
-	return OpenWriterWithOptions(path, segmentID, Options{FsyncMode: FsyncStrict})
+// BindingOptions returns only the immutable namespace identity needed by V2
+// readers and maintenance operations. Runtime tuning and callbacks are never
+// copied across this boundary.
+func (w *Writer) BindingOptions() Options {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return Options{
+		CryptoSuite: w.binding.CryptoSuite,
+		NodeID:      w.binding.NodeID,
+		LogID:       w.binding.LogID,
+		NamespaceID: w.binding.NamespaceID,
+	}
 }
 
 func OpenWriterWithOptions(path string, segmentID uint64, opts Options) (*Writer, error) {
-	return openWriterWithOptionsAndOps(path, segmentID, opts, defaultWALFileOps())
+	lock, err := acquireSingleFileNamespaceLock(path, true)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := openWriterWithOptionsAndOps(path, segmentID, opts, defaultWALFileOps())
+	if err != nil {
+		_ = lock.close()
+		return nil, err
+	}
+	writer.namespaceLock = lock
+	return writer, nil
 }
 
 func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, ops walFileOps) (*Writer, error) {
@@ -767,6 +834,7 @@ func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, op
 		fsyncErrorHook: opts.OnFsyncError,
 		closeDone:      make(chan struct{}),
 		suiteID:        suiteID,
+		binding:        binding,
 	}, nil
 }
 
@@ -811,7 +879,11 @@ func (w *Writer) appendReserved(ctx context.Context, payload []byte, at time.Tim
 	if prepareErr == nil {
 		prepareErr = ctx.Err()
 	}
-	w.completeReservation(reservation, prepareErr)
+	func() {
+		w.namespaceLock.beginWrite()
+		defer w.namespaceLock.endWrite()
+		w.completeReservation(reservation, prepareErr)
+	}()
 	return w.waitReservation(ctx, reservation)
 }
 
@@ -1200,11 +1272,15 @@ func (w *Writer) Close() error {
 		w.file = nil
 	}
 	w.closeErr = errors.Join(closeErrors...)
-	closeErr := w.closeErr
 	done := w.closeDone
 	w.mu.Unlock()
 	w.observeFsyncs([]fsyncObservation{fsync})
 	w.backgroundHooks.Wait()
+	lockErr := w.namespaceLock.close()
+	w.mu.Lock()
+	w.closeErr = errors.Join(w.closeErr, lockErr)
+	closeErr := w.closeErr
+	w.mu.Unlock()
 	close(done)
 	return closeErr
 }
@@ -1330,7 +1406,16 @@ func normalizeGroupInterval(d time.Duration) time.Duration {
 	return d
 }
 
-func ReadAll(path string) ([]Record, error) {
+func ReadAll(path string, opts Options) ([]Record, error) {
+	lock, err := acquireSingleFileNamespaceLock(path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return nil, err
+	}
 	state, err := scanFile(path, false, true)
 	if err != nil {
 		return nil, err
@@ -1338,20 +1423,35 @@ func ReadAll(path string) ([]Record, error) {
 	if err := validateSingleFileStart(state); err != nil {
 		return nil, err
 	}
+	if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+		return nil, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, binding.CryptoSuite)
+	}
 	return state.recordsList, nil
 }
 
-// Scan streams every valid record in a legacy single-file WAL to visit.
+// Scan streams every valid record in an explicitly bound V2 single-file WAL.
 // Unlike ReadAll it never builds a []Record, so startup recovery can keep
 // memory proportional to the active recovery window rather than the WAL size.
-func Scan(path string, visit func(Record) error) error {
+func Scan(path string, opts Options, visit func(Record) error) error {
+	lock, err := acquireSingleFileNamespaceLock(path, false)
+	if err != nil {
+		return err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return err
+	}
 	first := true
-	_, err := scanFileVisit(path, false, [32]byte{}, func(record Record) error {
+	_, err = scanFileVisit(path, false, [32]byte{}, func(record Record) error {
 		if first {
 			first = false
 			if record.Position.Sequence != 1 {
 				return fmt.Errorf("wal: first record starts at sequence %d, want 1", record.Position.Sequence)
 			}
+		}
+		if record.CryptoSuite != binding.CryptoSuite {
+			return fmt.Errorf("wal: record crypto_suite %s does not match configured %s", record.CryptoSuite, binding.CryptoSuite)
 		}
 		if visit != nil {
 			return visit(record)
@@ -1371,7 +1471,19 @@ func validateSingleFileStart(state scanState) error {
 // ListSegments returns the segment ids found in dir, in ascending order.
 // Non-segment files are ignored; a missing directory is treated as empty
 // rather than an error to keep callers tolerant of first-boot states.
-func ListSegments(dir string) ([]uint64, error) {
+func ListSegments(dir string, opts Options) ([]uint64, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.close()
+	if _, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts); err != nil {
+		return nil, err
+	}
+	return listSegments(dir)
+}
+
+func listSegments(dir string) ([]uint64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1415,8 +1527,8 @@ func ListSegments(dir string) ([]uint64, error) {
 
 // ReadAllDir reads every currently retained WAL record in dir, verifying the
 // hash chain across segment boundaries. Equivalent to ReadAllDirFrom(dir, 0).
-func ReadAllDir(dir string) ([]Record, error) {
-	return ReadAllDirFrom(dir, 0)
+func ReadAllDir(dir string, opts Options) ([]Record, error) {
+	return ReadAllDirFrom(dir, 0, opts)
 }
 
 // ReadAllDirFrom reads records from segments whose id >= minSegmentID. When
@@ -1424,8 +1536,17 @@ func ReadAllDir(dir string) ([]Record, error) {
 // on-disk id is greater than 1, or minSegmentID skips files, the first
 // non-empty record's link to the absent prefix is trusted once. Every later
 // segment id and hash link remains strict.
-func ReadAllDirFrom(dir string, minSegmentID uint64) ([]Record, error) {
-	segments, err := ListSegments(dir)
+func ReadAllDirFrom(dir string, minSegmentID uint64, opts Options) ([]Record, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return nil, err
+	}
+	segments, err := listSegments(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -1459,6 +1580,9 @@ func ReadAllDirFrom(dir string, minSegmentID uint64) ([]Record, error) {
 		if err := chain.accept(seg, state); err != nil {
 			return nil, err
 		}
+		if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+			return nil, fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", seg, state.cryptoSuite, binding.CryptoSuite)
+		}
 		if state.records == 0 {
 			continue
 		}
@@ -1471,8 +1595,17 @@ func ReadAllDirFrom(dir string, minSegmentID uint64) ([]Record, error) {
 // >= minSegmentID. It verifies the same hash-chain invariants as
 // ReadAllDirFrom, but invokes visit record-by-record instead of collecting a
 // slice. A nil visit performs validation only.
-func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) error {
-	segments, err := ListSegments(dir)
+func ScanDirFrom(dir string, minSegmentID uint64, opts Options, visit func(Record) error) error {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return err
+	}
+	segments, err := listSegments(dir)
 	if err != nil {
 		return err
 	}
@@ -1500,6 +1633,9 @@ func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) erro
 						return err
 					}
 				}
+				if record.CryptoSuite != binding.CryptoSuite {
+					return fmt.Errorf("wal: record crypto_suite %s does not match configured %s", record.CryptoSuite, binding.CryptoSuite)
+				}
 				return visit(record)
 			}
 		}
@@ -1509,6 +1645,9 @@ func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) erro
 		}
 		if err := chain.accept(seg, state); err != nil {
 			return err
+		}
+		if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+			return fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", seg, state.cryptoSuite, binding.CryptoSuite)
 		}
 	}
 	return nil
@@ -1522,7 +1661,18 @@ func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) erro
 // function does not re-check the checkpoint itself. Pruning is idempotent,
 // but it returns success only after each oldest-first removal has crossed a
 // directory metadata barrier.
-func PruneSegmentsBefore(dir string, segmentID uint64) (int, int64, error) {
+func PruneSegmentsBefore(dir string, segmentID uint64, opts Options) (int, int64, error) {
+	lock, err := acquireDirectoryMaintenanceLock(dir)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer lock.close()
+	if activeSegment, ok := lock.writerActiveSegment(); ok && segmentID > activeSegment {
+		return 0, 0, fmt.Errorf("wal: prune cutoff %d would remove active segment %d", segmentID, activeSegment)
+	}
+	if _, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts); err != nil {
+		return 0, 0, err
+	}
 	return pruneSegmentsBeforeWithOps(dir, segmentID, defaultWALFileOps())
 }
 
@@ -1530,7 +1680,7 @@ func pruneSegmentsBeforeWithOps(dir string, segmentID uint64, ops walFileOps) (i
 	if segmentID <= 1 {
 		return 0, 0, nil
 	}
-	segments, err := ListSegments(dir)
+	segments, err := listSegments(dir)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1650,13 +1800,25 @@ func isDecimalSegmentStem(stem string) bool {
 	return true
 }
 
-func Inspect(path string) (InspectResult, error) {
+func Inspect(path string, opts Options) (InspectResult, error) {
+	lock, err := acquireSingleFileNamespaceLock(path, false)
+	if err != nil {
+		return InspectResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return InspectResult{}, err
+	}
 	state, err := scanFile(path, false, false)
 	if err != nil {
 		return InspectResult{}, err
 	}
 	if err := validateSingleFileStart(state); err != nil {
 		return InspectResult{}, err
+	}
+	if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+		return InspectResult{}, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, binding.CryptoSuite)
 	}
 	return InspectResult{
 		Path:          path,
@@ -1686,8 +1848,17 @@ type DirInspectResult struct {
 // InspectDir produces a DirInspectResult by scanning every segment in the
 // directory with cross-segment hash chain verification. This is the CLI's
 // view of `wal inspect` for directory layouts.
-func InspectDir(dir string) (DirInspectResult, error) {
-	ids, err := ListSegments(dir)
+func InspectDir(dir string, opts Options) (DirInspectResult, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return DirInspectResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return DirInspectResult{}, err
+	}
+	ids, err := listSegments(dir)
 	if err != nil {
 		return DirInspectResult{}, err
 	}
@@ -1711,6 +1882,9 @@ func InspectDir(dir string) (DirInspectResult, error) {
 		}
 		if err := chain.accept(id, state); err != nil {
 			return out, err
+		}
+		if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+			return out, fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", id, state.cryptoSuite, binding.CryptoSuite)
 		}
 		res := InspectResult{
 			Path:          segPath,
@@ -1736,7 +1910,23 @@ func InspectDir(dir string) (DirInspectResult, error) {
 	return out, nil
 }
 
-func Repair(path string) (RepairResult, error) {
+func Repair(path string, opts Options) (RepairResult, error) {
+	lock, err := acquireSingleFileNamespaceLock(path, true)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	state, err := scanFile(path, true, false)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+		return RepairResult{}, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, binding.CryptoSuite)
+	}
 	return repairWithOps(path, defaultWALFileOps())
 }
 
@@ -1832,12 +2022,56 @@ type DirRepairResult struct {
 // exists, so truncating earlier segments would cascade-invalidate
 // everything past them. Operators who hit that case should restore from
 // backup or investigate manually.
-func RepairDir(dir string) (DirRepairResult, error) {
+func RepairDir(dir string, opts Options) (DirRepairResult, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, true)
+	if err != nil {
+		return DirRepairResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return DirRepairResult{}, err
+	}
+	if err := validateDirRecordSuitesBeforeRepair(dir, binding.CryptoSuite); err != nil {
+		return DirRepairResult{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "wal: repair preflight failed", err)
+	}
 	return repairDirWithOps(dir, defaultWALFileOps())
 }
 
+func validateDirRecordSuitesBeforeRepair(dir string, expected cryptosuite.ID) error {
+	ids, err := listSegments(dir)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	chain := segmentChainState{trustBoundary: ids[0] > 1}
+	for index, id := range ids {
+		path := filepath.Join(dir, segmentName(id))
+		if err := chain.validateNextSegment(id); err != nil {
+			return err
+		}
+		startPrev, err := chain.repairStartPrev(path)
+		if err != nil {
+			return err
+		}
+		state, err := scanFileFrom(path, index == len(ids)-1, false, startPrev)
+		if err != nil {
+			return err
+		}
+		if state.records > 0 && state.cryptoSuite != expected {
+			return fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", id, state.cryptoSuite, expected)
+		}
+		if err := chain.accept(id, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func repairDirWithOps(dir string, ops walFileOps) (DirRepairResult, error) {
-	ids, err := ListSegments(dir)
+	ids, err := listSegments(dir)
 	if err != nil {
 		return DirRepairResult{}, err
 	}

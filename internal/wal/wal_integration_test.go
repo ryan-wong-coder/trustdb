@@ -30,7 +30,7 @@ func TestWriterReadAllRoundTrip(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	records, err := ReadAll(path)
+	records, err := ReadAll(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAll() error = %v", err)
 	}
@@ -69,7 +69,7 @@ func TestReadAllRejectsCorruptCRC(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	if _, err := ReadAll(path); err == nil {
+	if _, err := ReadAll(path, testWALOptions(Options{})); err == nil {
 		t.Fatal("ReadAll() error = nil, want corruption error")
 	}
 }
@@ -100,7 +100,7 @@ func TestOpenWriterAppendsExistingWAL(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	records, err := ReadAll(path)
+	records, err := ReadAll(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ReadAll() error = %v", err)
 	}
@@ -136,17 +136,17 @@ func TestInspectAndRepairTruncatedTail(t *testing.T) {
 	if err := os.Truncate(path, info.Size()-10); err != nil {
 		t.Fatalf("Truncate() error = %v", err)
 	}
-	if _, err := Inspect(path); err == nil {
+	if _, err := Inspect(path, testWALOptions(Options{})); err == nil {
 		t.Fatal("Inspect() error = nil, want truncated tail error")
 	}
-	repaired, err := Repair(path)
+	repaired, err := Repair(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("Repair() error = %v", err)
 	}
 	if !repaired.Repaired || repaired.Records != 1 || repaired.TruncatedBytes == 0 {
 		t.Fatalf("Repair() = %+v", repaired)
 	}
-	inspected, err := Inspect(path)
+	inspected, err := Inspect(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("Inspect() after repair error = %v", err)
 	}

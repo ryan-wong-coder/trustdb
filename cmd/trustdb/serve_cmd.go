@@ -301,30 +301,19 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			}
 			nodeID := stringValue(cmd, rt, "server-id", "server_id")
 			logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
-			if logID == "" {
-				logID = nodeID
-			}
-			walID, err := filepath.Abs(filepath.Clean(walPath))
-			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInvalidArgument, "resolve wal identity", err)
-			}
 			reg, metrics := observability.NewRegistry()
-			walOpts := wal.Options{
-				CryptoSuite:         serverKey.CryptoSuite,
-				NodeID:              nodeID,
-				LogID:               logID,
-				NamespaceID:         "wal:" + walID,
+			var walOpts wal.Options
+			walOpts = wal.Options{
 				MaxSegmentBytes:     walMaxSegmentBytes,
 				FsyncMode:           walFsyncMode,
 				GroupCommitInterval: walGroupCommitInterval,
 				OnRotate: func(_, to uint64) {
 					metrics.WALActiveSegmentID.Set(float64(to))
-					// The count gauge is refreshed on rotate rather than
-					// read live so prometheus scrapes remain cheap; a
-					// fresh segment becoming active implies +1 file.
-					if err := refreshWALSegmentsTotal(metrics, walPath); err != nil {
-						rt.logger.Warn().Err(err).Str("wal", walPath).Msg("wal segment metric refresh failed")
-					}
+					// The callback runs inside the writer's namespace
+					// maintenance barrier. A successful rotation publishes
+					// exactly one new segment, so update without recursively
+					// opening a reader lock.
+					metrics.WALSegmentsTotal.Inc()
 				},
 				OnAppend: func(mode string, d time.Duration) {
 					metrics.WALAppendLatency.WithLabelValues(mode).Observe(d.Seconds())
@@ -336,6 +325,11 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 					rt.logger.Error().Err(err).Str("fsync_mode", mode).Str("wal", walPath).Msg("wal fsync failed")
 				},
 			}
+			walOpts, walID, err := bindWALNamespaceOptions(walOpts, serverKey.CryptoSuite, nodeID, logID, walPath)
+			if err != nil {
+				return err
+			}
+			logID = walOpts.LogID
 			writer, walMode, err := openWALWriterWithOptions(walPath, walOpts)
 			if err != nil {
 				return err
@@ -359,7 +353,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			// not after the first rotate/prune.
 			metrics.WALActiveSegmentID.Set(float64(writer.ActiveSegmentID()))
 			if walMode == "directory" {
-				if err := refreshWALSegmentsTotal(metrics, walPath); err != nil {
+				if err := refreshWALSegmentsTotal(metrics, walPath, walOpts); err != nil {
 					rt.logger.Warn().Err(err).Str("wal", walPath).Msg("wal segment metric refresh failed")
 				}
 			} else {
@@ -533,7 +527,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if walMode == "directory" {
 				pruneGuard, guarded := proofStore.(proofstore.WALCheckpointPruneGuard)
 				if proofstore.WALCheckpointPruneSafe(proofStore) && guarded {
-					pruneHook := newPruneHook(rt, walPath, walKeepSegments, metrics)
+					pruneHook := newPruneHook(rt, walPath, walKeepSegments, metrics, walOpts)
 					batchOpts.OnCheckpointAdvanced = func(ctx context.Context, cp model.WALCheckpoint) {
 						ran, err := pruneGuard.WithWALCheckpointPruneGuard(ctx, cp, func() error {
 							pruneHook(ctx, cp)
@@ -1282,15 +1276,17 @@ func restoreBatchSeq(ctx context.Context, rt *runtimeConfig, store proofstore.St
 // can verify pruning is actually happening. Errors are logged only — they
 // never propagate back into the batch pipeline because correctness of the
 // committed batch does not depend on prune succeeding.
-func newPruneHook(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics) func(context.Context, model.WALCheckpoint) {
-	return newPruneHookWithPruner(rt, walDir, keepSegments, metrics, wal.PruneSegmentsBefore)
+func newPruneHook(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics, opts wal.Options) func(context.Context, model.WALCheckpoint) {
+	return newPruneHookWithPruner(rt, walDir, keepSegments, metrics, opts, func(dir string, cutoff uint64) (int, int64, error) {
+		return wal.PruneSegmentsBefore(dir, cutoff, opts)
+	})
 }
 
 type pruneSegmentsFunc func(string, uint64) (int, int64, error)
 
-func newPruneHookWithPruner(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics, prune pruneSegmentsFunc) func(context.Context, model.WALCheckpoint) {
+func newPruneHookWithPruner(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics, opts wal.Options, prune pruneSegmentsFunc) func(context.Context, model.WALCheckpoint) {
 	refreshSegments := func() {
-		if err := refreshWALSegmentsTotal(metrics, walDir); err != nil {
+		if err := refreshWALSegmentsTotal(metrics, walDir, opts); err != nil {
 			rt.logger.Warn().Err(err).Str("wal", walDir).Msg("wal segment metric refresh failed")
 		}
 	}
@@ -1350,11 +1346,11 @@ func newPruneHookWithPruner(rt *runtimeConfig, walDir string, keepSegments int, 
 	}
 }
 
-func refreshWALSegmentsTotal(metrics *observability.Metrics, walDir string) error {
+func refreshWALSegmentsTotal(metrics *observability.Metrics, walDir string, opts wal.Options) error {
 	if metrics == nil {
 		return nil
 	}
-	segs, err := wal.ListSegments(walDir)
+	segs, err := wal.ListSegments(walDir, opts)
 	if err != nil {
 		return err
 	}
@@ -1488,7 +1484,7 @@ func openWALWriterWithOptions(walPath string, opts wal.Options) (*wal.Writer, st
 	}
 }
 
-func scanWALRecords(walPath string, minSegmentID uint64, visit func(wal.Record) error) error {
+func scanWALRecords(walPath string, minSegmentID uint64, opts wal.Options, visit func(wal.Record) error) error {
 	info, err := os.Stat(walPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1497,12 +1493,12 @@ func scanWALRecords(walPath string, minSegmentID uint64, visit func(wal.Record) 
 		return err
 	}
 	if info.IsDir() {
-		return wal.ScanDirFrom(walPath, minSegmentID, visit)
+		return wal.ScanDirFrom(walPath, minSegmentID, opts, visit)
 	}
-	return wal.Scan(walPath, visit)
+	return wal.Scan(walPath, opts, visit)
 }
 
-func inspectWALSequenceBounds(walPath string) (uint64, uint64, error) {
+func inspectWALSequenceBounds(walPath string, opts wal.Options) (uint64, uint64, error) {
 	info, err := os.Stat(walPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1511,13 +1507,13 @@ func inspectWALSequenceBounds(walPath string) (uint64, uint64, error) {
 		return 0, 0, err
 	}
 	if info.IsDir() {
-		inspection, err := wal.InspectDir(walPath)
+		inspection, err := wal.InspectDir(walPath, opts)
 		if err != nil {
 			return 0, 0, err
 		}
 		return inspection.FirstSequence, inspection.LastSequence, nil
 	}
-	inspection, err := wal.Inspect(walPath)
+	inspection, err := wal.Inspect(walPath, opts)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1792,7 +1788,7 @@ func loadManifestItemsFromWAL(ctx context.Context, walPath string, engine app.Lo
 	if minSegmentID == 0 {
 		minSegmentID = 1
 	}
-	err := scanWALRecords(walPath, minSegmentID, func(record wal.Record) error {
+	err := scanWALRecords(walPath, minSegmentID, engine.WAL.BindingOptions(), func(record wal.Record) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1842,6 +1838,7 @@ var errStopManifestScan = errors.New("stop manifest scan")
 //  3. Enqueue records that are not yet covered by any committed manifest into
 //     the live batch service so they can be included in a fresh batch.
 func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngine, batchSvc *batch.Service, store proofstore.Store, metrics *observability.Metrics) (int, int, int, error) {
+	walBinding := engine.WAL.BindingOptions()
 	// Recovered batches can commit on the live worker while this function is
 	// still scanning. Defer checkpoint persistence (and therefore pruning)
 	// across the entire scan and prepared-manifest recovery window.
@@ -1871,7 +1868,7 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	// anything. This intentionally rare migration path may inspect the WAL
 	// twice; normal no-checkpoint and checkpoint-unsafe startup stay single-pass.
 	if legacyCheckpoint && checkpoint.LastSequence > 0 {
-		firstSequence, lastSequence, err := inspectWALSequenceBounds(walPath)
+		firstSequence, lastSequence, err := inspectWALSequenceBounds(walPath, walBinding)
 		if err != nil {
 			return 0, 0, 0, trusterr.Wrap(trusterr.CodeDataLoss, "inspect wal before legacy checkpoint migration", err)
 		}
@@ -1974,7 +1971,7 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 		committedRunBatchID = ""
 		return err
 	}
-	if err := scanWALRecords(walPath, minSegmentID, func(record wal.Record) error {
+	if err := scanWALRecords(walPath, minSegmentID, walBinding, func(record wal.Record) error {
 		if firstRetainedSequence == 0 {
 			firstRetainedSequence = record.Position.Sequence
 			if requireFullPrefix && firstRetainedSequence != 1 {

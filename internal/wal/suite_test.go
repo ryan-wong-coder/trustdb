@@ -41,6 +41,17 @@ func writeTestDirBinding(t *testing.T, dir string, opts Options) {
 	}
 }
 
+func writeTestSingleBinding(t *testing.T, path string, opts Options) {
+	t.Helper()
+	binding, err := bindingForOptions(testWALOptions(opts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBinding(path+".binding", binding, false, defaultWALFileOps()); err != nil {
+		t.Fatalf("write test single-file WAL binding: %v", err)
+	}
+}
+
 func TestBindingPublicationRecoversAtCrashBoundaries(t *testing.T) {
 	t.Parallel()
 	sentinel := errors.New("injected binding failure")

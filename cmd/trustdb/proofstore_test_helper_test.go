@@ -1,14 +1,29 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/proofstore"
+	"github.com/wowtrust/trustdb/internal/wal"
 )
 
 func newBoundTestLocalStore(t testing.TB, root string) proofstore.LocalStore {
 	return newBoundTestLocalStoreForSuite(t, root, cryptosuite.INTLV1)
+}
+
+func newBoundTestWALOptions(t testing.TB, path string, opts wal.Options) wal.Options {
+	t.Helper()
+	absolutePath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		t.Fatalf("resolve test WAL namespace: %v", err)
+	}
+	opts.CryptoSuite = cryptosuite.INTLV1
+	opts.NodeID = "local-server"
+	opts.LogID = "trustdb-global-log"
+	opts.NamespaceID = "wal:" + absolutePath
+	return opts
 }
 
 func newBoundTestLocalStoreForSuite(t testing.TB, root string, suiteID cryptosuite.ID) proofstore.LocalStore {

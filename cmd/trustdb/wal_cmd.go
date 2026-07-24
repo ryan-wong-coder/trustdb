@@ -4,19 +4,22 @@ import (
 	"encoding/base64"
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/internal/wal"
-	"github.com/spf13/cobra"
 )
 
 // walIsDirectory returns true when the given path exists and is a directory.
 // It returns a wrapped error for other stat failures; a missing path is
-// treated as "not a directory" so a freshly-created single-file WAL still
-// follows the legacy code path.
+// treated as "not a directory" so an explicitly bound V2 single-file WAL can
+// still be initialized by the caller.
 func walIsDirectory(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -36,6 +39,7 @@ func newWALCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.AddCommand(newWALInspectCommand(rt))
 	cmd.AddCommand(newWALRepairCommand(rt))
 	cmd.AddCommand(newWALDumpCommand(rt))
+	cmd.PersistentFlags().String("crypto-suite", "", "expected WAL cryptographic suite: INTL_V1 or CN_SM_V1 (required)")
 	return cmd
 }
 
@@ -50,14 +54,18 @@ func newWALInspectCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opts, err := walOptionsForCLI(cmd, rt, walPath)
+			if err != nil {
+				return err
+			}
 			if isDir {
-				result, err := wal.InspectDir(walPath)
+				result, err := wal.InspectDir(walPath, opts)
 				if err != nil {
 					return err
 				}
 				return rt.writeJSON(result)
 			}
-			result, err := wal.Inspect(walPath)
+			result, err := wal.Inspect(walPath, opts)
 			if err != nil {
 				return err
 			}
@@ -80,11 +88,15 @@ func newWALDumpCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opts, err := walOptionsForCLI(cmd, rt, walPath)
+			if err != nil {
+				return err
+			}
 			var records []wal.Record
 			if isDir {
-				records, err = wal.ReadAllDir(walPath)
+				records, err = wal.ReadAllDir(walPath, opts)
 			} else {
-				records, err = wal.ReadAll(walPath)
+				records, err = wal.ReadAll(walPath, opts)
 			}
 			if err != nil {
 				return err
@@ -135,6 +147,10 @@ func newWALRepairCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opts, err := walOptionsForCLI(cmd, rt, walPath)
+			if err != nil {
+				return err
+			}
 			if isDir {
 				// Directory-mode repair only truncates the tail
 				// segment. A chain break in any earlier segment
@@ -142,13 +158,13 @@ func newWALRepairCommand(rt *runtimeConfig) *cobra.Command {
 				// without touching disk so the operator can escalate
 				// to manual recovery instead of cascade-invalidating
 				// later segments.
-				result, err := wal.RepairDir(walPath)
+				result, err := wal.RepairDir(walPath, opts)
 				if err != nil {
 					return err
 				}
 				return rt.writeJSON(result)
 			}
-			result, err := wal.Repair(walPath)
+			result, err := wal.Repair(walPath, opts)
 			if err != nil {
 				return err
 			}
@@ -157,4 +173,49 @@ func newWALRepairCommand(rt *runtimeConfig) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&walPath, "wal", "", "wal path (file or directory)")
 	return cmd
+}
+
+func walOptionsForCLI(cmd *cobra.Command, rt *runtimeConfig, walPath string) (wal.Options, error) {
+	flag := cmd.Flag("crypto-suite")
+	if flag == nil {
+		return wal.Options{}, trusterr.New(trusterr.CodeInternal, "wal command is missing --crypto-suite")
+	}
+	suiteID := cryptosuite.ID(strings.TrimSpace(flag.Value.String()))
+	if suiteID == "" {
+		return wal.Options{}, usageError("--crypto-suite is required")
+	}
+	options, _, err := bindWALNamespaceOptions(
+		wal.Options{},
+		suiteID,
+		rt.cfg.Server.ID,
+		rt.cfg.GlobalLog.LogID,
+		walPath,
+	)
+	if err != nil {
+		return wal.Options{}, err
+	}
+	return options, nil
+}
+
+func bindWALNamespaceOptions(opts wal.Options, suiteID cryptosuite.ID, nodeID, configuredLogID, walPath string) (wal.Options, string, error) {
+	if _, err := cryptosuite.RequireKnown(suiteID); err != nil {
+		return wal.Options{}, "", trusterr.Wrap(trusterr.CodeInvalidArgument, "validate WAL cryptographic suite", err)
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return wal.Options{}, "", trusterr.New(trusterr.CodeInvalidArgument, "WAL node_id is required")
+	}
+	logID := strings.TrimSpace(configuredLogID)
+	if logID == "" {
+		logID = nodeID
+	}
+	absolutePath, err := filepath.Abs(filepath.Clean(walPath))
+	if err != nil {
+		return wal.Options{}, "", trusterr.Wrap(trusterr.CodeInvalidArgument, "resolve WAL namespace identity", err)
+	}
+	opts.CryptoSuite = suiteID
+	opts.NodeID = nodeID
+	opts.LogID = logID
+	opts.NamespaceID = "wal:" + absolutePath
+	return opts, absolutePath, nil
 }
