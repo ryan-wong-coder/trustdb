@@ -154,6 +154,45 @@ func Open(path string, registrySigner trustcrypto.Signer, trustedRegistryPub tru
 	return r, nil
 }
 
+// OpenEvidence verifies a complete in-memory Key Registry V2 stream against a
+// verifier-local registry public key. The public key embedded in the manifest
+// is only evidence and never authorizes itself. Unlike the durable file
+// reader, portable evidence rejects an incomplete final frame instead of
+// treating it as a recoverable torn append.
+func OpenEvidence(data []byte, trustedRegistryPub trustcrypto.PublicKeyDescriptor) (*Registry, error) {
+	if len(data) == 0 {
+		return nil, errors.New("keystore: registry evidence is empty")
+	}
+	if len(trustedRegistryPub.Bytes) == 0 || strings.TrimSpace(trustedRegistryPub.KeyID) == "" {
+		return nil, errors.New("keystore: trusted registry public descriptor is required to verify registry evidence")
+	}
+	if err := trustcrypto.ValidatePublicKeyForSuite(trustedRegistryPub.Suite, trustedRegistryPub); err != nil {
+		return nil, fmt.Errorf("keystore: invalid trusted registry public key: %w", err)
+	}
+	manifest, events, _, truncatedTail, err := readRegistryStream(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	if truncatedTail {
+		return nil, errors.New("keystore: registry evidence contains an incomplete final frame")
+	}
+	manifestPub := manifest.publicKeyDescriptor()
+	if !samePublicKey(manifestPub, trustedRegistryPub) {
+		return nil, errors.New("keystore: trusted registry public key does not match V2 evidence manifest")
+	}
+	r := &Registry{
+		manifest:    manifest.clone(),
+		registryPub: manifestPub,
+		byKey:       make(map[string]keyTimeline),
+	}
+	for index := range events {
+		if err := r.loadEvent(index, events[index]); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
+}
+
 func manifestForPublicKey(publicKey trustcrypto.PublicKeyDescriptor) Manifest {
 	return Manifest{
 		SchemaVersion:          SchemaRegistryV2,
@@ -793,11 +832,15 @@ func readRegistry(path string) (Manifest, []model.KeyEvent, int64, bool, error) 
 		return Manifest{}, nil, 0, false, err
 	}
 	defer file.Close()
+	return readRegistryStream(file)
+}
+
+func readRegistryStream(stream io.ReadSeeker) (Manifest, []model.KeyEvent, int64, bool, error) {
 	magic := make([]byte, len(registryMagic))
-	if _, err := io.ReadFull(file, magic); err != nil || !bytes.Equal(magic, registryMagic) {
+	if _, err := io.ReadFull(stream, magic); err != nil || !bytes.Equal(magic, registryMagic) {
 		return Manifest{}, nil, 0, false, fmt.Errorf("keystore: %w: expected %s; V1 registries are not read or migrated", ErrUnsupportedRegistryFormat, SchemaRegistryV2)
 	}
-	manifestPayload, end, state, err := readFrame(file)
+	manifestPayload, end, state, err := readFrame(stream)
 	if err != nil {
 		return Manifest{}, nil, 0, false, err
 	}
@@ -814,7 +857,7 @@ func readRegistry(path string) (Manifest, []model.KeyEvent, int64, bool, error) 
 	events := make([]model.KeyEvent, 0)
 	durableEnd := end
 	for {
-		payload, nextEnd, frameState, err := readFrame(file)
+		payload, nextEnd, frameState, err := readFrame(stream)
 		if err != nil {
 			return Manifest{}, nil, 0, false, err
 		}
@@ -842,13 +885,13 @@ const (
 	framePartial
 )
 
-func readFrame(file *os.File) ([]byte, int64, frameReadState, error) {
-	start, err := file.Seek(0, io.SeekCurrent)
+func readFrame(stream io.ReadSeeker) ([]byte, int64, frameReadState, error) {
+	start, err := stream.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return nil, 0, frameEOF, err
 	}
 	var header [4]byte
-	n, err := io.ReadFull(file, header[:])
+	n, err := io.ReadFull(stream, header[:])
 	if errors.Is(err, io.EOF) && n == 0 {
 		return nil, start, frameEOF, nil
 	}
@@ -860,11 +903,11 @@ func readFrame(file *os.File) ([]byte, int64, frameReadState, error) {
 		return nil, 0, frameEOF, fmt.Errorf("keystore: invalid registry frame length: %d", length)
 	}
 	payload := make([]byte, length)
-	if _, err := io.ReadFull(file, payload); err != nil {
+	if _, err := io.ReadFull(stream, payload); err != nil {
 		return nil, start, framePartial, nil
 	}
 	var trailer [4]byte
-	if _, err := io.ReadFull(file, trailer[:]); err != nil {
+	if _, err := io.ReadFull(stream, trailer[:]); err != nil {
 		return nil, start, framePartial, nil
 	}
 	want := binary.BigEndian.Uint32(trailer[:])
@@ -872,7 +915,7 @@ func readFrame(file *os.File) ([]byte, int64, frameReadState, error) {
 	if want != got {
 		return nil, 0, frameEOF, errors.New("keystore: registry frame CRC mismatch")
 	}
-	end, err := file.Seek(0, io.SeekCurrent)
+	end, err := stream.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return nil, 0, frameEOF, err
 	}
