@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -80,13 +81,19 @@ func TestReadSingleProofFileRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample.sproof")
 	writeCBORForTest(t, path, model.SingleProof{
 		SchemaVersion:   model.SchemaSingleProof,
-		FormatVersion:   1,
+		FormatVersion:   2,
+		CryptoSuite:     cryptosuite.INTLV1,
 		RecordID:        "rec-1",
 		ProofLevel:      "L3",
+		NodeID:          "node-1",
+		LogID:           "log-1",
 		ExportedAtUnixN: 1,
 		ProofBundle: model.ProofBundle{
 			SchemaVersion: model.SchemaProofBundle,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      "rec-1",
+			NodeID:        "node-1",
+			LogID:         "log-1",
 		},
 	})
 
@@ -105,12 +112,18 @@ func TestReadProofBundleFileExplainsSingleProofMixup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample.sproof")
 	writeCBORForTest(t, path, model.SingleProof{
 		SchemaVersion: model.SchemaSingleProof,
-		FormatVersion: 1,
+		FormatVersion: 2,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      "rec-1",
 		ProofLevel:    "L3",
+		NodeID:        "node-1",
+		LogID:         "log-1",
 		ProofBundle: model.ProofBundle{
 			SchemaVersion: model.SchemaProofBundle,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      "rec-1",
+			NodeID:        "node-1",
+			LogID:         "log-1",
 		},
 	})
 
