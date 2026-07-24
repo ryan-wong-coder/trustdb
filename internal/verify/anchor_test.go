@@ -100,14 +100,14 @@ func otsAnchorResult(t *testing.T, proof model.GlobalLogProof, digest []byte, ti
 	}
 }
 
-func TestAnchorConsistencyFileSinkOK(t *testing.T) {
+func TestAnchorConsistencyRejectsFileSinkLocalOnlyResult(t *testing.T) {
 	t.Parallel()
 	root := bytes.Repeat([]byte{0xaa}, cryptosuite.DigestSize)
 	proof := newGlobalProofWithSTH(7, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   proof.CryptoSuite,
-		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		EvidenceStage: model.AnchorEvidenceStageLocalOnly,
 		NodeID:        proof.STH.NodeID,
 		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
@@ -116,8 +116,8 @@ func TestAnchorConsistencyFileSinkOK(t *testing.T) {
 		RootHash:      root,
 		STH:           proof.STH,
 	}
-	if err := AnchorConsistency(proof, ar); err != nil {
-		t.Fatalf("AnchorConsistency: %v", err)
+	if err := AnchorConsistency(proof, ar); err == nil || !strings.Contains(err.Error(), "offline_verified") {
+		t.Fatalf("AnchorConsistency() error=%v, want local-only rejection", err)
 	}
 }
 
@@ -305,9 +305,9 @@ func TestAnchorConsistencyRejectsRootMismatch(t *testing.T) {
 	}
 }
 
-func TestAnchorConsistencyRejectsFileAnchorIDTamper(t *testing.T) {
+func TestAnchorConsistencyRejectsForgedOfflineVerifiedFileResult(t *testing.T) {
 	t.Parallel()
-	root := []byte{1, 2}
+	root := bytes.Repeat([]byte{0x12}, cryptosuite.DigestSize)
 	proof := newGlobalProofWithSTH(5, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
@@ -317,13 +317,13 @@ func TestAnchorConsistencyRejectsFileAnchorIDTamper(t *testing.T) {
 		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.FileSinkName,
-		AnchorID:      "file-tampered-0000000000000000000",
+		AnchorID:      anchor.DeterministicFileAnchorID(proof.STH),
 		RootHash:      root,
 		STH:           proof.STH,
 	}
 	err := AnchorConsistency(proof, ar)
-	if err == nil || !strings.Contains(err.Error(), "file sink anchor_id") {
-		t.Fatalf("want anchor_id mismatch error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "local-only") {
+		t.Fatalf("want forged file-sink evidence rejection, got %v", err)
 	}
 }
 
@@ -337,7 +337,7 @@ func TestAnchorConsistencyRejectsEmptyAnchorID(t *testing.T) {
 		NodeID:        proof.STH.NodeID,
 		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
-		SinkName:      anchor.FileSinkName,
+		SinkName:      "vendor-chain",
 		RootHash:      []byte{1},
 		STH:           proof.STH,
 	}
@@ -360,8 +360,8 @@ func TestAnchorConsistencyRejectsNonVerifiedEvidenceStages(t *testing.T) {
 				NodeID:        proof.STH.NodeID,
 				LogID:         proof.STH.LogID,
 				TreeSize:      proof.STH.TreeSize,
-				SinkName:      anchor.FileSinkName,
-				AnchorID:      anchor.DeterministicFileAnchorID(proof.STH),
+				SinkName:      "vendor-chain",
+				AnchorID:      "vendor-anchor-7",
 				RootHash:      append([]byte(nil), proof.STH.RootHash...),
 				STH:           proof.STH,
 			}
@@ -382,8 +382,8 @@ func TestAnchorBindingConsistencyRequiresExactNodeAndLogIdentity(t *testing.T) {
 		NodeID:        proof.STH.NodeID,
 		LogID:         proof.STH.LogID,
 		TreeSize:      proof.STH.TreeSize,
-		SinkName:      anchor.FileSinkName,
-		AnchorID:      anchor.DeterministicFileAnchorID(proof.STH),
+		SinkName:      "vendor-chain",
+		AnchorID:      "vendor-anchor-8",
 		RootHash:      append([]byte(nil), proof.STH.RootHash...),
 		STH:           proof.STH,
 	}

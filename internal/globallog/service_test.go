@@ -181,8 +181,8 @@ func TestEvidenceUsesLatestCoveringAnchoredSTH(t *testing.T) {
 		NodeID:           anchored.NodeID,
 		LogID:            anchored.LogID,
 		TreeSize:         anchored.TreeSize,
-		SinkName:         anchor.FileSinkName,
-		AnchorID:         anchor.DeterministicFileAnchorID(anchored),
+		SinkName:         "independent-test-anchor",
+		AnchorID:         "independent-anchor-3",
 		RootHash:         append([]byte(nil), anchored.RootHash...),
 		STH:              anchored,
 		PublishedAtUnixN: time.Unix(101, 0).UnixNano(),
@@ -258,7 +258,7 @@ func TestEvidenceDoesNotTreatConfiguredNoopStreamAsL5(t *testing.T) {
 	putResult(sths[1], anchor.NoopSinkName)
 	if err := writer.PutSTHAnchorResult(ctx, model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1,
-		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		EvidenceStage: model.AnchorEvidenceStageLocalOnly,
 		NodeID:        sths[2].NodeID, LogID: sths[2].LogID, TreeSize: sths[2].TreeSize,
 		SinkName: anchor.FileSinkName, AnchorID: "file-anchor", RootHash: append([]byte(nil), sths[2].RootHash...),
 		STH: sths[2], PublishedAtUnixN: int64(sths[2].TreeSize),

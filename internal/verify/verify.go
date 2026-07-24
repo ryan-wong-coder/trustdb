@@ -440,13 +440,9 @@ func AnchorContainerConsistency(proof model.GlobalLogProof, ar model.STHAnchorRe
 func verifyBuiltInAnchor(proof model.GlobalLogProof, ar model.STHAnchorResult) (bool, error) {
 	switch ar.SinkName {
 	case anchor.FileSinkName:
-		if got, want := ar.AnchorID, anchor.DeterministicFileAnchorID(proof.STH); got != want {
-			return true, fmt.Errorf("verify: file sink anchor_id mismatch: got %s want %s", got, want)
-		}
+		return true, fmt.Errorf("verify: file sink is local-only and cannot provide offline-verifiable anchor evidence")
 	case anchor.NoopSinkName:
-		if got, want := ar.AnchorID, anchor.DeterministicNoopAnchorID(proof.STH); got != want {
-			return true, fmt.Errorf("verify: noop sink anchor_id mismatch: got %s want %s", got, want)
-		}
+		return true, fmt.Errorf("verify: noop sink is local-only and cannot provide offline-verifiable anchor evidence")
 	case anchor.OtsSinkName:
 		if got, want := ar.AnchorID, anchor.DeterministicOtsAnchorID(proof.STH); got != want {
 			return true, fmt.Errorf("verify: ots sink anchor_id mismatch: got %s want %s", got, want)

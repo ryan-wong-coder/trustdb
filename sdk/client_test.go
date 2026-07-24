@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
@@ -583,8 +582,8 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 		NodeID:        bundle.NodeID,
 		LogID:         bundle.LogID,
 		TreeSize:      1,
-		SinkName:      anchor.NoopSinkName,
-		AnchorID:      anchor.DeterministicNoopAnchorID(sth),
+		SinkName:      "independent-test-anchor",
+		AnchorID:      "independent-test-anchor-1",
 		RootHash:      leafHash,
 		STH:           sth,
 	}

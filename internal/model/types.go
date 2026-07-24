@@ -747,6 +747,13 @@ type STHAnchorResult struct {
 // external result to TrustDB's L5 projection. This is intentionally an
 // allowlist: empty, unknown, and raw observation stages must all fail closed.
 func AnchorResultProvidesOfflineL5(result STHAnchorResult) bool {
+	// These stable wire sink names are local test/development backends, not
+	// independent witnesses. Reject them even if a corrupt store or plugin
+	// forges evidence_stage=offline_verified.
+	switch result.SinkName {
+	case "file", "noop":
+		return false
+	}
 	return result.EvidenceStage == AnchorEvidenceStageOfflineVerified
 }
 
