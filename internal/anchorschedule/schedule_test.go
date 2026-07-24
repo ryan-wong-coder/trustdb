@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
@@ -15,6 +16,7 @@ func testKey() model.STHAnchorScheduleKey {
 func testSTH(treeSize uint64, seed byte) model.SignedTreeHead {
 	return model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
 		RootHash:       bytes.Repeat([]byte{seed}, 32),
@@ -84,7 +86,7 @@ func TestMergeCandidateRejectsSameSizeDifferentRoot(t *testing.T) {
 func TestMergeCandidateInitializesValidEmptyScheduleWhenAlreadyCovered(t *testing.T) {
 	t.Parallel()
 	sth := testSTH(3, 3)
-	latest := model.STHAnchorResult{
+	latest := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           "node-1",
 		LogID:            "log-1",
@@ -135,11 +137,11 @@ func TestRetryAndCompleteRequireLeaseAndExactTarget(t *testing.T) {
 		t.Fatalf("retry deadline = %d, want actual late claim time 350", attempt.NextAttemptUnixN)
 	}
 	badSTH := testSTH(2, 9)
-	bad := model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, RootHash: badSTH.RootHash, NodeID: "node-1", LogID: "log-1", SinkName: "file", AnchorID: "bad", STH: badSTH, PublishedAtUnixN: 101}
+	bad := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1, SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, RootHash: badSTH.RootHash, NodeID: "node-1", LogID: "log-1", SinkName: "file", AnchorID: "bad", STH: badSTH, PublishedAtUnixN: 101}
 	if _, err := Complete(schedule, attempt.Generation, "lease-2", bad); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("Complete bad result error=%v", err)
 	}
-	good := model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, RootHash: bytes.Repeat([]byte{2}, 32), NodeID: "node-1", LogID: "log-1", SinkName: "file", AnchorID: "good", STH: testSTH(2, 2), PublishedAtUnixN: 102}
+	good := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1, SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, RootHash: bytes.Repeat([]byte{2}, 32), NodeID: "node-1", LogID: "log-1", SinkName: "file", AnchorID: "good", STH: testSTH(2, 2), PublishedAtUnixN: 102}
 	schedule, err = Complete(schedule, attempt.Generation, "lease-2", good)
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +173,7 @@ func TestRetryAndFailureBoundStoredProviderError(t *testing.T) {
 func TestValidateCandidateAgainstExactResultRejectsHistoricalSplitView(t *testing.T) {
 	t.Parallel()
 	sth := testSTH(13, 0x13)
-	result := model.STHAnchorResult{
+	result := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaSTHAnchorResult, NodeID: sth.NodeID, LogID: sth.LogID, TreeSize: sth.TreeSize,
 		SinkName: "file", AnchorID: "anchor-13", RootHash: sth.RootHash, STH: sth, PublishedAtUnixN: 130,
 	}
@@ -274,7 +276,7 @@ func TestReconcileCompletedClearsOnlyMatchingInFlight(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("Claim claimed=%v err=%v", claimed, err)
 	}
-	result := model.STHAnchorResult{
+	result := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaSTHAnchorResult, NodeID: "node-1", LogID: "log-1", TreeSize: 2,
 		SinkName: "file", AnchorID: "anchor-2", RootHash: attempt.Target.RootHash, STH: attempt.Target, PublishedAtUnixN: 150,
 	}
@@ -299,7 +301,7 @@ func TestReconcileCompletedClearsOnlyMatchingInFlight(t *testing.T) {
 func TestSameResultBindingIncludesExternalAnchorIdentity(t *testing.T) {
 	t.Parallel()
 	sth := testSTH(2, 2)
-	left := model.STHAnchorResult{
+	left := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaSTHAnchorResult, NodeID: "node-1", LogID: "log-1", TreeSize: 2,
 		SinkName: "file", AnchorID: "anchor-a", RootHash: sth.RootHash, STH: sth, PublishedAtUnixN: 100,
 	}

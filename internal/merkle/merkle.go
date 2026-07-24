@@ -9,6 +9,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 )
 
 const maxLeafBufferCapacity = 1 << 20
@@ -56,6 +57,9 @@ func BuildForSuite(suiteID cryptosuite.ID, treeAlgorithm string, records []model
 	}
 	leaves := make([]digest, len(records))
 	for i := range records {
+		if err := modelsuite.Require(suiteID, records[i]); err != nil {
+			return Tree{}, fmt.Errorf("merkle: record %d crypto_suite: %w", i, err)
+		}
 		leaf, err := hashLeafArray(profile, &records[i])
 		if err != nil {
 			return Tree{}, fmt.Errorf("merkle: hash leaf %d: %w", i, err)
@@ -73,6 +77,9 @@ func HashLeafForSuite(suiteID cryptosuite.ID, treeAlgorithm string, record model
 	profile, err := ProfileForAlgorithm(suiteID, treeAlgorithm)
 	if err != nil {
 		return nil, err
+	}
+	if err := modelsuite.Require(suiteID, record); err != nil {
+		return nil, fmt.Errorf("merkle: record crypto_suite: %w", err)
 	}
 	leaf, err := hashLeafArray(profile, &record)
 	if err != nil {

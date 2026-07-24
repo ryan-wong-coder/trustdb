@@ -126,6 +126,7 @@ func (s *FileSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model
 	}
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		CryptoSuite:      sth.CryptoSuite,
 		NodeID:           sth.NodeID,
 		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,

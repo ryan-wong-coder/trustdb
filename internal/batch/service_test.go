@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
@@ -286,6 +287,7 @@ func TestServiceCheckpointMonotonic(t *testing.T) {
 	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
 	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
+		CryptoSuite:   cryptosuite.INTLV1,
 		SegmentID:     1,
 		LastSequence:  98,
 		LastOffset:    98 * 128,
@@ -598,6 +600,7 @@ func TestServiceOnDemandRecoverManifestKeepsBundleLazy(t *testing.T) {
 	}
 	manifest := model.BatchManifest{
 		SchemaVersion:   model.SchemaBatchManifest,
+		CryptoSuite:     cryptosuite.INTLV1,
 		BatchID:         "recover-batch",
 		State:           model.BatchStatePrepared,
 		TreeAlg:         model.DefaultMerkleTreeAlg,
@@ -791,12 +794,14 @@ func (fakeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model
 		}
 		out[i] = model.ProofBundle{
 			SchemaVersion:   model.SchemaProofBundle,
+			CryptoSuite:     cryptosuite.INTLV1,
 			RecordID:        records[i].RecordID,
 			SignedClaim:     signed[i],
 			ServerRecord:    records[i],
 			AcceptedReceipt: accepted[i],
 			CommittedReceipt: model.CommittedReceipt{
 				SchemaVersion: model.SchemaCommittedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      records[i].RecordID,
 				Status:        "committed",
 				BatchID:       batchID,
@@ -890,23 +895,32 @@ func (e *countingMaterializeEngine) CommitCount() int {
 }
 
 func signed(recordID string) model.SignedClaim {
-	return model.SignedClaim{SchemaVersion: model.SchemaSignedClaim, Claim: model.ClientClaim{IdempotencyKey: recordID}}
+	return model.SignedClaim{
+		SchemaVersion: model.SchemaSignedClaim,
+		CryptoSuite:   cryptosuite.INTLV1,
+		Claim: model.ClientClaim{
+			SchemaVersion:  model.SchemaClientClaim,
+			CryptoSuite:    cryptosuite.INTLV1,
+			IdempotencyKey: recordID,
+		},
+	}
 }
 
 func record(recordID string) model.ServerRecord {
-	return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, RecordID: recordID}
+	return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, CryptoSuite: cryptosuite.INTLV1, RecordID: recordID}
 }
 
 func recordWithWAL(recordID string, seq uint64) model.ServerRecord {
 	return model.ServerRecord{
 		SchemaVersion: model.SchemaServerRecord,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      recordID,
 		WAL:           model.WALPosition{SegmentID: 1, Offset: int64(seq) * 128, Sequence: seq},
 	}
 }
 
 func accepted(recordID string) model.AcceptedReceipt {
-	return model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, RecordID: recordID, Status: "accepted"}
+	return model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, CryptoSuite: cryptosuite.INTLV1, RecordID: recordID, Status: "accepted"}
 }
 
 // TestServiceInitialSeqResumesSuffix locks in the cross-restart fix

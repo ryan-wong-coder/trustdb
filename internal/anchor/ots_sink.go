@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
@@ -218,6 +219,9 @@ func (s *OtsSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorResult{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "anchor ots canceled", err)
 	}
+	if sth.CryptoSuite != cryptosuite.INTLV1 || sth.TreeAlg != cryptosuite.MerkleRFC6962SHA256 {
+		return model.STHAnchorResult{}, fmt.Errorf("%w: OTS accepts only INTL_V1 SHA-256 STHs", ErrPermanent)
+	}
 	if sth.TreeSize == 0 {
 		return model.STHAnchorResult{}, fmt.Errorf("%w: tree_size is empty", ErrPermanent)
 	}
@@ -283,6 +287,7 @@ func (s *OtsSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.
 	}
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		CryptoSuite:      sth.CryptoSuite,
 		NodeID:           sth.NodeID,
 		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,

@@ -37,6 +37,12 @@ func SignAcceptedWithProvider(ctx context.Context, provider trustcrypto.Provider
 	if provider == nil {
 		return model.AcceptedReceipt{}, fmt.Errorf("sign accepted receipt: crypto provider is required")
 	}
+	if r.SchemaVersion != model.SchemaAcceptedReceipt {
+		return model.AcceptedReceipt{}, fmt.Errorf("sign accepted receipt: unexpected schema %q", r.SchemaVersion)
+	}
+	if err := cryptosuite.RequireSame(provider.Suite(), r.CryptoSuite); err != nil {
+		return model.AcceptedReceipt{}, fmt.Errorf("sign accepted receipt: %w", err)
+	}
 	r.ServerSig = model.Signature{}
 	input, buf, err := encodeDomainInput(provider.Suite(), trustcrypto.SignaturePurposeAcceptedReceipt, r)
 	if err != nil {
@@ -62,6 +68,12 @@ func VerifyAccepted(r model.AcceptedReceipt, publicKey ed25519.PublicKey) error 
 func VerifyAcceptedWithProvider(ctx context.Context, r model.AcceptedReceipt, publicKey trustcrypto.PublicKeyDescriptor, provider trustcrypto.Provider) error {
 	if provider == nil {
 		return fmt.Errorf("verify accepted receipt: crypto provider is required")
+	}
+	if r.SchemaVersion != model.SchemaAcceptedReceipt {
+		return fmt.Errorf("verify accepted receipt: unexpected schema %q", r.SchemaVersion)
+	}
+	if err := cryptosuite.RequireSame(provider.Suite(), r.CryptoSuite, publicKey.Suite); err != nil {
+		return fmt.Errorf("verify accepted receipt: %w", err)
 	}
 	sig := r.ServerSig
 	r.ServerSig = model.Signature{}
@@ -92,6 +104,12 @@ func SignCommittedWithProvider(ctx context.Context, provider trustcrypto.Provide
 	if provider == nil {
 		return model.CommittedReceipt{}, fmt.Errorf("sign committed receipt: crypto provider is required")
 	}
+	if r.SchemaVersion != model.SchemaCommittedReceipt {
+		return model.CommittedReceipt{}, fmt.Errorf("sign committed receipt: unexpected schema %q", r.SchemaVersion)
+	}
+	if err := cryptosuite.RequireSame(provider.Suite(), r.CryptoSuite); err != nil {
+		return model.CommittedReceipt{}, fmt.Errorf("sign committed receipt: %w", err)
+	}
 	r.ServerSig = model.Signature{}
 	input, buf, err := encodeDomainInput(provider.Suite(), trustcrypto.SignaturePurposeCommittedReceipt, r)
 	if err != nil {
@@ -117,6 +135,12 @@ func VerifyCommitted(r model.CommittedReceipt, publicKey ed25519.PublicKey) erro
 func VerifyCommittedWithProvider(ctx context.Context, r model.CommittedReceipt, publicKey trustcrypto.PublicKeyDescriptor, provider trustcrypto.Provider) error {
 	if provider == nil {
 		return fmt.Errorf("verify committed receipt: crypto provider is required")
+	}
+	if r.SchemaVersion != model.SchemaCommittedReceipt {
+		return fmt.Errorf("verify committed receipt: unexpected schema %q", r.SchemaVersion)
+	}
+	if err := cryptosuite.RequireSame(provider.Suite(), r.CryptoSuite, publicKey.Suite); err != nil {
+		return fmt.Errorf("verify committed receipt: %w", err)
 	}
 	sig := r.ServerSig
 	r.ServerSig = model.Signature{}

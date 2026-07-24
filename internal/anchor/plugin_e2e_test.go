@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
@@ -40,6 +41,7 @@ func TestExamplePluginExecutablePublishAndVerify(t *testing.T) {
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: sink.Name()}
 	sth := model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       3,
 		RootHash:       bytes.Repeat([]byte{0x61}, 32),

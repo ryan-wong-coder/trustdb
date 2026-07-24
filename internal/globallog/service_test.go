@@ -65,6 +65,7 @@ func batchRoot(id string, seed byte) model.BatchRoot {
 	root := bytes.Repeat([]byte{seed}, 32)
 	return model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       id,
 		BatchRoot:     root,
 		TreeSize:      uint64(seed),
@@ -132,12 +133,14 @@ func TestVerifyInclusionRequiresExactSuiteProfile(t *testing.T) {
 	}
 	proof := model.GlobalLogProof{
 		SchemaVersion: model.SchemaGlobalLogProof,
+		CryptoSuite:   cryptosuite.CNSMV1,
 		BatchID:       "batch-sm3",
 		LeafIndex:     0,
 		LeafHash:      leaf,
 		TreeSize:      1,
 		STH: model.SignedTreeHead{
 			SchemaVersion: model.SchemaSignedTreeHead,
+			CryptoSuite:   cryptosuite.CNSMV1,
 			TreeAlg:       cryptosuite.MerkleRFC6962SM3,
 			TreeSize:      1,
 			RootHash:      append([]byte(nil), leaf...),
@@ -172,7 +175,7 @@ func TestEvidenceUsesLatestCoveringAnchoredSTH(t *testing.T) {
 		t.Fatalf("AppendBatchRoots: %v", err)
 	}
 	anchored := sths[len(sths)-1]
-	result := model.STHAnchorResult{
+	result := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           anchored.NodeID,
 		LogID:            anchored.LogID,
@@ -243,7 +246,7 @@ func TestEvidenceUsesConfiguredAnchorSinkStream(t *testing.T) {
 	writer := any(store).(proofstore.STHAnchorResultWriter)
 	putResult := func(sth model.SignedTreeHead, sink string) {
 		t.Helper()
-		if err := writer.PutSTHAnchorResult(ctx, model.STHAnchorResult{
+		if err := writer.PutSTHAnchorResult(ctx, model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 			SchemaVersion: model.SchemaSTHAnchorResult, NodeID: sth.NodeID, LogID: sth.LogID, TreeSize: sth.TreeSize,
 			SinkName: sink, AnchorID: sink + "-anchor", RootHash: append([]byte(nil), sth.RootHash...), STH: sth, PublishedAtUnixN: int64(sth.TreeSize),
 		}); err != nil {
@@ -456,6 +459,7 @@ func TestAppendBatchRootRefusesPartialExistingLeafWithoutSTH(t *testing.T) {
 	root := batchRoot("partial-batch", 1)
 	leaf := model.GlobalLogLeaf{
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		CryptoSuite:        cryptosuite.INTLV1,
 		BatchID:            root.BatchID,
 		BatchRoot:          append([]byte(nil), root.BatchRoot...),
 		BatchTreeSize:      root.TreeSize,

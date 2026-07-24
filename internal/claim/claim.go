@@ -29,6 +29,14 @@ type Verified struct {
 }
 
 func NewFileClaim(tenantID, clientID, keyID string, producedAt time.Time, nonce []byte, idempotencyKey string, content model.Content, metadata model.Metadata) (model.ClientClaim, error) {
+	return NewFileClaimForSuite(cryptosuite.INTLV1, tenantID, clientID, keyID, producedAt, nonce, idempotencyKey, content, metadata)
+}
+
+func NewFileClaimForSuite(suiteID cryptosuite.ID, tenantID, clientID, keyID string, producedAt time.Time, nonce []byte, idempotencyKey string, content model.Content, metadata model.Metadata) (model.ClientClaim, error) {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return model.ClientClaim{}, err
+	}
 	if tenantID == "" || clientID == "" || keyID == "" {
 		return model.ClientClaim{}, errors.New("tenant_id, client_id, and key_id are required")
 	}
@@ -39,10 +47,13 @@ func NewFileClaim(tenantID, clientID, keyID string, producedAt time.Time, nonce 
 		return model.ClientClaim{}, errors.New("nonce must be at least 16 bytes")
 	}
 	if content.HashAlg == "" {
-		content.HashAlg = model.DefaultHashAlg
+		content.HashAlg = suite.ContentHash.Algorithm
 	}
-	if len(content.ContentHash) == 0 {
-		return model.ClientClaim{}, errors.New("content_hash is required")
+	if content.HashAlg != suite.ContentHash.Algorithm {
+		return model.ClientClaim{}, fmt.Errorf("content hash algorithm %q does not match suite %s", content.HashAlg, suite.ID)
+	}
+	if len(content.ContentHash) != suite.ContentHash.DigestBytes {
+		return model.ClientClaim{}, fmt.Errorf("content_hash length %d does not match suite %s", len(content.ContentHash), suite.ID)
 	}
 	if content.ContentLength < 0 {
 		return model.ClientClaim{}, errors.New("content_length cannot be negative")
@@ -52,6 +63,7 @@ func NewFileClaim(tenantID, clientID, keyID string, producedAt time.Time, nonce 
 	}
 	return model.ClientClaim{
 		SchemaVersion:   model.SchemaClientClaim,
+		CryptoSuite:     suite.ID,
 		TenantID:        tenantID,
 		ClientID:        clientID,
 		KeyID:           keyID,
@@ -67,6 +79,13 @@ func NewFileClaim(tenantID, clientID, keyID string, producedAt time.Time, nonce 
 func Canonical(claim model.ClientClaim) ([]byte, error) {
 	if claim.SchemaVersion != model.SchemaClientClaim {
 		return nil, fmt.Errorf("unexpected claim schema: %s", claim.SchemaVersion)
+	}
+	suite, err := cryptosuite.RequireAvailable(claim.CryptoSuite)
+	if err != nil {
+		return nil, fmt.Errorf("claim crypto_suite: %w", err)
+	}
+	if claim.Content.HashAlg != suite.ContentHash.Algorithm || len(claim.Content.ContentHash) != suite.ContentHash.DigestBytes {
+		return nil, fmt.Errorf("claim content digest does not match suite %s", suite.ID)
 	}
 	return cborx.Marshal(claim)
 }
@@ -98,6 +117,9 @@ func SignWithProvider(ctx context.Context, provider trustcrypto.Provider, claim 
 	if claim.SchemaVersion != model.SchemaClientClaim {
 		return model.SignedClaim{}, fmt.Errorf("unexpected claim schema: %s", claim.SchemaVersion)
 	}
+	if err := cryptosuite.RequireSame(provider.Suite(), claim.CryptoSuite); err != nil {
+		return model.SignedClaim{}, fmt.Errorf("claim crypto_suite: %w", err)
+	}
 	if signer == nil || signer.Handle().KeyID != claim.KeyID {
 		return model.SignedClaim{}, errors.New("signer key_id does not match claim key_id")
 	}
@@ -112,6 +134,7 @@ func SignWithProvider(ctx context.Context, provider trustcrypto.Provider, claim 
 	}
 	return model.SignedClaim{
 		SchemaVersion: model.SchemaSignedClaim,
+		CryptoSuite:   provider.Suite(),
 		Claim:         claim,
 		Signature:     sig,
 	}, nil
@@ -131,6 +154,9 @@ func VerifyWithProvider(ctx context.Context, signed model.SignedClaim, publicKey
 	}
 	if signed.SchemaVersion != model.SchemaSignedClaim {
 		return Verified{}, fmt.Errorf("unexpected signed claim schema: %s", signed.SchemaVersion)
+	}
+	if err := cryptosuite.RequireSame(provider.Suite(), signed.CryptoSuite, signed.Claim.CryptoSuite, publicKey.Suite); err != nil {
+		return Verified{}, fmt.Errorf("signed claim crypto_suite: %w", err)
 	}
 	claimCBOR, err := Canonical(signed.Claim)
 	if err != nil {
@@ -213,14 +239,28 @@ func RecordIDWithProvider(provider trustcrypto.Provider, claimCBOR []byte, sig m
 	if err != nil {
 		return "", err
 	}
+	framing := struct {
+		SchemaVersion string          `cbor:"schema_version"`
+		CryptoSuite   cryptosuite.ID  `cbor:"crypto_suite"`
+		ClaimCBOR     []byte          `cbor:"claim_cbor"`
+		Signature     model.Signature `cbor:"signature"`
+	}{
+		SchemaVersion: "trustdb.record-id-input.v2",
+		CryptoSuite:   suite.ID,
+		ClaimCBOR:     append([]byte(nil), claimCBOR...),
+		Signature:     sig,
+	}
+	payload, err := cborx.Marshal(framing)
+	if err != nil {
+		return "", err
+	}
 	h := factory.New()
 	h.Write([]byte(suite.Domains.RecordID))
 	h.Write([]byte{0})
-	h.Write(claimCBOR)
-	h.Write(sig.Signature)
+	h.Write(payload)
 	sum := h.Sum(nil)
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum)
-	return "tr1" + strings.ToLower(enc), nil
+	return "tr2" + strings.ToLower(enc), nil
 }
 
 func mustRecordIDWithProvider(provider trustcrypto.Provider, claimCBOR []byte, sig model.Signature) string {

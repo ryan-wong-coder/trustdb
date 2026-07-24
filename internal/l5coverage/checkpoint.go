@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
@@ -13,6 +14,9 @@ import (
 func ValidateCheckpoint(checkpoint model.L5CoverageCheckpoint) error {
 	if checkpoint.SchemaVersion != model.SchemaL5Coverage {
 		return trusterr.New(trusterr.CodeDataLoss, "unsupported L5 coverage checkpoint schema")
+	}
+	if _, err := cryptosuite.RequireAvailable(checkpoint.CryptoSuite); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "invalid L5 coverage crypto_suite", err)
 	}
 	if err := anchorschedule.ValidateKey(checkpoint.Key); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "invalid L5 coverage checkpoint key", err)
@@ -29,7 +33,10 @@ func ValidateCheckpoint(checkpoint model.L5CoverageCheckpoint) error {
 	return nil
 }
 
-func Advance(current model.L5CoverageCheckpoint, found bool, key model.STHAnchorScheduleKey, coveredTreeSize uint64, updatedAtUnixN int64) (model.L5CoverageCheckpoint, bool, error) {
+func Advance(current model.L5CoverageCheckpoint, found bool, suiteID cryptosuite.ID, key model.STHAnchorScheduleKey, coveredTreeSize uint64, updatedAtUnixN int64) (model.L5CoverageCheckpoint, bool, error) {
+	if _, err := cryptosuite.RequireAvailable(suiteID); err != nil {
+		return model.L5CoverageCheckpoint{}, false, err
+	}
 	if err := anchorschedule.ValidateKey(key); err != nil {
 		return model.L5CoverageCheckpoint{}, false, err
 	}
@@ -46,6 +53,9 @@ func Advance(current model.L5CoverageCheckpoint, found bool, key model.STHAnchor
 		if !anchorschedule.SameKey(current.Key, key) {
 			return model.L5CoverageCheckpoint{}, false, trusterr.New(trusterr.CodeDataLoss, "L5 coverage checkpoint key mismatch")
 		}
+		if err := cryptosuite.RequireSame(suiteID, current.CryptoSuite); err != nil {
+			return model.L5CoverageCheckpoint{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "L5 coverage crypto_suite", err)
+		}
 		if coveredTreeSize <= current.CoveredTreeSize {
 			return current, false, nil
 		}
@@ -59,6 +69,7 @@ func Advance(current model.L5CoverageCheckpoint, found bool, key model.STHAnchor
 	}
 	next := model.L5CoverageCheckpoint{
 		SchemaVersion:   model.SchemaL5Coverage,
+		CryptoSuite:     suiteID,
 		Key:             key,
 		CoveredTreeSize: coveredTreeSize,
 		Revision:        revision,

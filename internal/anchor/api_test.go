@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
@@ -34,6 +35,7 @@ func TestAPIAnchorsCompositeCursorRetainsSameTreeSinks(t *testing.T) {
 	} {
 		result := model.STHAnchorResult{
 			SchemaVersion:    model.SchemaSTHAnchorResult,
+			CryptoSuite:      cryptosuite.INTLV1,
 			NodeID:           sth.NodeID,
 			LogID:            sth.LogID,
 			TreeSize:         sth.TreeSize,

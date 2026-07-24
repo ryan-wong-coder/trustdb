@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
@@ -35,7 +36,7 @@ func seedPublishedOtsSTH(
 	for i := range digest {
 		digest[i] = byte(i + 1)
 	}
-	sth := model.SignedTreeHead{
+	sth := model.SignedTreeHead{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
@@ -70,7 +71,7 @@ func seedPublishedOtsSTH(
 	if err != nil {
 		t.Fatalf("marshal proof: %v", err)
 	}
-	ar := model.STHAnchorResult{
+	ar := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         treeSize,
 		SinkName:         OtsSinkName,
@@ -214,7 +215,7 @@ func TestOtsUpgrader_IgnoresNonOtsSTHs(t *testing.T) {
 
 	root := make([]byte, 32)
 	root[0] = 0x01
-	sth := model.SignedTreeHead{
+	sth := model.SignedTreeHead{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       3,
@@ -225,7 +226,7 @@ func TestOtsUpgrader_IgnoresNonOtsSTHs(t *testing.T) {
 	if err := store.PutSignedTreeHead(ctx, sth); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
-	if err := store.PutSTHAnchorResult(ctx, model.STHAnchorResult{
+	if err := store.PutSTHAnchorResult(ctx, model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
 		SinkName:         "file",
@@ -298,12 +299,12 @@ func TestOtsUpgraderPrioritizesNewestOtsAfterNonOtsHistory(t *testing.T) {
 	writer := any(store).(proofstore.STHAnchorResultWriter)
 	for treeSize := uint64(1); treeSize <= 20; treeSize++ {
 		root := bytes.Repeat([]byte{byte(treeSize)}, 32)
-		sth := model.SignedTreeHead{
+		sth := model.SignedTreeHead{CryptoSuite: cryptosuite.INTLV1,
 			SchemaVersion: model.SchemaSignedTreeHead, TreeAlg: model.DefaultMerkleTreeAlg,
 			TreeSize: treeSize, RootHash: root, TimestampUnixN: int64(treeSize),
 			Signature: model.Signature{Alg: model.DefaultSignatureAlg, KeyID: "file-key", Signature: []byte{1}},
 		}
-		if err := writer.PutSTHAnchorResult(context.Background(), model.STHAnchorResult{
+		if err := writer.PutSTHAnchorResult(context.Background(), model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 			SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: treeSize, SinkName: "file",
 			AnchorID: "file-anchor-" + time.Unix(int64(treeSize), 0).Format("150405"), RootHash: root,
 			STH: sth, Proof: []byte("opaque"), PublishedAtUnixN: int64(treeSize),

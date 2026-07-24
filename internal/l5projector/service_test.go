@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/l5coverage"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -229,7 +230,7 @@ func (s *projectorStore) GetL5CoverageCheckpoint(_ context.Context, key model.ST
 func (s *projectorStore) AdvanceL5CoverageCheckpoint(_ context.Context, key model.STHAnchorScheduleKey, coveredTreeSize uint64, updatedAtUnixN int64) (model.L5CoverageCheckpoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next, changed, err := l5coverage.Advance(s.checkpoint, s.checkpointFound, key, coveredTreeSize, updatedAtUnixN)
+	next, changed, err := l5coverage.Advance(s.checkpoint, s.checkpointFound, cryptosuite.INTLV1, key, coveredTreeSize, updatedAtUnixN)
 	if err != nil {
 		return model.L5CoverageCheckpoint{}, err
 	}
@@ -279,12 +280,12 @@ func projectorKey() model.STHAnchorScheduleKey {
 
 func projectorResult(key model.STHAnchorScheduleKey, treeSize uint64) model.STHAnchorResult {
 	sth := model.SignedTreeHead{
-		SchemaVersion: model.SchemaSignedTreeHead, TreeAlg: model.DefaultMerkleTreeAlg, TreeSize: treeSize,
+		SchemaVersion: model.SchemaSignedTreeHead, CryptoSuite: cryptosuite.INTLV1, TreeAlg: model.DefaultMerkleTreeAlg, TreeSize: treeSize,
 		RootHash: bytes.Repeat([]byte{byte(treeSize)}, 32), TimestampUnixN: int64(treeSize), NodeID: key.NodeID, LogID: key.LogID,
 		Signature: model.Signature{Alg: model.DefaultSignatureAlg, KeyID: "server-key", Signature: bytes.Repeat([]byte{byte(treeSize)}, 64)},
 	}
 	return model.STHAnchorResult{
-		SchemaVersion: model.SchemaSTHAnchorResult, NodeID: key.NodeID, LogID: key.LogID, TreeSize: treeSize,
+		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1, NodeID: key.NodeID, LogID: key.LogID, TreeSize: treeSize,
 		SinkName: key.SinkName, AnchorID: fmt.Sprintf("anchor-%d", treeSize), RootHash: append([]byte(nil), sth.RootHash...), STH: sth,
 		PublishedAtUnixN: int64(treeSize),
 	}

@@ -480,6 +480,7 @@ func (h *Hub) deliveryWorker() {
 func (h *Hub) deliver(job deliveryJob) error {
 	notification := model.StatusRefresh{
 		SchemaVersion:   model.SchemaStatusRefresh,
+		CryptoSuite:     h.cfg.CryptoSuite,
 		SubscriptionID:  job.subscription.ID,
 		TenantID:        job.subscription.TenantID,
 		ClientID:        job.subscription.ClientID,

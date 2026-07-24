@@ -2158,7 +2158,7 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 
 func requestedSuite(suiteID cryptosuite.ID) (cryptosuite.ID, error) {
 	if suiteID == "" {
-		suiteID = cryptosuite.INTLV1
+		return "", fmt.Errorf("wal: crypto_suite is required")
 	}
 	if _, err := cryptosuite.RequireAvailable(suiteID); err != nil {
 		return "", fmt.Errorf("wal: crypto_suite: %w", err)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -55,6 +56,7 @@ func (f *fakeSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model
 		return model.STHAnchorResult{}, result.err
 	}
 	out := result.result
+	out.CryptoSuite = sth.CryptoSuite
 	if out.TreeSize == 0 {
 		out.TreeSize = sth.TreeSize
 	}
@@ -77,6 +79,7 @@ func testScheduleKey(sink string) model.STHAnchorScheduleKey {
 func testSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byte) model.SignedTreeHead {
 	return model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
 		RootHash:       bytes.Repeat([]byte{seed}, 32),

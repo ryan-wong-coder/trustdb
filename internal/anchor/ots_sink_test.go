@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -27,6 +28,7 @@ func newTestDigest(seed string) []byte {
 func newTestSTH(treeSize uint64, rootHash []byte) model.SignedTreeHead {
 	return model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
 		RootHash:       rootHash,

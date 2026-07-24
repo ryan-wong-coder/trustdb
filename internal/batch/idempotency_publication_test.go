@@ -11,6 +11,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/idempotency"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -164,7 +165,13 @@ func validIdempotencyAccepted(t *testing.T, idempotencyKey string) Accepted {
 	if err != nil {
 		t.Fatalf("Sign() error = %v", err)
 	}
-	writer, err := wal.OpenWriter(filepath.Join(t.TempDir(), "records.wal"), 1)
+	walPath := filepath.Join(t.TempDir(), "records.wal")
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, wal.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "server-a",
+		LogID:       "server-a",
+		NamespaceID: walPath,
+	})
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}

@@ -47,7 +47,7 @@ func TestSubmitSignerFailureLeavesNoWALRecordAndExactRetryConverges(t *testing.T
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	writer, err := wal.OpenWriter(path, 1)
+	writer, err := wal.OpenWriterWithOptions(path, 1, testWALOptions(path))
 	if err != nil {
 		t.Fatal(err)
 	}

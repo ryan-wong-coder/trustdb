@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -364,6 +365,7 @@ func TestServiceCheckpointMergesOutOfOrderCoverage(t *testing.T) {
 	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
 	seed := model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
+		CryptoSuite:   cryptosuite.INTLV1,
 		SegmentID:     1,
 		LastSequence:  10,
 		LastOffset:    1000,
@@ -589,7 +591,7 @@ func TestServiceCheckpointCoverageCompressesAcrossBatches(t *testing.T) {
 	}
 }
 
-func TestServiceMigratesLegacyCheckpointAtZeroWithoutHook(t *testing.T) {
+func TestServiceRejectsCheckpointWithoutSuite(t *testing.T) {
 	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
 	legacy := model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpoint,
@@ -601,99 +603,19 @@ func TestServiceMigratesLegacyCheckpointAtZeroWithoutHook(t *testing.T) {
 	if err := store.LocalStore.PutCheckpoint(context.Background(), legacy); err != nil {
 		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
 	}
-	var hooks []model.WALCheckpoint
-	svc := New(fakeEngine{}, store, Options{
-		DeferCheckpointAdvance: true,
-		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
-			hooks = append(hooks, cp)
-		},
-	}, nil)
-	defer svc.Shutdown(context.Background())
-
-	if err := svc.StartCheckpointAdvance(context.Background()); err != nil {
-		t.Fatalf("StartCheckpointAdvance() error = %v", err)
-	}
-	cp, found := readCheckpointExact(t, store.LocalStore)
-	if !found || cp.SchemaVersion != model.SchemaWALCheckpointContiguous || cp.LastSequence != 0 || cp.SegmentID != 0 || cp.LastOffset != 0 || cp.BatchID != "" {
-		t.Fatalf("migrated checkpoint = %+v found=%v, want clean v2 sequence zero", cp, found)
-	}
-	if len(hooks) != 0 {
-		t.Fatalf("migration-only hooks = %+v, want none", hooks)
-	}
-	attempts, _ := store.snapshots()
-	if len(attempts) != 1 || attempts[0].LastSequence != 0 {
-		t.Fatalf("migration attempts = %+v, want one sequence-zero write", attempts)
-	}
-}
-
-func TestServiceMigratesLegacyCheckpointFromRebuiltCoverage(t *testing.T) {
-	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
-	if err := store.LocalStore.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		SegmentID:     8,
-		LastSequence:  80,
-		LastOffset:    8000,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
-	var hooks []model.WALCheckpoint
-	svc := New(fakeEngine{}, store, Options{
-		DeferCheckpointAdvance: true,
-		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
-			hooks = append(hooks, cp)
-		},
-	}, nil)
-	defer svc.Shutdown(context.Background())
-
-	if err := svc.RecordCommittedWALRange(context.Background(),
-		model.WALPosition{SegmentID: 1, Offset: 0, Sequence: 1},
-		model.WALPosition{SegmentID: 2, Offset: 256, Sequence: 3},
-		"rebuilt-batch",
-	); err != nil {
-		t.Fatalf("RecordCommittedWALRange() error = %v", err)
-	}
-	if err := svc.StartCheckpointAdvance(context.Background()); err != nil {
-		t.Fatalf("StartCheckpointAdvance() error = %v", err)
-	}
-	cp, found := readCheckpointExact(t, store.LocalStore)
-	if !found || cp.SchemaVersion != model.SchemaWALCheckpointContiguous || cp.LastSequence != 3 || cp.SegmentID != 2 || cp.LastOffset != 256 || cp.BatchID != "rebuilt-batch" {
-		t.Fatalf("rebuilt checkpoint = %+v found=%v", cp, found)
-	}
-	if len(hooks) != 1 || hooks[0].LastSequence != 3 {
-		t.Fatalf("rebuilt hooks = %+v, want [3]", hooks)
-	}
-}
-
-func TestServiceRetriesLegacyCheckpointMigration(t *testing.T) {
-	store := &checkpointRecordingStore{
-		LocalStore: proofstore.LocalStore{Root: t.TempDir()},
-		failPuts:   1,
-	}
-	if err := store.LocalStore.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		LastSequence:  0,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
 	svc := New(fakeEngine{}, store, Options{DeferCheckpointAdvance: true}, nil)
 	defer svc.Shutdown(context.Background())
 
-	if err := svc.StartCheckpointAdvance(context.Background()); err == nil {
-		t.Fatal("first StartCheckpointAdvance() error = nil, want injected failure")
+	if err := svc.StartCheckpointAdvance(context.Background()); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("StartCheckpointAdvance() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
 	}
-	if cp, _ := readCheckpointExact(t, store.LocalStore); cp.SchemaVersion != model.SchemaWALCheckpoint {
-		t.Fatalf("checkpoint after failed migration = %+v, want legacy v1 retained", cp)
-	}
-	if err := svc.StartCheckpointAdvance(context.Background()); err != nil {
-		t.Fatalf("second StartCheckpointAdvance() error = %v", err)
-	}
-	cp, _ := readCheckpointExact(t, store.LocalStore)
-	if cp.SchemaVersion != model.SchemaWALCheckpointContiguous || cp.LastSequence != 0 {
-		t.Fatalf("checkpoint after migration retry = %+v, want v2 zero", cp)
+	cp, found := readCheckpointExact(t, store.LocalStore)
+	if !found || cp.CryptoSuite != "" || cp.LastSequence != legacy.LastSequence {
+		t.Fatalf("unsupported checkpoint was overwritten: %+v found=%v", cp, found)
 	}
 	attempts, _ := store.snapshots()
-	if len(attempts) != 2 {
-		t.Fatalf("migration attempts = %+v, want two", attempts)
+	if len(attempts) != 0 {
+		t.Fatalf("unsupported checkpoint write attempts = %+v, want none", attempts)
 	}
 }
 
