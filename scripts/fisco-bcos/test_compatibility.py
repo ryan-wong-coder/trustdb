@@ -26,14 +26,20 @@ class CompatibilityBaselineTest(unittest.TestCase):
     def test_baseline_is_valid(self) -> None:
         compatibility.validate_baseline(self.baseline)
 
-    def test_air_artifacts_are_admissible_but_runtime_is_not(self) -> None:
+    def test_verified_linux_air_runtime_is_admitted(self) -> None:
         row = compatibility.check_profile(
             self.baseline, "air", "standard", "linux/amd64", "artifact", "native"
         )
         self.assertEqual(row["artifact_status"], "verified")
+        row = compatibility.check_profile(
+            self.baseline, "air", "standard", "linux/amd64", "runtime", "native"
+        )
+        self.assertEqual(row["runtime_status"], "verified")
+
+    def test_unverified_linux_arm64_runtime_is_denied(self) -> None:
         with self.assertRaisesRegex(compatibility.BaselineError, "runtime admission denied"):
             compatibility.check_profile(
-                self.baseline, "air", "standard", "linux/amd64", "runtime", "native"
+                self.baseline, "air", "standard", "linux/arm64", "runtime", "native"
             )
 
     def test_pro_and_max_fail_closed(self) -> None:
@@ -79,8 +85,25 @@ class CompatibilityBaselineTest(unittest.TestCase):
             and item["platform"] == "linux/amd64"
         )
         row["runtime_status"] = "verified"
+        row.pop("evidence", None)
         with self.assertRaisesRegex(compatibility.BaselineError, "requires committed evidence"):
             compatibility.validate_baseline(invalid)
+
+    def test_verified_runtime_requires_clean_teardown(self) -> None:
+        invalid = copy.deepcopy(self.baseline)
+        row = next(item for item in invalid["matrix"] if item["runtime_status"] == "verified")
+        evidence_path = compatibility.REPO_ROOT / row["evidence"]
+        original = compatibility.load_baseline(evidence_path)
+        for field, message in (
+            ("clean_teardown", "clean SDK teardown"),
+            ("node_clean_teardown", "clean node teardown"),
+        ):
+            evidence = copy.deepcopy(original)
+            evidence[field] = False
+            with self.subTest(field=field):
+                with mock.patch.object(compatibility, "load_baseline", return_value=evidence):
+                    with self.assertRaisesRegex(compatibility.BaselineError, message):
+                        compatibility.validate_baseline(invalid)
 
     def test_evidence_must_match_exact_artifact_digest_set(self) -> None:
         invalid = copy.deepcopy(self.baseline)

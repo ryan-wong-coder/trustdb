@@ -1,0 +1,102 @@
+{
+  "admitted": true,
+  "artifacts": {
+    "fisco-bcos-linux-x86_64.tar.gz": "1d97a6d72a1e384b428fdefac77ff48ffbe36d21eb9b4daeba62cf56bf975ae3",
+    "libbcos-c-sdk.so": "b5a2a1606086245cc73d356d70011b32a112a38cf5e6a10631377a4b4a7dec83",
+    "solc-linux-gm.tar.gz": "cde864ecd0cb1ea4e852bd28c9f550fdf3be215292a2538bc08afe4175b15483",
+    "tassl-1.1.1b-linux-x86_64.tar.gz": "97700126df491b4ae15afae1bad99979390ded5d7d1655632e00b40003a9a9e8"
+  },
+  "baseline_id": "fisco-bcos-3.16.3-go-sdk-3.0.2",
+  "certificate_verification": [
+    "/tmp/trustdb-461.ZgfJWn/run-guomi-final/nodes-guomi/127.0.0.1/sdk/sm_sdk.crt: OK",
+    "/tmp/trustdb-461.ZgfJWn/run-guomi-final/nodes-guomi/127.0.0.1/sdk/sm_ensdk.crt: OK"
+  ],
+  "clean_teardown": true,
+  "client_stderr": [],
+  "command": "scripts/fisco-bcos/smoke-air.sh --mode guomi --work-dir /tmp/trustdb-461.ZgfJWn/run-guomi-final --cache-dir /tmp/trustdb-461.ZgfJWn/cache --p2p-port 28300 --rpc-port 18200",
+  "compiler_executable": true,
+  "date": "2026-07-24",
+  "environment": {
+    "compiler_executable": true,
+    "host_platform": "Linux-6.8.0-90-generic-x86_64-with-glibc2.39",
+    "node_version": "FISCO BCOS Version : 3.16.3\nBuild Time         : 20251129 13:44:14\nBuild Type         : Linux/g++/MinSizeRel\nGit Branch         : HEAD\nGit Commit         : 274f864e7725fef5b8ed4c6b7a3363ee5396f104\n",
+    "platform": "linux/amd64",
+    "python": "3.12.3",
+    "solc_version": "solc, the solidity compiler commandline interface\nGm version: 0.8.11+commit.1c3fd7c1.mod.Linux.g++\n",
+    "tassl_version": "OpenSSL 1.1.1b Tassl 1.4  23 Aug 2020\n"
+  },
+  "evidence_class": "runtime_verified",
+  "host": "Linux-6.8.0-90-generic-x86_64-with-glibc2.39",
+  "limitations": [
+    "This run validates the pinned Air node, compiler, C SDK and Go SDK compatibility profile only.",
+    "Transaction and receipt proof arrays were retrieved but are not treated as independently verified TrustDB anchor evidence."
+  ],
+  "node_clean_teardown": true,
+  "node_commit": "274f864e7725fef5b8ed4c6b7a3363ee5396f104",
+  "node_version": "3.16.3",
+  "pins": {
+    "c_sdk_native": "v3.6.0@53240138c396c10cb0e1a2b7b4d5c0cdaa0ac539",
+    "c_sdk_source": "a278b4749e342d2b111d736045db9ed98a63224d",
+    "go_sdk": "v3.0.2@a9dbab29132d9e6a1cd5919dd993e4186c0703ff",
+    "node": "v3.16.3@274f864e7725fef5b8ed4c6b7a3363ee5396f104",
+    "solidity": "v0.8.11@415673533ae8ae4e9da5af544822499d04f69a52",
+    "tassl": "V_1.4@fe885b939c13c715633e4c05df8811a1ea7ca079"
+  },
+  "probe_source": "pinned-solidity-compiler",
+  "profile": {
+    "crypto": "guomi",
+    "deployment": "air",
+    "platform": "linux/amd64"
+  },
+  "results": {
+    "consensus": {
+      "connected_nodes": 4,
+      "maximum_faulty_quorum": 1,
+      "minimum_required_quorum": 3,
+      "node_ids": [
+        "5781382c7ee58071f40019aaf61854bb0ab3ac060bc9e38fea6a88436b36dafd2a422f05a7ee8a370d2bea8e461ddc927b84b45cbd05ebf349a9130f8a39a5a2",
+        "7149a8a4d85d241a5a149acecb355359091517da087ed5a9c9f900231eba1609a7d02b4f1a99d2f81bf940326fadf833ff0a53a4ea981aa9bb5e23855bd27415",
+        "72118aafa5c82b706827e2fa002ce5ca449dc811a31375420789c56ccb7a9fe1c483890bf53876a2aa9d3ab0e88c47c22a3eba0ace7051b2be1298899114eb73",
+        "f50c3d02a2675be4a31bc2437af7bddcb8bdac56e5691ef91f0979a23f99c6f5e154f710b379eacad70696e2c649edf981790c85a43065d51b0549bb59d27809"
+      ],
+      "sealers": 4
+    },
+    "containing_block": {
+      "hash": "0x1d07c2ad2d89ff6bb846806f816141fe0d5f9e9d4c3b1fc524b3dab94cf4c49a",
+      "receipts_root": "0x779c359452dcac31ebde4c74ced0659906284a0216d545b38f5475da00df68e9",
+      "signature_count": 3,
+      "transactions_root": "0x85280bc2aa802f7d8ef93872a205732114f19306ab1d02c3068444441372b918"
+    },
+    "deployment": {
+      "block_number": 1,
+      "contract_address": "0xc0523dbdd94ba27e14b0336d799489340ca24cdf",
+      "receipt_proof": [
+        "53e6c89c0bba2d6c9de6bc77e8002881d8824d2c0d490e55eb931e260f15f5b8"
+      ],
+      "status": 0,
+      "transaction_hash": "0x255aeb661b7cacf04a3f0585613558ea2a510329359ad3224a00e26c8d5c5f03",
+      "transaction_proof": [
+        "255aeb661b7cacf04a3f0585613558ea2a510329359ad3224a00e26c8d5c5f03"
+      ]
+    },
+    "event_transaction": {
+      "block_number": 2,
+      "event_transaction_match": true,
+      "receipt_proof": [
+        "779c359452dcac31ebde4c74ced0659906284a0216d545b38f5475da00df68e9"
+      ],
+      "status": 0,
+      "transaction_hash": "0x85280bc2aa802f7d8ef93872a205732114f19306ab1d02c3068444441372b918",
+      "transaction_proof": [
+        "85280bc2aa802f7d8ef93872a205732114f19306ab1d02c3068444441372b918"
+      ]
+    },
+    "final_block_number": 2,
+    "initial_block_number": 0,
+    "stale_block_limit": 1,
+    "stale_block_limit_rejected": true,
+    "stale_rejection_error": "BlockLimitCheckFail"
+  },
+  "schema_version": 1,
+  "sm_crypto": true
+}

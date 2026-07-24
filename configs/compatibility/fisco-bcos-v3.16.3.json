@@ -362,16 +362,18 @@
       "crypto": "standard",
       "platform": "linux/amd64",
       "artifact_status": "verified",
-      "runtime_status": "unverified",
-      "reason": "Pinned native node, C SDK and compiler artifacts exist; no Linux four-node run evidence is committed."
+      "runtime_status": "verified",
+      "reason": "A native four-node Air run on Ubuntu 24.04 amd64 completed pinned compiler deployment, mTLS, transaction and receipt proof retrieval, ABI-bound event delivery, PBFT block metadata, stale blockLimit rejection, and clean SDK/node teardown on 2026-07-24.",
+      "evidence": "docs/integrations/evidence/fisco-bcos/2026-07-24-linux-amd64-standard-runtime.json"
     },
     {
       "deployment": "air",
       "crypto": "guomi",
       "platform": "linux/amd64",
       "artifact_status": "verified",
-      "runtime_status": "unverified",
-      "reason": "Pinned native node, C SDK and GM compiler artifacts exist; no Linux Guomi four-node run evidence is committed."
+      "runtime_status": "verified",
+      "reason": "A native four-node Guomi Air run on Ubuntu 24.04 amd64 completed the pinned GM compiler workflow, GM TLS, transaction and receipt proof retrieval, ABI-bound event delivery, PBFT block metadata, stale blockLimit rejection, and clean SDK/node teardown on 2026-07-24.",
+      "evidence": "docs/integrations/evidence/fisco-bcos/2026-07-24-linux-amd64-guomi-runtime.json"
     },
     {
       "deployment": "air",

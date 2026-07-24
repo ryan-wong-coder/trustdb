@@ -42,6 +42,28 @@ if [[ -z ${WORK_DIR} ]]; then
     echo "--work-dir is required so evidence is not written to an ambiguous temporary path" >&2
     exit 2
 fi
+
+for port_name in P2P_PORT RPC_PORT; do
+    port_value=${!port_name}
+    if [[ ! ${port_value} =~ ^[0-9]+$ ]] || ((port_value < 1 || port_value > 65532)); then
+        echo "${port_name} must be a numeric base port between 1 and 65532" >&2
+        exit 2
+    fi
+done
+if ((P2P_PORT <= RPC_PORT + 3 && RPC_PORT <= P2P_PORT + 3)); then
+    echo "the four-port P2P and RPC ranges must not overlap" >&2
+    exit 2
+fi
+if [[ -r /proc/sys/net/ipv4/ip_local_port_range ]]; then
+    read -r EPHEMERAL_START EPHEMERAL_END </proc/sys/net/ipv4/ip_local_port_range
+    for port_name in P2P_PORT RPC_PORT; do
+        port_value=${!port_name}
+        if ((port_value <= EPHEMERAL_END && port_value + 3 >= EPHEMERAL_START)); then
+            echo "${port_name} range ${port_value}-$((port_value + 3)) overlaps the Linux ephemeral range ${EPHEMERAL_START}-${EPHEMERAL_END}" >&2
+            exit 2
+        fi
+    done
+fi
 if [[ -e ${WORK_DIR} ]]; then
     echo "work directory already exists: ${WORK_DIR}" >&2
     exit 1
@@ -208,8 +230,38 @@ fi
     GOWORK=off go build -trimpath -o "${WORK_DIR}/smoke-client" .
 )
 
+NODE_PIDS=()
+
+stop_nodes() {
+    local pid
+    local attempt
+    local running
+
+    for ((index=${#NODE_PIDS[@]} - 1; index >= 0; index--)); do
+        pid=${NODE_PIDS[index]}
+        kill -TERM "${pid}" 2>/dev/null || true
+    done
+
+    for attempt in {1..60}; do
+        running=false
+        for pid in "${NODE_PIDS[@]}"; do
+            if kill -0 "${pid}" 2>/dev/null; then
+                running=true
+                break
+            fi
+        done
+        [[ ${running} == false ]] && return 0
+        sleep 0.5
+    done
+
+    for pid in "${NODE_PIDS[@]}"; do
+        kill -KILL "${pid}" 2>/dev/null || true
+    done
+    return 1
+}
+
 cleanup() {
-    bash "${NODE_PARENT}/stop_all.sh" >/dev/null 2>&1 || true
+    stop_nodes >/dev/null 2>&1 || true
     rm -f "${SMOKE_LOCK}/pid"
     rmdir "${SMOKE_LOCK}" 2>/dev/null || true
 }
@@ -220,14 +272,51 @@ if ! mkdir "${SMOKE_LOCK}" 2>/dev/null; then
 fi
 printf '%s\n' "$$" >"${SMOKE_LOCK}/pid"
 trap cleanup EXIT INT TERM
-bash "${NODE_PARENT}/start_all.sh" >"${WORK_DIR}/node-start.log" 2>&1
+
+# The generated start scripts identify a process only by the shared node
+# executable path. They therefore cannot safely start these four nodes in
+# sequence, while starting all four at once has exposed an upstream gateway
+# race on high-core Linux hosts. Own the exact PID of every node instead.
+for index in 0 1 2 3; do
+    node_dir="${NODE_PARENT}/node${index}"
+    : >"${node_dir}/nohup.out"
+    (
+        cd "${node_dir}"
+        nohup ../fisco-bcos -c config.ini -g config.genesis >>nohup.out 2>&1 &
+        printf '%s\n' "$!" >.trustdb-smoke.pid
+    )
+    pid=$(<"${node_dir}/.trustdb-smoke.pid")
+    NODE_PIDS+=("${pid}")
+
+    ready=false
+    for attempt in {1..40}; do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            echo "node${index} exited during startup" >&2
+            tail -80 "${node_dir}/nohup.out" >&2
+            exit 1
+        fi
+        if grep -q "fisco-bcos is running" "${node_dir}/nohup.out"; then
+            ready=true
+            break
+        fi
+        sleep 0.5
+    done
+    if [[ ${ready} != true ]]; then
+        echo "node${index} did not become ready within 20 seconds" >&2
+        tail -80 "${node_dir}/nohup.out" >&2
+        exit 1
+    fi
+    printf 'node%s pid=%s ready\n' "${index}" "${pid}" >>"${WORK_DIR}/node-start.log"
+    sleep 2
+done
+
 # The node process can be alive before its RPC service completes initialization.
 # A fixed, bounded readiness window avoids retrying DialContext, whose upstream
 # error path does not expose a native SDK handle that callers can destroy.
 sleep 10
 
 for index in 0 1 2 3; do
-    if ! pgrep -f "${NODE_PARENT}/node${index}/../fisco-bcos" >/dev/null 2>&1; then
+    if ! kill -0 "${NODE_PIDS[index]}" 2>/dev/null; then
         echo "node${index} is not running" >&2
         exit 1
     fi
@@ -253,23 +342,43 @@ fi
 ) >"${WORK_DIR}/client-evidence.json" \
   2>"${WORK_DIR}/client-stderr.log"
 
+if ! stop_nodes; then
+    echo "one or more FISCO BCOS nodes required SIGKILL during teardown" >&2
+    exit 1
+fi
+NODE_PIDS=()
+
 if [[ ${ROOT_SM_CERT_WAS_PRESENT} == false && -e ${REPO_ROOT}/sm_cert.cnf ]] || \
    [[ ${ROOT_SM_PARAM_WAS_PRESENT} == false && -e ${REPO_ROOT}/sm_sm2.param ]]; then
     echo "smoke subprocess polluted the repository root with TASSL helper files" >&2
     exit 1
 fi
 
-python3 - "${WORK_DIR}" "${BASELINE}" "${MODE}" "${PLATFORM}" "${SOLC_EXECUTABLE}" <<'PY'
+python3 - "${WORK_DIR}" "${BASELINE}" "${MODE}" "${PLATFORM}" "${SOLC_EXECUTABLE}" \
+    "${CACHE_DIR}" "${P2P_PORT}" "${RPC_PORT}" "${RAW_EVM_FIXTURE}" <<'PY'
+import datetime
 import json
 import platform
+import re
+import shlex
 import sys
 from pathlib import Path
 
 work = Path(sys.argv[1])
-baseline_path, mode, target_platform, compiler_executable = sys.argv[2:]
+(
+    baseline_path,
+    mode,
+    target_platform,
+    compiler_executable,
+    cache_dir,
+    p2p_port,
+    rpc_port,
+    raw_evm_fixture,
+) = sys.argv[2:]
 client = json.loads((work / "client-evidence.json").read_text(encoding="utf-8"))
 artifacts = json.loads((work / "artifact-verification.json").read_text(encoding="utf-8"))
-client["environment"] = {
+baseline = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+environment = {
     "platform": target_platform,
     "host_platform": platform.platform(),
     "python": platform.python_version(),
@@ -278,12 +387,128 @@ client["environment"] = {
     "tassl_version": (work / "tassl-version.txt").read_text(encoding="utf-8"),
     "compiler_executable": compiler_executable == "true",
 }
-client["artifacts"] = artifacts["artifacts"]
-client["certificate_verification"] = (work / "certificate-verification.txt").read_text(encoding="utf-8").splitlines()
-client["client_stderr"] = (work / "client-stderr.log").read_text(encoding="utf-8").splitlines()
-client["baseline_file"] = str(Path(baseline_path).resolve())
-client["mode"] = mode
+
+node_version_text = environment["node_version"]
+version_match = re.search(r"FISCO BCOS Version\s*:\s*([^\s]+)", node_version_text)
+commit_match = re.search(r"Git Commit\s*:\s*([0-9a-f]{40})", node_version_text)
+if version_match is None or commit_match is None:
+    raise SystemExit("could not parse the pinned node version and commit")
+
+artifact_entries = artifacts["artifacts"]
+if isinstance(artifact_entries, list):
+    artifact_digests = {entry["name"]: entry["sha256"] for entry in artifact_entries}
+elif isinstance(artifact_entries, dict):
+    artifact_digests = artifact_entries
+else:
+    raise SystemExit("artifact verification has an unsupported result shape")
+
+consensus = client["consensus_status"]
+if isinstance(consensus, str):
+    consensus = json.loads(consensus)
+connected_nodes = consensus["connectedNodeList"]
+if isinstance(connected_nodes, list):
+    connected_nodes = len(connected_nodes)
+
+def with_prefix(value: str) -> str:
+    return value if value.startswith("0x") else "0x" + value
+
+def transaction(value: dict, *, event_match: bool = False) -> dict:
+    result = {
+        "transaction_hash": with_prefix(value["hash"]),
+        "status": value["status"],
+        "block_number": value["block_number"],
+        "transaction_proof": value["transaction_proof"],
+        "receipt_proof": value["receipt_proof"],
+    }
+    if value.get("contract_address"):
+        result["contract_address"] = value["contract_address"]
+    if event_match:
+        result["event_transaction_match"] = (
+            with_prefix(client["event"]["transactionHash"]).lower()
+            == result["transaction_hash"].lower()
+        )
+    return result
+
+components = baseline["components"]
+pins = {
+    "node": f"{components['node']['tag']}@{components['node']['commit']}",
+    "go_sdk": f"{components['go_sdk']['tag']}@{components['go_sdk']['commit']}",
+    "c_sdk_source": components["go_sdk"]["c_sdk_module"]["commit"],
+    "c_sdk_native": f"{components['c_sdk']['tag']}@{components['c_sdk']['commit']}",
+    "solidity": f"{components['solidity']['tag']}@{components['solidity']['commit']}",
+    "tassl": f"{components['tassl']['tag']}@{components['tassl']['commit']}",
+}
+raw_fixture = raw_evm_fixture == "true"
+command = [
+    "scripts/fisco-bcos/smoke-air.sh",
+    "--mode", mode,
+    "--work-dir", str(work),
+    "--cache-dir", cache_dir,
+    "--p2p-port", p2p_port,
+    "--rpc-port", rpc_port,
+]
+if raw_fixture:
+    command.append("--raw-evm-fixture")
+
+block = client["containing_block"]
+evidence = {
+    "schema_version": 1,
+    "evidence_class": "diagnostic_partial" if raw_fixture else "runtime_verified",
+    "admitted": not raw_fixture,
+    "baseline_id": baseline["baseline_id"],
+    "date": datetime.date.today().isoformat(),
+    "profile": {
+        "deployment": "air",
+        "crypto": mode,
+        "platform": target_platform,
+    },
+    "command": shlex.join(command),
+    "host": environment["host_platform"],
+    "pins": pins,
+    "artifacts": artifact_digests,
+    "node_version": version_match.group(1),
+    "node_commit": commit_match.group(1),
+    "certificate_verification": (work / "certificate-verification.txt").read_text(encoding="utf-8").splitlines(),
+    "sm_crypto": client["sm_crypto"],
+    "probe_source": client["probe_source"],
+    "compiler_executable": environment["compiler_executable"],
+    "clean_teardown": client["clean_teardown"],
+    "node_clean_teardown": True,
+    "environment": environment,
+    "results": {
+        "initial_block_number": client["initial_block_number"],
+        "final_block_number": client["final_block_number"],
+        "deployment": transaction(client["deployment"]),
+        "event_transaction": transaction(client["event_transaction"], event_match=True),
+        "containing_block": {
+            "hash": with_prefix(block["hash"]),
+            "transactions_root": with_prefix(block["txsRoot"]),
+            "receipts_root": with_prefix(block["receiptsRoot"]),
+            "signature_count": len(block["signatureList"]),
+        },
+        "consensus": {
+            "connected_nodes": connected_nodes,
+            "sealers": len(client["sealers"]),
+            "minimum_required_quorum": consensus["minRequiredQuorum"],
+            "maximum_faulty_quorum": consensus["maxFaultyQuorum"],
+            "node_ids": [entry["nodeID"] for entry in client["sealers"]],
+        },
+        "stale_block_limit": client["stale_block_limit"],
+        "stale_block_limit_rejected": client["stale_block_limit_rejected"],
+        "stale_rejection_error": client.get("stale_rejection_error", ""),
+    },
+    "client_stderr": (work / "client-stderr.log").read_text(encoding="utf-8").splitlines(),
+    "limitations": [
+        "This run validates the pinned Air node, compiler, C SDK and Go SDK compatibility profile only.",
+        "Transaction and receipt proof arrays were retrieved but are not treated as independently verified TrustDB anchor evidence.",
+    ],
+}
+if raw_fixture:
+    evidence["limitations"].insert(
+        0,
+        "The raw EVM fixture bypasses the pinned Solidity compiler and cannot admit a runtime profile.",
+    )
 destination = work / f"evidence-{mode}.json"
-destination.write_text(json.dumps(client, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+destination.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(destination.read_text(encoding="utf-8"), end="")
 PY

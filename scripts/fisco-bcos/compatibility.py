@@ -219,6 +219,14 @@ def validate_evidence(
             evidence.get("compiler_executable") is True,
             f"verified runtime row {key} requires the pinned compiler",
         )
+        require(
+            evidence.get("clean_teardown") is True,
+            f"verified runtime row {key} requires clean SDK teardown",
+        )
+        require(
+            evidence.get("node_clean_teardown") is True,
+            f"verified runtime row {key} requires clean node teardown",
+        )
     require(
         admitted == (row["runtime_status"] == "verified"),
         f"evidence {key} admission disagrees with runtime_status",
