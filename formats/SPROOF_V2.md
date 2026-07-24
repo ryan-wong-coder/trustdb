@@ -122,3 +122,38 @@ rules, nonce/replay policy, and unavailable-responder behavior.
 The verifier performs no HTTP, gRPC, NATS, DNS, CA, OCSP, CRL distribution,
 provider, or blockchain RPC request. Missing local trust material is an
 explicit precondition failure, never a network fallback.
+
+## Structured offline result
+
+The offline verifier reports these ordered stages:
+
+1. `sproof_container`
+2. `identity_evidence`
+3. `proof_bundle`
+4. `content`
+5. `client_claim`
+6. `bundle_bindings`
+7. `accepted_receipt`
+8. `committed_receipt`
+9. `batch_merkle`
+10. `global_log`
+11. `anchor`
+
+Each stage is `passed`, `failed`, `not_present`, `skipped`, or `not_run`.
+A failed stage prevents every later applicable stage from running. Optional
+Global Log or anchor evidence is reported as `not_present`; an anchor ignored
+by explicit verifier policy is `skipped`. The result also reports
+`external_network_access=false` and `external_provider_access=false`.
+
+The CLI uses the verifier-local public descriptors passed through
+`--client-public-key`, `--server-public-key`, and
+`--registry-public-key`. Repeatable `--client-ca-certificate` and
+`--server-ca-certificate` flags accept strict DER or certificate-only PEM
+roots. `--require-certificate-status` requires a CRL covering every actual
+signature time for every carried certificate chain.
+
+If a file carries any identity evidence, the CLI requires complete evidence
+for every referenced client and server signature key. An incomplete subset
+fails closed. Local `.sproof` verification never launches an external anchor
+plugin; provider-specific offline verification must be implemented as a
+bounded in-process verifier whose trust roots are supplied locally.
