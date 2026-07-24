@@ -244,6 +244,21 @@ func GlobalLogConsistency(bundle model.ProofBundle, proof model.GlobalLogProof) 
 	return globalLogConsistencyWithProvider(bundle, proof, trustcrypto.DefaultProvider())
 }
 
+// GlobalLogConsistencyForSuite recomputes the complete proof container with
+// the suite explicitly carried by V2 evidence. It performs no signature or
+// trust-root verification; callers must still verify the STH with a
+// verifier-local public key before granting L4.
+func GlobalLogConsistencyForSuite(bundle model.ProofBundle, proof model.GlobalLogProof) error {
+	if err := cryptosuite.RequireSame(bundle.CryptoSuite, proof.CryptoSuite, proof.STH.CryptoSuite); err != nil {
+		return fmt.Errorf("verify: global log crypto_suite mismatch: %w", err)
+	}
+	provider, err := trustcrypto.ProviderForSuite(bundle.CryptoSuite)
+	if err != nil {
+		return err
+	}
+	return globalLogConsistencyWithProvider(bundle, proof, provider)
+}
+
 func globalLogConsistencyWithProvider(bundle model.ProofBundle, proof model.GlobalLogProof, provider trustcrypto.Provider) error {
 	if provider == nil {
 		return fmt.Errorf("verify: crypto provider is required")

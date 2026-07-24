@@ -2,7 +2,6 @@ package sproof
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,39 +12,50 @@ import (
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/formatregistry"
+	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/prooflevel"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/internal/verify"
 )
 
 const (
-	FormatVersion = 1
-	MaxBytes      = 16 << 20
+	FormatVersion = 2
+	MaxBytes      = formatregistry.MaxSingleProofBytesV2
+
+	MaxIdentityEvidence       = 16
+	MaxCertificateStatuses    = formatregistry.MaxCertificateCountV2
+	MaxCertificateStatusBytes = 4 << 20
+	MaxRegistryEvidenceBytes  = 8 << 20
 )
 
 type Options struct {
-	GlobalProof     *model.GlobalLogProof
-	AnchorResult    *model.STHAnchorResult
-	ExportedAtUnixN int64
+	GlobalProof      *model.GlobalLogProof
+	AnchorResult     *model.STHAnchorResult
+	IdentityEvidence []model.ProofIdentityEvidence
+	ExportedAtUnixN  int64
 }
 
-// New builds a stable .sproof v1 envelope. ProofLevel is descriptive only;
+// New builds a stable .sproof v2 envelope. ProofLevel is descriptive only;
 // verifiers must recompute the level from the bundled evidence.
 func New(bundle model.ProofBundle, opts Options) (model.SingleProof, error) {
 	if err := requireWritableGeneration(bundle.CryptoSuite); err != nil {
 		return model.SingleProof{}, err
 	}
 	proof := model.SingleProof{
-		SchemaVersion:   model.SchemaSingleProof,
-		FormatVersion:   FormatVersion,
-		RecordID:        bundle.RecordID,
-		ProofBundle:     bundle,
-		NodeID:          bundle.NodeID,
-		LogID:           bundle.LogID,
-		GlobalProof:     opts.GlobalProof,
-		AnchorResult:    opts.AnchorResult,
-		ExportedAtUnixN: opts.ExportedAtUnixN,
+		SchemaVersion:    model.SchemaSingleProof,
+		FormatVersion:    FormatVersion,
+		CryptoSuite:      bundle.CryptoSuite,
+		RecordID:         bundle.RecordID,
+		ProofBundle:      bundle,
+		NodeID:           bundle.NodeID,
+		LogID:            bundle.LogID,
+		GlobalProof:      opts.GlobalProof,
+		AnchorResult:     opts.AnchorResult,
+		IdentityEvidence: cloneIdentityEvidence(opts.IdentityEvidence),
+		ExportedAtUnixN:  opts.ExportedAtUnixN,
 	}
 	proof.ProofLevel = Level(proof).String()
 	if err := Validate(proof); err != nil {
@@ -72,11 +82,17 @@ func Validate(proof model.SingleProof) error {
 	if proof.FormatVersion != FormatVersion {
 		return fmt.Errorf("sproof: unsupported format_version %d", proof.FormatVersion)
 	}
+	if err := requireWritableGeneration(proof.CryptoSuite); err != nil {
+		return err
+	}
 	if proof.ProofBundle.SchemaVersion != model.SchemaProofBundle {
 		return fmt.Errorf("sproof: proof_bundle schema_version=%q, want %q",
 			proof.ProofBundle.SchemaVersion,
 			model.SchemaProofBundle,
 		)
+	}
+	if err := modelsuite.Require(proof.CryptoSuite, proof.ProofBundle); err != nil {
+		return fmt.Errorf("sproof: proof_bundle crypto_suite: %w", err)
 	}
 	if proof.ProofBundle.RecordID == "" {
 		return errors.New("sproof: proof_bundle record_id is required")
@@ -90,10 +106,13 @@ func Validate(proof model.SingleProof) error {
 			proof.ProofBundle.RecordID,
 		)
 	}
-	if proof.NodeID != "" && proof.ProofBundle.NodeID != "" && proof.NodeID != proof.ProofBundle.NodeID {
+	if proof.NodeID == "" || proof.LogID == "" {
+		return errors.New("sproof: node_id and log_id are required")
+	}
+	if proof.ProofBundle.NodeID == "" || proof.ProofBundle.NodeID != proof.NodeID {
 		return fmt.Errorf("sproof: node_id mismatch: envelope=%s proof_bundle=%s", proof.NodeID, proof.ProofBundle.NodeID)
 	}
-	if proof.LogID != "" && proof.ProofBundle.LogID != "" && proof.LogID != proof.ProofBundle.LogID {
+	if proof.ProofBundle.LogID == "" || proof.ProofBundle.LogID != proof.LogID {
 		return fmt.Errorf("sproof: log_id mismatch: envelope=%s proof_bundle=%s", proof.LogID, proof.ProofBundle.LogID)
 	}
 	if proof.ProofLevel != "" && proof.ProofLevel != Level(proof).String() {
@@ -109,7 +128,18 @@ func Validate(proof model.SingleProof) error {
 				model.SchemaGlobalLogProof,
 			)
 		}
-		if err := verify.GlobalLogConsistency(proof.ProofBundle, *proof.GlobalProof); err != nil {
+		if err := modelsuite.Require(proof.CryptoSuite, *proof.GlobalProof); err != nil {
+			return fmt.Errorf("sproof: global_proof crypto_suite: %w", err)
+		}
+		if proof.GlobalProof.NodeID == "" || proof.GlobalProof.NodeID != proof.NodeID ||
+			proof.GlobalProof.STH.NodeID == "" || proof.GlobalProof.STH.NodeID != proof.NodeID {
+			return errors.New("sproof: global_proof node_id does not exactly match the envelope")
+		}
+		if proof.GlobalProof.LogID == "" || proof.GlobalProof.LogID != proof.LogID ||
+			proof.GlobalProof.STH.LogID == "" || proof.GlobalProof.STH.LogID != proof.LogID {
+			return errors.New("sproof: global_proof log_id does not exactly match the envelope")
+		}
+		if err := verify.GlobalLogConsistencyForSuite(proof.ProofBundle, *proof.GlobalProof); err != nil {
 			return fmt.Errorf("sproof: global_proof: %w", err)
 		}
 	}
@@ -123,6 +153,17 @@ func Validate(proof model.SingleProof) error {
 		if proof.GlobalProof == nil {
 			return errors.New("sproof: anchor_result requires global_proof")
 		}
+		if err := modelsuite.Require(proof.CryptoSuite, *proof.AnchorResult); err != nil {
+			return fmt.Errorf("sproof: anchor_result crypto_suite: %w", err)
+		}
+		if proof.AnchorResult.NodeID == "" || proof.AnchorResult.NodeID != proof.NodeID ||
+			proof.AnchorResult.STH.NodeID == "" || proof.AnchorResult.STH.NodeID != proof.NodeID {
+			return errors.New("sproof: anchor_result node_id does not exactly match the envelope")
+		}
+		if proof.AnchorResult.LogID == "" || proof.AnchorResult.LogID != proof.LogID ||
+			proof.AnchorResult.STH.LogID == "" || proof.AnchorResult.STH.LogID != proof.LogID {
+			return errors.New("sproof: anchor_result log_id does not exactly match the envelope")
+		}
 		if err := verify.AnchorContainerConsistency(*proof.GlobalProof, *proof.AnchorResult); err != nil {
 			return fmt.Errorf("sproof: anchor_result: %w", err)
 		}
@@ -132,11 +173,135 @@ func Validate(proof model.SingleProof) error {
 			}
 		}
 	}
+	if err := validateIdentityEvidence(proof); err != nil {
+		return err
+	}
 	return nil
 }
 
+func validateIdentityEvidence(proof model.SingleProof) error {
+	if len(proof.IdentityEvidence) > MaxIdentityEvidence {
+		return fmt.Errorf("sproof: identity_evidence count exceeds %d", MaxIdentityEvidence)
+	}
+	clientKeys := map[string]struct{}{
+		proof.ProofBundle.SignedClaim.Signature.KeyID: {},
+	}
+	serverKeys := map[string]struct{}{
+		proof.ProofBundle.AcceptedReceipt.ServerSig.KeyID:  {},
+		proof.ProofBundle.CommittedReceipt.ServerSig.KeyID: {},
+	}
+	if proof.GlobalProof != nil {
+		serverKeys[proof.GlobalProof.STH.Signature.KeyID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(proof.IdentityEvidence))
+	for index := range proof.IdentityEvidence {
+		evidence := proof.IdentityEvidence[index]
+		if evidence.SchemaVersion != model.SchemaProofIdentity {
+			return fmt.Errorf("sproof: identity_evidence[%d] has unexpected schema_version %q", index, evidence.SchemaVersion)
+		}
+		if err := cryptosuite.RequireSame(proof.CryptoSuite, evidence.CryptoSuite); err != nil {
+			return fmt.Errorf("sproof: identity_evidence[%d] crypto_suite: %w", index, err)
+		}
+		if evidence.KeyID == "" {
+			return fmt.Errorf("sproof: identity_evidence[%d] key_id is required", index)
+		}
+		var expected map[string]struct{}
+		switch evidence.Role {
+		case model.ProofIdentityRoleClient:
+			expected = clientKeys
+		case model.ProofIdentityRoleServer:
+			expected = serverKeys
+		default:
+			return fmt.Errorf("sproof: identity_evidence[%d] role %q is unsupported", index, evidence.Role)
+		}
+		if _, ok := expected[evidence.KeyID]; !ok {
+			return fmt.Errorf("sproof: identity_evidence[%d] key_id %q is not referenced by the %s signatures", index, evidence.KeyID, evidence.Role)
+		}
+		identityKey := evidence.Role + "\x00" + evidence.KeyID
+		if _, duplicate := seen[identityKey]; duplicate {
+			return fmt.Errorf("sproof: duplicate identity evidence for %s key %q", evidence.Role, evidence.KeyID)
+		}
+		seen[identityKey] = struct{}{}
+
+		descriptor, err := keydescriptor.Unmarshal(evidence.KeyDescriptor)
+		if err != nil {
+			return fmt.Errorf("sproof: identity_evidence[%d] key_descriptor: %w", index, err)
+		}
+		if descriptor.Kind != keydescriptor.KindVerifier || descriptor.Provider != keydescriptor.ProviderPublic {
+			return fmt.Errorf("sproof: identity_evidence[%d] must contain a public verifier descriptor", index)
+		}
+		if descriptor.CryptoSuite != proof.CryptoSuite || descriptor.KeyID != evidence.KeyID {
+			return fmt.Errorf("sproof: identity_evidence[%d] descriptor binding mismatch", index)
+		}
+		if len(evidence.RegistryV2) > MaxRegistryEvidenceBytes {
+			return fmt.Errorf("sproof: identity_evidence[%d] registry_v2 exceeds %d bytes", index, MaxRegistryEvidenceBytes)
+		}
+		if len(evidence.RegistryV2) != 0 {
+			if evidence.Role != model.ProofIdentityRoleClient {
+				return fmt.Errorf("sproof: identity_evidence[%d] registry_v2 is allowed only for a client identity", index)
+			}
+			if !bytes.HasPrefix(evidence.RegistryV2, []byte("TDBKEYR2\n")) {
+				return fmt.Errorf("sproof: identity_evidence[%d] registry_v2 has an unsupported format", index)
+			}
+		}
+		if len(evidence.CertificateStatuses) > MaxCertificateStatuses {
+			return fmt.Errorf("sproof: identity_evidence[%d] certificate status count exceeds %d", index, MaxCertificateStatuses)
+		}
+		if len(evidence.CertificateStatuses) != 0 && len(descriptor.CertificateChain) == 0 {
+			return fmt.Errorf("sproof: identity_evidence[%d] certificate statuses require a certificate chain", index)
+		}
+		statusIssuers := make(map[string]struct{}, len(evidence.CertificateStatuses))
+		for statusIndex := range evidence.CertificateStatuses {
+			status := evidence.CertificateStatuses[statusIndex]
+			if status.SchemaVersion != model.SchemaCertificateStatus {
+				return fmt.Errorf("sproof: identity_evidence[%d] certificate_statuses[%d] has unexpected schema_version %q", index, statusIndex, status.SchemaVersion)
+			}
+			if err := cryptosuite.RequireSame(proof.CryptoSuite, status.CryptoSuite); err != nil {
+				return fmt.Errorf("sproof: identity_evidence[%d] certificate_statuses[%d] crypto_suite: %w", index, statusIndex, err)
+			}
+			if status.Type != model.CertificateStatusCRL {
+				return fmt.Errorf("sproof: identity_evidence[%d] certificate_statuses[%d] type %q is unsupported", index, statusIndex, status.Type)
+			}
+			if len(status.IssuerFingerprint) != cryptosuite.DigestSize {
+				return fmt.Errorf("sproof: identity_evidence[%d] certificate_statuses[%d] issuer fingerprint length is invalid", index, statusIndex)
+			}
+			if len(status.Status) == 0 || len(status.Status) > MaxCertificateStatusBytes {
+				return fmt.Errorf("sproof: identity_evidence[%d] certificate_statuses[%d] status size is invalid", index, statusIndex)
+			}
+			issuerKey := string(status.IssuerFingerprint)
+			if _, duplicate := statusIssuers[issuerKey]; duplicate {
+				return fmt.Errorf("sproof: identity_evidence[%d] contains duplicate status for one certificate issuer", index)
+			}
+			statusIssuers[issuerKey] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func cloneIdentityEvidence(in []model.ProofIdentityEvidence) []model.ProofIdentityEvidence {
+	out := make([]model.ProofIdentityEvidence, len(in))
+	for index := range in {
+		out[index] = in[index]
+		out[index].KeyDescriptor = append([]byte(nil), in[index].KeyDescriptor...)
+		out[index].RegistryV2 = append([]byte(nil), in[index].RegistryV2...)
+		out[index].CertificateStatuses = make([]model.CertificateStatusEvidence, len(in[index].CertificateStatuses))
+		for statusIndex := range in[index].CertificateStatuses {
+			out[index].CertificateStatuses[statusIndex] = in[index].CertificateStatuses[statusIndex]
+			out[index].CertificateStatuses[statusIndex].IssuerFingerprint = append(
+				[]byte(nil),
+				in[index].CertificateStatuses[statusIndex].IssuerFingerprint...,
+			)
+			out[index].CertificateStatuses[statusIndex].Status = append(
+				[]byte(nil),
+				in[index].CertificateStatuses[statusIndex].Status...,
+			)
+		}
+	}
+	return out
+}
+
 func Marshal(proof model.SingleProof) ([]byte, error) {
-	if err := requireWritableGeneration(proof.ProofBundle.CryptoSuite); err != nil {
+	if err := requireWritableGeneration(proof.CryptoSuite); err != nil {
 		return nil, err
 	}
 	if err := Validate(proof); err != nil {
@@ -146,10 +311,10 @@ func Marshal(proof model.SingleProof) ([]byte, error) {
 }
 
 func requireWritableGeneration(suiteID cryptosuite.ID) error {
-	if _, _, err := formatregistry.RequireWritable(formatregistry.SingleProofV1, suiteID); err != nil {
+	if _, _, err := formatregistry.RequireWritable(formatregistry.SingleProofV2, suiteID); err != nil {
 		return trusterr.Wrap(
 			trusterr.CodeFailedPrecondition,
-			"sproof v1 writer is retired and sproof v2 is not available",
+			"sproof v2 writer is unavailable for the selected cryptographic suite",
 			err,
 		)
 	}
@@ -252,12 +417,16 @@ func rejectDirectoryTarget(path string) error {
 	return err
 }
 
-func Digest(proof model.SingleProof) ([32]byte, error) {
+func Digest(proof model.SingleProof) ([]byte, error) {
 	data, err := Marshal(proof)
 	if err != nil {
-		return [32]byte{}, err
+		return nil, err
 	}
-	return sha256.Sum256(data), nil
+	suite, err := cryptosuite.RequireAvailable(proof.CryptoSuite)
+	if err != nil {
+		return nil, err
+	}
+	return trustcrypto.HashBytesForSuite(proof.CryptoSuite, suite.StorageIntegrityHash.Algorithm, data)
 }
 
 func EqualEncoded(a, b model.SingleProof) (bool, error) {

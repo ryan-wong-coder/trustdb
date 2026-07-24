@@ -1,23 +1,35 @@
 package sproof
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
+	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
+	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
-func TestNewRejectsUnavailableGeneration(t *testing.T) {
+func TestNewBuildsAvailableV2Generation(t *testing.T) {
 	t.Parallel()
 
-	if _, err := New(vectorProof().ProofBundle, Options{ExportedAtUnixN: 1_700_000_000_000_000_000}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), "sproof v1 writer is retired") {
-		t.Fatalf("New() code=%s error=%v", trusterr.CodeOf(err), err)
+	for _, suite := range []cryptosuite.ID{cryptosuite.INTLV1, cryptosuite.CNSMV1} {
+		bundle := vectorProof().ProofBundle
+		bundle.CryptoSuite = suite
+		proof, err := New(bundle, Options{ExportedAtUnixN: 1_700_000_000_000_000_000})
+		if err != nil {
+			t.Fatalf("New(%s) error=%v", suite, err)
+		}
+		if proof.SchemaVersion != model.SchemaSingleProof || proof.FormatVersion != FormatVersion ||
+			proof.CryptoSuite != suite || proof.ProofBundle.CryptoSuite != suite {
+			t.Fatalf("New(%s) = %+v", suite, proof)
+		}
 	}
 }
 
@@ -27,6 +39,7 @@ func TestValidateRejectsAnchorWithoutGlobalProof(t *testing.T) {
 	proof := vectorProof()
 	proof.AnchorResult = &model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   cryptosuite.INTLV1,
 		TreeSize:      1,
 		AnchorID:      "anchor-1",
 	}
@@ -106,6 +119,91 @@ func TestSProofV1L3VectorIsRejected(t *testing.T) {
 	}
 }
 
+func TestUnmarshalRejectsMissingAndCrossSuiteBindings(t *testing.T) {
+	t.Parallel()
+
+	proof := vectorProof()
+	raw, err := cborx.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var missing model.SingleProof
+	if err := cborx.UnmarshalLimit(raw, &missing, MaxBytes); err != nil {
+		t.Fatal(err)
+	}
+	missing.CryptoSuite = ""
+	raw, err = cborx.Marshal(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Unmarshal(raw); err == nil || !strings.Contains(err.Error(), "cryptographic suite") {
+		t.Fatalf("Unmarshal(missing suite) error = %v", err)
+	}
+
+	proof = vectorProof()
+	proof.ProofBundle.CryptoSuite = cryptosuite.CNSMV1
+	raw, err = cborx.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Unmarshal(raw); err == nil || !strings.Contains(err.Error(), "crypto_suite") {
+		t.Fatalf("Unmarshal(cross suite) error = %v", err)
+	}
+}
+
+func TestIdentityEvidenceIsPublicBoundedAndDefensivelyCopied(t *testing.T) {
+	t.Parallel()
+
+	proof := vectorProof()
+	proof.ProofBundle.SignedClaim.Signature.KeyID = "client-key"
+	descriptor := verifierDescriptor(t, "client-key")
+	evidence := model.ProofIdentityEvidence{
+		SchemaVersion: model.SchemaProofIdentity,
+		CryptoSuite:   cryptosuite.INTLV1,
+		Role:          model.ProofIdentityRoleClient,
+		KeyID:         "client-key",
+		KeyDescriptor: descriptor,
+	}
+	created, err := New(proof.ProofBundle, Options{
+		IdentityEvidence: []model.ProofIdentityEvidence{evidence},
+		ExportedAtUnixN:  proof.ExportedAtUnixN,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	evidence.KeyDescriptor[0] ^= 0xff
+	if bytes.Equal(created.IdentityEvidence[0].KeyDescriptor, evidence.KeyDescriptor) {
+		t.Fatal("New() retained caller-owned key descriptor bytes")
+	}
+
+	tampered := created
+	tampered.IdentityEvidence = cloneIdentityEvidence(created.IdentityEvidence)
+	tampered.IdentityEvidence[0].Role = "self-authorizing-root"
+	if err := Validate(tampered); err == nil || !strings.Contains(err.Error(), "role") {
+		t.Fatalf("Validate(unknown role) error = %v", err)
+	}
+
+	tampered = created
+	tampered.IdentityEvidence = cloneIdentityEvidence(created.IdentityEvidence)
+	tampered.IdentityEvidence[0].RegistryV2 = []byte("not-a-registry")
+	if err := Validate(tampered); err == nil || !strings.Contains(err.Error(), "registry_v2") {
+		t.Fatalf("Validate(invalid registry) error = %v", err)
+	}
+
+	tampered = created
+	tampered.IdentityEvidence = cloneIdentityEvidence(created.IdentityEvidence)
+	tampered.IdentityEvidence[0].CertificateStatuses = []model.CertificateStatusEvidence{{
+		SchemaVersion:     model.SchemaCertificateStatus,
+		CryptoSuite:       cryptosuite.INTLV1,
+		Type:              model.CertificateStatusCRL,
+		IssuerFingerprint: make([]byte, cryptosuite.DigestSize),
+		Status:            []byte{1},
+	}}
+	if err := Validate(tampered); err == nil || !strings.Contains(err.Error(), "require a certificate chain") {
+		t.Fatalf("Validate(status without chain) error = %v", err)
+	}
+}
+
 func TestReadFileRejectsOversizedSingleProof(t *testing.T) {
 	t.Parallel()
 
@@ -118,15 +216,25 @@ func TestReadFileRejectsOversizedSingleProof(t *testing.T) {
 	}
 }
 
-func TestWriteFileRejectsUnavailableGeneration(t *testing.T) {
+func TestWriteFileRoundTripsV2Generation(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "proof.sproof")
-	if err := WriteFile(path, vectorProof()); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("WriteFile() code=%s error=%v", trusterr.CodeOf(err), err)
+	proof := vectorProof()
+	if err := WriteFile(path, proof); err != nil {
+		t.Fatalf("WriteFile() error=%v", err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("retired writer produced output: %v", err)
+	loaded, err := ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error=%v", err)
+	}
+	equal, err := EqualEncoded(proof, loaded)
+	if err != nil || !equal {
+		t.Fatalf("EqualEncoded()=%v err=%v", equal, err)
+	}
+	digest, err := Digest(loaded)
+	if err != nil || len(digest) != cryptosuite.DigestSize || bytes.Equal(digest, make([]byte, cryptosuite.DigestSize)) {
+		t.Fatalf("Digest()=%x err=%v", digest, err)
 	}
 }
 
@@ -161,12 +269,39 @@ func vectorProof() model.SingleProof {
 	return model.SingleProof{
 		SchemaVersion:   model.SchemaSingleProof,
 		FormatVersion:   FormatVersion,
+		CryptoSuite:     cryptosuite.INTLV1,
 		RecordID:        "rec-vector-1",
 		ProofLevel:      "L3",
+		NodeID:          "node-1",
+		LogID:           "log-1",
 		ExportedAtUnixN: 1_700_000_000_000_000_000,
 		ProofBundle: model.ProofBundle{
 			SchemaVersion: model.SchemaProofBundle,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      "rec-vector-1",
+			NodeID:        "node-1",
+			LogID:         "log-1",
 		},
 	}
+}
+
+func verifierDescriptor(t *testing.T, keyID string) []byte {
+	t.Helper()
+	public := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public().(ed25519.PublicKey)
+	encoded, err := keydescriptor.Marshal(keydescriptor.Descriptor{
+		SchemaVersion: keydescriptor.SchemaV1,
+		Kind:          keydescriptor.KindVerifier,
+		Provider:      keydescriptor.ProviderPublic,
+		CryptoSuite:   cryptosuite.INTLV1,
+		KeyID:         keyID,
+		Algorithm:     cryptosuite.SignatureEd25519,
+		PublicKey: keydescriptor.PublicKeyMaterial{
+			Encoding: cryptosuite.Ed25519PublicKeyEncoding,
+			Bytes:    public,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal verifier descriptor: %v", err)
+	}
+	return encoded
 }

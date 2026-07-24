@@ -9,7 +9,9 @@ const (
 	SchemaAcceptedReceipt      = "trustdb.accepted-receipt.v2"
 	SchemaCommittedReceipt     = "trustdb.committed-receipt.v2"
 	SchemaProofBundle          = "trustdb.proof-bundle.v2"
-	SchemaSingleProof          = "trustdb.sproof.v1"
+	SchemaSingleProof          = "trustdb.sproof.v2"
+	SchemaProofIdentity        = "trustdb.proof-identity-evidence.v1"
+	SchemaCertificateStatus    = "trustdb.certificate-status-evidence.v1"
 	SchemaRecordIndex          = "trustdb.record-index.v2"
 	SchemaRecordStatus         = "trustdb.record-status.v2"
 	SchemaStatusRefresh        = "trustdb.status-refresh.v2"
@@ -199,17 +201,56 @@ type ProofBundle struct {
 // optional L5 STHAnchorResult so auditors can verify the strongest currently
 // available level without juggling multiple files.
 type SingleProof struct {
-	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
-	FormatVersion uint64 `cbor:"format_version" json:"format_version"`
-	RecordID      string `cbor:"record_id" json:"record_id"`
-	ProofLevel    string `cbor:"proof_level" json:"proof_level"`
-	// NodeID and LogID duplicate proof_bundle hints for lightweight clients (optional).
-	NodeID          string           `cbor:"node_id,omitempty" json:"node_id,omitempty"`
-	LogID           string           `cbor:"log_id,omitempty" json:"log_id,omitempty"`
-	ProofBundle     ProofBundle      `cbor:"proof_bundle" json:"proof_bundle"`
-	GlobalProof     *GlobalLogProof  `cbor:"global_proof,omitempty" json:"global_proof,omitempty"`
-	AnchorResult    *STHAnchorResult `cbor:"anchor_result,omitempty" json:"anchor_result,omitempty"`
-	ExportedAtUnixN int64            `cbor:"exported_at_unix_nano" json:"exported_at_unix_nano"`
+	SchemaVersion string         `cbor:"schema_version" json:"schema_version"`
+	FormatVersion uint64         `cbor:"format_version" json:"format_version"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	RecordID      string         `cbor:"record_id" json:"record_id"`
+	ProofLevel    string         `cbor:"proof_level" json:"proof_level"`
+	// NodeID and LogID are mandatory V2 namespace bindings and must exactly
+	// match every embedded proof, STH, and anchor object.
+	NodeID           string                  `cbor:"node_id" json:"node_id"`
+	LogID            string                  `cbor:"log_id" json:"log_id"`
+	ProofBundle      ProofBundle             `cbor:"proof_bundle" json:"proof_bundle"`
+	GlobalProof      *GlobalLogProof         `cbor:"global_proof,omitempty" json:"global_proof,omitempty"`
+	AnchorResult     *STHAnchorResult        `cbor:"anchor_result,omitempty" json:"anchor_result,omitempty"`
+	IdentityEvidence []ProofIdentityEvidence `cbor:"identity_evidence,omitempty" json:"identity_evidence,omitempty"`
+	ExportedAtUnixN  int64                   `cbor:"exported_at_unix_nano" json:"exported_at_unix_nano"`
+}
+
+const (
+	ProofIdentityRoleClient = "client"
+	ProofIdentityRoleServer = "server"
+
+	CertificateStatusCRL = "crl"
+)
+
+// ProofIdentityEvidence carries portable public identity and certificate
+// status material. It never establishes trust by itself: offline verifiers
+// must bind it to verifier-local public-key, CA, and registry trust roots.
+//
+// RegistryV2 optionally contains the complete bounded key-registry V2 byte
+// stream needed to reconstruct a client's signing-time lifecycle. It is
+// evidence, not an embedded registry trust root.
+type ProofIdentityEvidence struct {
+	SchemaVersion       string                      `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite         cryptosuite.ID              `cbor:"crypto_suite" json:"crypto_suite"`
+	Role                string                      `cbor:"role" json:"role"`
+	KeyID               string                      `cbor:"key_id" json:"key_id"`
+	KeyDescriptor       []byte                      `cbor:"key_descriptor" json:"key_descriptor"`
+	RegistryV2          []byte                      `cbor:"registry_v2,omitempty" json:"registry_v2,omitempty"`
+	CertificateStatuses []CertificateStatusEvidence `cbor:"certificate_statuses,omitempty" json:"certificate_statuses,omitempty"`
+}
+
+// CertificateStatusEvidence contains one immutable, signed status object for
+// an issuer in a descriptor's leaf-first certificate chain. V1 accepts only a
+// strict DER CRL. IssuerFingerprint uses the selected suite's
+// KeyFingerprintHash and prevents ambiguous issuer selection.
+type CertificateStatusEvidence struct {
+	SchemaVersion     string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite       cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	Type              string         `cbor:"type" json:"type"`
+	IssuerFingerprint []byte         `cbor:"issuer_fingerprint" json:"issuer_fingerprint"`
+	Status            []byte         `cbor:"status" json:"status"`
 }
 
 // RecordIndex is the small server-side list/search projection derived from a
