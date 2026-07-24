@@ -50,15 +50,15 @@ var nativeArtifactPins = map[string]nativeArtifactPin{
 func observeAndVerifyNativeRuntime() (string, error) {
 	version, err := csdk.Version()
 	if err != nil {
-		return "", fmt.Errorf("observe FISCO BCOS native SDK version: %w", err)
+		return "", fmt.Errorf("%w: observe native version: %v", fiscobcos.ErrUnsupportedSDK, err)
 	}
 	path, err := csdk.LoadedLibraryPath()
 	if err != nil {
-		return "", fmt.Errorf("observe FISCO BCOS native SDK artifact: %w", err)
+		return "", fmt.Errorf("%w: observe native artifact: %v", fiscobcos.ErrUnsupportedSDK, err)
 	}
 	pin, ok := nativeArtifactPins[runtime.GOOS+"/"+runtime.GOARCH]
 	if !ok {
-		return "", fmt.Errorf("unsupported FISCO BCOS native SDK platform %s/%s", runtime.GOOS, runtime.GOARCH)
+		return "", fmt.Errorf("%w: platform %s/%s", fiscobcos.ErrUnsupportedSDK, runtime.GOOS, runtime.GOARCH)
 	}
 	return verifyNativeRuntime(version, path, pin)
 }
@@ -66,17 +66,18 @@ func observeAndVerifyNativeRuntime() (string, error) {
 func verifyNativeRuntime(versionText, artifactPath string, pin nativeArtifactPin) (string, error) {
 	version, commit, err := parseNativeVersion(versionText)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", fiscobcos.ErrUnsupportedSDK, err)
 	}
 	if version != supportedNativeVersion || commit != supportedNativeCommit {
 		return "", fmt.Errorf(
-			"unsupported FISCO BCOS native SDK: version=%q commit=%q",
+			"%w: native version=%q commit=%q",
+			fiscobcos.ErrUnsupportedSDK,
 			version,
 			commit,
 		)
 	}
 	if err := verifyNativeArtifact(artifactPath, pin); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", fiscobcos.ErrUnsupportedSDK, err)
 	}
 	observed := fmt.Sprintf(
 		"fisco-bcos-go-sdk-v3.0.2+c-sdk-v%s@%s",
@@ -84,7 +85,7 @@ func verifyNativeRuntime(versionText, artifactPath string, pin nativeArtifactPin
 		commit,
 	)
 	if observed != fiscobcos.StandardSDKVersion {
-		return "", errors.New("observed FISCO BCOS SDK identity does not match the protocol pin")
+		return "", fmt.Errorf("%w: observed SDK identity does not match the protocol pin", fiscobcos.ErrUnsupportedSDK)
 	}
 	return observed, nil
 }

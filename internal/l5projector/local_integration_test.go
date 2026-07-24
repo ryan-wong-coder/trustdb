@@ -25,7 +25,7 @@ func TestLocalProjectorMaterializesOlderBatchesWithoutBlockingEvidence(t *testin
 	const (
 		nodeID   = "node-1"
 		logID    = "log-1"
-		sinkName = "file"
+		sinkName = "independent-test-anchor"
 	)
 	global, err := globallog.New(globallog.Options{
 		Store: store, NodeID: nodeID, LogID: logID, Signer: trustcrypto.MustNewEd25519Signer("server-key", privateKey),

@@ -5,6 +5,7 @@ package standardsdk
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,8 +95,8 @@ func TestVerifyNativeRuntimeRequiresExactVersionAndArtifact(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := verifyNativeRuntime(test.version, test.path, test.pin); err == nil {
-				t.Fatal("accepted mismatched native runtime")
+			if _, err := verifyNativeRuntime(test.version, test.path, test.pin); !errors.Is(err, fiscobcos.ErrUnsupportedSDK) {
+				t.Fatalf("mismatched native runtime error = %v, want ErrUnsupportedSDK", err)
 			}
 		})
 	}

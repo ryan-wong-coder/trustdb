@@ -294,7 +294,7 @@ func (s *projectorStore) level(batchID string) string {
 }
 
 func projectorKey() model.STHAnchorScheduleKey {
-	return model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
+	return model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "independent-test-anchor"}
 }
 
 func projectorResult(key model.STHAnchorScheduleKey, treeSize uint64) model.STHAnchorResult {

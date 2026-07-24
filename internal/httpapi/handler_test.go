@@ -709,7 +709,7 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 	}, fakeAnchorService{
 		results: []model.STHAnchorResult{
 			{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, TreeSize: 2, AnchorID: "anchor-2", SinkName: "ots"},
-			{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, TreeSize: 2, AnchorID: "anchor-2-file", SinkName: "file"},
+			{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageLocalOnly, TreeSize: 2, AnchorID: "anchor-2-file", SinkName: "file"},
 			{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, TreeSize: 1, AnchorID: "anchor-1", SinkName: "ots"},
 		},
 	})
@@ -759,8 +759,15 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 		t.Fatalf("anchor page = %+v", anchorsPage)
 	}
 	for _, item := range anchorsPage.Anchors {
-		if item.Status != model.AnchorStatePublished || item.ProofLevel != "L5" || item.Result == nil {
+		if item.Result == nil {
 			t.Fatalf("anchor list item is not immutable publication evidence: %+v", item)
+		}
+		if item.Result.SinkName == "file" {
+			if item.Status != model.AnchorStateLocalOnly || item.ProofLevel != "L4" {
+				t.Fatalf("file anchor list item = %+v, want local-only L4", item)
+			}
+		} else if item.Status != model.AnchorStatePublished || item.ProofLevel != "L5" {
+			t.Fatalf("independent anchor list item = %+v, want published L5", item)
 		}
 	}
 	req = httptest.NewRequest(http.MethodGet, "/v2/anchors/sth?limit=2&cursor="+anchorsPage.NextCursor, nil)

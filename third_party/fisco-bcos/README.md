@@ -37,6 +37,8 @@ Production files outside `client/connection.go`,
 source-identical to the commits above. The Go SDK module has one local
 `replace` directive so its conformance test exercises the patched C binding.
 Files ending in `_trustdb_test.go` are TrustDB-owned boundary tests.
+`abi/bind/template.go` also has whitespace-only fixes required by TrustDB's
+repository-wide `git diff --check` gate.
 
 TrustDB additionally verifies the loaded v3.6.0 native artifact (commit
 `53240138c396c10cb0e1a2b7b4d5c0cdaa0ac539`) against the platform-specific

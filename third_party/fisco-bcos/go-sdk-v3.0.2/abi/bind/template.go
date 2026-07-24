@@ -272,13 +272,13 @@ var (
 	}
 
 	// New{{.Type}}Filterer creates a new log filterer instance of {{.Type}}, bound to a specific deployed contract.
- 	func New{{.Type}}Filterer(address common.Address, filterer bind.ContractFilterer) (*{{.Type}}Filterer, error) {
- 	  contract, err := bind{{.Type}}(address, nil, nil, filterer)
- 	  if err != nil {
- 	    return nil, err
- 	  }
- 	  return &{{.Type}}Filterer{contract: contract}, nil
- 	}
+	func New{{.Type}}Filterer(address common.Address, filterer bind.ContractFilterer) (*{{.Type}}Filterer, error) {
+	  contract, err := bind{{.Type}}(address, nil, nil, filterer)
+	  if err != nil {
+	    return nil, err
+	  }
+	  return &{{.Type}}Filterer{contract: contract}, nil
+	}
 
 	// bind{{.Type}} binds a generic wrapper to an already deployed contract.
 	func bind{{.Type}}(address common.Address, caller bind.ContractCaller, transactor bind.ContractTransactor, filterer bind.ContractFilterer) (*bind.BoundContract, error) {
@@ -456,7 +456,7 @@ var (
 			return _{{$contract.Type}}.Contract.Parse{{.Normalized.Name}}(log)
 		}
 
- 	{{end}}
+	{{end}}
 {{end}}
 `
 
