@@ -3,6 +3,7 @@ package sproof
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,49 @@ func TestNewBuildsAvailableV2Generation(t *testing.T) {
 			proof.CryptoSuite != suite || proof.ProofBundle.CryptoSuite != suite {
 			t.Fatalf("New(%s) = %+v", suite, proof)
 		}
+	}
+}
+
+func TestCanonicalV2GoldenVectors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		suite      cryptosuite.ID
+		wantBytes  int
+		wantDigest string
+	}{
+		{
+			suite:      cryptosuite.INTLV1,
+			wantBytes:  1268,
+			wantDigest: "5e0547ff15886829fdf49562ca7d2783968730eb760f6977352d5a4fce266219",
+		},
+		{
+			suite:      cryptosuite.CNSMV1,
+			wantBytes:  1270,
+			wantDigest: "e09e8bb5b995fa93c2dad1dcb6db2715027a2ffc044b2c1d08b7aba5a99219fd",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(string(test.suite), func(t *testing.T) {
+			proof := vectorProof()
+			proof.CryptoSuite = test.suite
+			proof.ProofBundle.CryptoSuite = test.suite
+			encoded, err := Marshal(proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(encoded); got != test.wantBytes {
+				t.Fatalf("encoded length = %d", got)
+			}
+			digest, err := Digest(proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := hex.EncodeToString(digest); got != test.wantDigest {
+				t.Fatalf("digest = %s", got)
+			}
+		})
 	}
 }
 
