@@ -178,7 +178,10 @@ func (echoSignedClaimStreamTransport) SubmitSignedClaimStream(_ context.Context,
 	go func() {
 		defer close(out)
 		for item := range in {
-			out <- signedClaimStreamItemResult{Index: item.Index}
+			out <- signedClaimStreamItemResult{
+				Index:  item.Index,
+				Result: validSDKSubmitResult(item.SignedClaim, "tr1-native-stream"),
+			}
 		}
 	}()
 	return out, nil

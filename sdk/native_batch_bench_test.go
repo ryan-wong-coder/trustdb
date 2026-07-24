@@ -60,6 +60,7 @@ func (echoSignedClaimBatchTransport) SubmitSignedClaims(_ context.Context, signe
 	results := make([]signedClaimBatchItemResult, len(signed))
 	for index := range results {
 		results[index].Index = index
+		results[index].Result = validSDKSubmitResult(signed[index], "tr1-native-batch")
 	}
 	return results, nil
 }

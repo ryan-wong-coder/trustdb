@@ -14,6 +14,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/formatregistry"
+	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -421,11 +422,13 @@ func (c *Client) SubscribeStatusRefresh(ctx context.Context, subscriptionID stri
 	if !ok {
 		return nil, nil, &Error{Op: "subscribe status refresh", Message: "transport does not support status subscriptions"}
 	}
-	events, errorsCh, err := transport.SubscribeStatusRefresh(ctx, subscriptionID)
+	streamCtx, cancel := context.WithCancel(nonNilContext(ctx))
+	events, errorsCh, err := transport.SubscribeStatusRefresh(streamCtx, subscriptionID)
 	if err != nil {
+		cancel()
 		return nil, nil, err
 	}
-	validatedEvents, validatedErrors := c.validateStatusRefreshStream(ctx, events, errorsCh)
+	validatedEvents, validatedErrors := c.validateStatusRefreshStream(streamCtx, cancel, events, errorsCh)
 	return validatedEvents, validatedErrors, nil
 }
 
@@ -686,20 +689,61 @@ func (c *Client) mismatch(op string, actual CryptoSuite) error {
 }
 
 func (c *Client) validateSubmitResult(op string, result SubmitResult) error {
-	if result.ServerRecord.SchemaVersion != "" {
-		if err := c.requireSuite(op, result.ServerRecord); err != nil {
-			return err
+	malformed := func(message string) error {
+		return &Error{
+			Op:      op,
+			URL:     c.BaseURL(),
+			Code:    string(trusterr.CodeDataLoss),
+			Message: message,
 		}
 	}
-	if result.AcceptedReceipt.SchemaVersion != "" {
-		if err := c.requireSuite(op, result.AcceptedReceipt); err != nil {
-			return err
-		}
+	if result.ServerRecord.SchemaVersion != model.SchemaServerRecord {
+		return malformed(fmt.Sprintf("server returned unexpected server record schema %q", result.ServerRecord.SchemaVersion))
 	}
-	if result.SignedClaim.SchemaVersion != "" {
-		if err := c.requireSuite(op, result.SignedClaim); err != nil {
-			return err
-		}
+	if err := c.requireSuite(op, result.ServerRecord); err != nil {
+		return err
+	}
+	if result.AcceptedReceipt.SchemaVersion != model.SchemaAcceptedReceipt {
+		return malformed(fmt.Sprintf("server returned unexpected accepted receipt schema %q", result.AcceptedReceipt.SchemaVersion))
+	}
+	if err := c.requireSuite(op, result.AcceptedReceipt); err != nil {
+		return err
+	}
+	if result.SignedClaim.SchemaVersion != model.SchemaSignedClaim ||
+		result.SignedClaim.Claim.SchemaVersion != model.SchemaClientClaim {
+		return malformed(fmt.Sprintf(
+			"server returned unexpected signed claim schemas %q/%q",
+			result.SignedClaim.SchemaVersion,
+			result.SignedClaim.Claim.SchemaVersion,
+		))
+	}
+	if err := c.requireSuite(op, result.SignedClaim); err != nil {
+		return err
+	}
+	if result.RecordID == "" {
+		return malformed("server returned an empty record_id")
+	}
+	if result.Status != model.RecordStatusAccepted {
+		return malformed(fmt.Sprintf("server returned unexpected submit status %q", result.Status))
+	}
+	if result.ProofLevel != ProofLevelL2 {
+		return malformed(fmt.Sprintf("server returned unexpected submit proof_level %q", result.ProofLevel))
+	}
+	if result.ServerRecord.RecordID != result.RecordID ||
+		result.AcceptedReceipt.RecordID != result.RecordID {
+		return malformed("server returned inconsistent submit record_id values")
+	}
+	if result.AcceptedReceipt.Status != result.Status {
+		return malformed("server returned inconsistent submit status values")
+	}
+	if result.Idempotent && result.BatchEnqueued {
+		return malformed("server returned an idempotent result that enqueues a duplicate batch entry")
+	}
+	if result.Idempotent && result.BatchError != "" {
+		return malformed("server returned an idempotent result with batch_error")
+	}
+	if result.BatchEnqueued && result.BatchError != "" {
+		return malformed("server returned batch_enqueued with batch_error")
 	}
 	return nil
 }
@@ -715,6 +759,7 @@ func (c *Client) validateRecordStatuses(op string, statuses RecordStatusBatch) e
 
 func (c *Client) validateStatusRefreshStream(
 	ctx context.Context,
+	cancel context.CancelFunc,
 	events <-chan StatusRefresh,
 	upstreamErrors <-chan error,
 ) (<-chan StatusRefresh, <-chan error) {
@@ -722,6 +767,7 @@ func (c *Client) validateStatusRefreshStream(
 	errs := make(chan error, 1)
 	ctx = nonNilContext(ctx)
 	go func() {
+		defer cancel()
 		defer close(out)
 		defer close(errs)
 		for events != nil || upstreamErrors != nil {

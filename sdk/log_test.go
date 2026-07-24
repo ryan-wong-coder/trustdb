@@ -353,6 +353,17 @@ func TestClientSubmitLogBatchReportsPartialFailure(t *testing.T) {
 				RecordID:   "tr1" + logID,
 				Status:     "accepted",
 				ProofLevel: ProofLevelL2,
+				ServerRecord: ServerRecord{
+					SchemaVersion: model.SchemaServerRecord,
+					CryptoSuite:   cryptosuite.INTLV1,
+					RecordID:      "tr1" + logID,
+				},
+				AcceptedReceipt: AcceptedReceipt{
+					SchemaVersion: model.SchemaAcceptedReceipt,
+					CryptoSuite:   cryptosuite.INTLV1,
+					RecordID:      "tr1" + logID,
+					Status:        model.RecordStatusAccepted,
+				},
 			}
 			submitted++
 		}
@@ -401,6 +412,17 @@ func TestClientSubmitLogStream(t *testing.T) {
 			RecordID:   "tr1" + logID,
 			Status:     "accepted",
 			ProofLevel: ProofLevelL2,
+			ServerRecord: ServerRecord{
+				SchemaVersion: model.SchemaServerRecord,
+				CryptoSuite:   cryptosuite.INTLV1,
+				RecordID:      "tr1" + logID,
+			},
+			AcceptedReceipt: AcceptedReceipt{
+				SchemaVersion: model.SchemaAcceptedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
+				RecordID:      "tr1" + logID,
+				Status:        model.RecordStatusAccepted,
+			},
 		})
 	}))
 	defer server.Close()
@@ -465,6 +487,17 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 			RecordID:   "tr1" + logID,
 			Status:     "accepted",
 			ProofLevel: ProofLevelL2,
+			ServerRecord: ServerRecord{
+				SchemaVersion: model.SchemaServerRecord,
+				CryptoSuite:   cryptosuite.INTLV1,
+				RecordID:      "tr1" + logID,
+			},
+			AcceptedReceipt: AcceptedReceipt{
+				SchemaVersion: model.SchemaAcceptedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
+				RecordID:      "tr1" + logID,
+				Status:        model.RecordStatusAccepted,
+			},
 		})
 	}))
 	defer server.Close()
@@ -660,8 +693,8 @@ func (stubTransport) Endpoint() string { return "stub" }
 func (stubTransport) CheckHealth(context.Context) HealthStatus {
 	return HealthStatus{OK: true, ServerURL: "stub"}
 }
-func (stubTransport) SubmitSignedClaim(context.Context, SignedClaim) (SubmitResult, error) {
-	return SubmitResult{}, nil
+func (stubTransport) SubmitSignedClaim(_ context.Context, signed SignedClaim) (SubmitResult, error) {
+	return validSDKSubmitResult(signed, "tr1-stub"), nil
 }
 func (stubTransport) GetRecord(context.Context, string) (RecordIndex, error) {
 	return RecordIndex{}, nil

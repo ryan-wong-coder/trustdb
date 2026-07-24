@@ -177,7 +177,18 @@ func (t *capturingSignedClaimBatchTransport) SubmitSignedClaims(_ context.Contex
 	t.mu.Lock()
 	t.signed = append([]SignedClaim(nil), signed...)
 	t.mu.Unlock()
-	return t.results, nil
+	results := append([]signedClaimBatchItemResult(nil), t.results...)
+	for index := range results {
+		if results[index].Err != nil || results[index].Index < 0 || results[index].Index >= len(signed) {
+			continue
+		}
+		recordID := results[index].Result.RecordID
+		if recordID == "" {
+			recordID = "tr1-native-batch"
+		}
+		results[index].Result = validSDKSubmitResult(signed[results[index].Index], recordID)
+	}
+	return results, nil
 }
 
 func (t *capturingSignedClaimBatchTransport) idempotencyKeys() []string {

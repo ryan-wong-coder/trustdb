@@ -208,6 +208,7 @@ func (t *httpTransport) GetStatusSubscriptionStatuses(ctx context.Context, subsc
 func (t *httpTransport) SubscribeStatusRefresh(ctx context.Context, subscriptionID string) (<-chan StatusRefresh, <-chan error, error) {
 	path := "/v2/status-subscriptions/" + url.PathEscape(subscriptionID) + "/events"
 	endpoint := t.endpoint(path, nil)
+	ctx = nonNilContext(ctx)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, nil, &Error{Op: "subscribe status refresh", URL: endpoint, Err: err}

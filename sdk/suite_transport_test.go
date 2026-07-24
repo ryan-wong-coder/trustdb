@@ -99,6 +99,72 @@ func TestClientRejectsRequestSuiteMismatchBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestClientRejectsIncompleteSubmitContract(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  submitClaimEnvelope
+	}{
+		{name: "empty response"},
+		{
+			name: "suite without schema",
+			env: submitClaimEnvelope{
+				RecordID:   "tr1-partial",
+				Status:     "accepted",
+				ProofLevel: ProofLevelL2,
+				ServerRecord: ServerRecord{
+					CryptoSuite: cryptosuite.CNSMV1,
+					RecordID:    "tr1-partial",
+				},
+				AcceptedReceipt: AcceptedReceipt{
+					CryptoSuite: cryptosuite.CNSMV1,
+					RecordID:    "tr1-partial",
+					Status:      "accepted",
+				},
+			},
+		},
+		{
+			name: "inconsistent record ids",
+			env: submitClaimEnvelope{
+				RecordID:   "tr1-envelope",
+				Status:     "accepted",
+				ProofLevel: ProofLevelL2,
+				ServerRecord: ServerRecord{
+					SchemaVersion: model.SchemaServerRecord,
+					CryptoSuite:   cryptosuite.INTLV1,
+					RecordID:      "tr1-record",
+				},
+				AcceptedReceipt: AcceptedReceipt{
+					SchemaVersion: model.SchemaAcceptedReceipt,
+					CryptoSuite:   cryptosuite.INTLV1,
+					RecordID:      "tr1-envelope",
+					Status:        "accepted",
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSONForTest(t, w, http.StatusAccepted, tt.env)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.SubmitSignedClaim(context.Background(), intlSignedClaimFixture())
+			var sdkErr *Error
+			if !errors.As(err, &sdkErr) || sdkErr.Code != "DATA_LOSS" {
+				t.Fatalf("SubmitSignedClaim error=%v, want SDK DATA_LOSS", err)
+			}
+		})
+	}
+}
+
 func TestClientRejectsMismatchedSuiteBoundTransport(t *testing.T) {
 	t.Parallel()
 
@@ -186,11 +252,19 @@ func TestCNSMV1LoadBalancedClientRetriesTransientEndpoint(t *testing.T) {
 	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		secondaryHits.Add(1)
 		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID: "tr1-cn-secondary",
+			RecordID:   "tr1-cn-secondary",
+			Status:     model.RecordStatusAccepted,
+			ProofLevel: ProofLevelL2,
 			ServerRecord: ServerRecord{
 				SchemaVersion: model.SchemaServerRecord,
 				CryptoSuite:   cryptosuite.CNSMV1,
 				RecordID:      "tr1-cn-secondary",
+			},
+			AcceptedReceipt: AcceptedReceipt{
+				SchemaVersion: model.SchemaAcceptedReceipt,
+				CryptoSuite:   cryptosuite.CNSMV1,
+				RecordID:      "tr1-cn-secondary",
+				Status:        model.RecordStatusAccepted,
 			},
 		})
 	}))
@@ -348,9 +422,30 @@ func (t *capturingSuiteStreamTransport) SubmitSignedClaimStream(
 			t.received <- item.SignedClaim
 			output <- signedClaimStreamItemResult{
 				Index:  item.Index,
-				Result: SubmitResult{SignedClaim: item.SignedClaim},
+				Result: validSDKSubmitResult(item.SignedClaim, "tr1-cn-stream"),
 			}
 		}
 	}()
 	return output, nil
+}
+
+func validSDKSubmitResult(signed SignedClaim, recordID string) SubmitResult {
+	return SubmitResult{
+		RecordID:      recordID,
+		Status:        model.RecordStatusAccepted,
+		ProofLevel:    ProofLevelL2,
+		BatchEnqueued: true,
+		ServerRecord: ServerRecord{
+			SchemaVersion: model.SchemaServerRecord,
+			CryptoSuite:   signed.CryptoSuite,
+			RecordID:      recordID,
+		},
+		AcceptedReceipt: AcceptedReceipt{
+			SchemaVersion: model.SchemaAcceptedReceipt,
+			CryptoSuite:   signed.CryptoSuite,
+			RecordID:      recordID,
+			Status:        model.RecordStatusAccepted,
+		},
+		SignedClaim: signed,
+	}
 }

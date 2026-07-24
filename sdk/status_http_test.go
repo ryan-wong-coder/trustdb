@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -90,4 +91,68 @@ func TestHTTPStatusSubscriptionSDK(t *testing.T) {
 	if err := client.DeleteStatusSubscription(ctx, subscription.ID); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestStatusRefreshSuiteFailureCancelsUpstream(t *testing.T) {
+	t.Parallel()
+
+	transport := &cancelProbeStatusTransport{canceled: make(chan struct{})}
+	client, err := NewClientWithTransport(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, errorsCh, err := client.SubscribeStatusRefresh(nil, "tss1-cancel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case streamErr := <-errorsCh:
+		var sdkErr *Error
+		if !errors.As(streamErr, &sdkErr) || sdkErr.Code != "FAILED_PRECONDITION" {
+			t.Fatalf("stream error=%v, want FAILED_PRECONDITION", streamErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for suite validation error")
+	}
+	select {
+	case <-transport.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("validated stream did not cancel its upstream context")
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("validated event channel remained open")
+	}
+}
+
+type cancelProbeStatusTransport struct {
+	stubTransport
+	canceled chan struct{}
+}
+
+func (*cancelProbeStatusTransport) CreateStatusSubscription(context.Context, CreateStatusSubscriptionOptions) (StatusSubscription, error) {
+	return StatusSubscription{}, nil
+}
+
+func (*cancelProbeStatusTransport) DeleteStatusSubscription(context.Context, string) error {
+	return nil
+}
+
+func (*cancelProbeStatusTransport) GetStatusSubscriptionStatuses(context.Context, string) (RecordStatusBatch, error) {
+	return RecordStatusBatch{}, nil
+}
+
+func (t *cancelProbeStatusTransport) SubscribeStatusRefresh(ctx context.Context, _ string) (<-chan StatusRefresh, <-chan error, error) {
+	events := make(chan StatusRefresh, 1)
+	errorsCh := make(chan error)
+	events <- StatusRefresh{
+		SchemaVersion: model.SchemaStatusRefresh,
+		CryptoSuite:   cryptosuite.CNSMV1,
+	}
+	go func() {
+		<-ctx.Done()
+		close(t.canceled)
+		close(events)
+		close(errorsCh)
+	}()
+	return events, errorsCh, nil
 }
