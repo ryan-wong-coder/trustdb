@@ -34,6 +34,15 @@ type wrappedSM4KeyPayload struct {
 }
 
 func NewWrappedSM4Key(device DeviceIdentity, kekID string, kekIndex uint32, wrapped []byte) (WrappedSM4Key, error) {
+	if err := validateIdentity(device); err != nil {
+		return WrappedSM4Key{}, wrappedSM4Error("device identity is invalid")
+	}
+	if !validIdentifier(kekID, 256) || kekIndex == 0 {
+		return WrappedSM4Key{}, wrappedSM4Error("KEK identity is invalid")
+	}
+	if len(wrapped) == 0 || len(wrapped) > MaxWrappedKeyBytes {
+		return WrappedSM4Key{}, wrappedSM4Error("wrapped key length is invalid")
+	}
 	value := WrappedSM4Key{
 		SchemaVersion: WrappedSM4KeySchemaV1,
 		CryptoSuite:   signerplugin.SuiteCNSMV1,
