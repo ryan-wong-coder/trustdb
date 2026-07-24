@@ -344,7 +344,9 @@ type nativeSession struct {
 	backend *nativeBackend
 	session C.trustdb_sdf_session_v1
 
+	mu        sync.Mutex
 	closeOnce sync.Once
+	closeErr  error
 }
 
 func (s *nativeSession) Health(ctx context.Context) error {
@@ -532,23 +534,30 @@ func (s *nativeSession) Close() error {
 	if s == nil || s.backend == nil {
 		return nil
 	}
-	var closeErr error
 	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		s.backend.mu.RLock()
 		defer s.backend.mu.RUnlock()
 		if s.backend.closed || s.session == nil {
+			s.session = nil
 			return
 		}
-		closeErr = classifyNativeStatus(C.trustdb_sdf_close_session(&s.backend.api, s.session))
+		s.closeErr = classifyNativeStatus(C.trustdb_sdf_close_session(&s.backend.api, s.session))
 		s.session = nil
 	})
-	return closeErr
+	return s.closeErr
 }
 
 func (s *nativeSession) call(ctx context.Context, operation func() C.trustdb_sdf_status_v1) error {
+	if s == nil || s.backend == nil {
+		return newFault(faultUnavailable)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.backend.mu.RLock()
 	defer s.backend.mu.RUnlock()
 	if s.backend.closed || s.session == nil {

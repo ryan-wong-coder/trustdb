@@ -5,11 +5,13 @@ package sdfsigner
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wowtrust/trustdb/sdk/signerplugin"
 )
@@ -133,6 +135,65 @@ func TestOpenNativeBackendRejectsNonAdapterLibraryWithoutPathLeak(t *testing.T) 
 	requireProviderCode(t, providerError(err), signerplugin.ErrorUnavailable)
 	if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "customer-secret") {
 		t.Fatalf("loader error leaked path: %v", err)
+	}
+}
+
+func TestNativeSessionCloseWaitsForInFlightCall(t *testing.T) {
+	library := buildFakeNativeAdapter(t)
+	entered := filepath.Join(t.TempDir(), "entered")
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv("TRUSTDB_SDF_FAKE_RANDOM_ENTERED", entered)
+	t.Setenv("TRUSTDB_SDF_FAKE_RANDOM_RELEASE", release)
+	backend, err := OpenNativeBackend(library, []byte("random=blocking"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	device, err := backend.Discover(context.Background(), "sdf-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := device.OpenSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	randomDone := make(chan error, 1)
+	go func() {
+		_, randomErr := session.Random(context.Background(), 64)
+		randomDone <- randomErr
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, statErr := os.Stat(entered); statErr == nil {
+			break
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal(statErr)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("native random call did not enter adapter")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- session.Close()
+	}()
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("Close() returned while native call was in flight: %v", closeErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-randomDone; err != nil {
+		t.Fatalf("Random() = %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+	if _, err := session.Random(context.Background(), 1); err == nil {
+		t.Fatal("Random() succeeded after Close()")
 	}
 }
 

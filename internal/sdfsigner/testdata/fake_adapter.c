@@ -1,11 +1,14 @@
 #include "trustdb_sdf_adapter_v1.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct fake_device {
   int health_busy;
   int bad_identity;
+  int block_random;
 } fake_device;
 
 typedef struct fake_session {
@@ -29,6 +32,9 @@ static trustdb_sdf_status_v1 fake_open_device(
   }
   if (config_len == 12 && memcmp(config, "bad-identity", 12) == 0) {
     value->bad_identity = 1;
+  }
+  if (config_len == 15 && memcmp(config, "random=blocking", 15) == 0) {
+    value->block_random = 1;
   }
   *device = value;
   return TRUSTDB_SDF_OK;
@@ -171,9 +177,35 @@ static trustdb_sdf_status_v1 fake_sign_digest(
 static trustdb_sdf_status_v1 fake_random(
     trustdb_sdf_session_v1 session, uint8_t *output,
     uint32_t output_len) {
+  fake_session *value = (fake_session *)session;
   uint32_t index;
-  if (session == NULL || output == NULL || output_len == 0) {
+  if (value == NULL || output == NULL || output_len == 0) {
     return TRUSTDB_SDF_INVALID_ARGUMENT;
+  }
+  if (value->device->block_random) {
+    const char *entered_path = getenv("TRUSTDB_SDF_FAKE_RANDOM_ENTERED");
+    const char *release_path = getenv("TRUSTDB_SDF_FAKE_RANDOM_RELEASE");
+    FILE *marker;
+    struct timespec delay = {0, 1000000};
+    if (entered_path == NULL || release_path == NULL) {
+      return TRUSTDB_SDF_INTERNAL;
+    }
+    marker = fopen(entered_path, "wb");
+    if (marker == NULL) {
+      return TRUSTDB_SDF_INTERNAL;
+    }
+    fclose(marker);
+    for (index = 0; index < 5000; index++) {
+      marker = fopen(release_path, "rb");
+      if (marker != NULL) {
+        fclose(marker);
+        break;
+      }
+      nanosleep(&delay, NULL);
+    }
+    if (index == 5000) {
+      return TRUSTDB_SDF_INTERNAL;
+    }
   }
   for (index = 0; index < output_len; index++) {
     output[index] = (uint8_t)(index ^ 0xa5);
