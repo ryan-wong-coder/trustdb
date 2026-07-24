@@ -24,6 +24,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/claim"
 	trustconfig "github.com/wowtrust/trustdb/internal/config"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/httpapi"
@@ -32,6 +33,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/l5projector"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/natsingress"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -1575,6 +1577,10 @@ func validateCommittedReplayIndex(ctx context.Context, store proofstore.Store, m
 }
 
 func validateCommittedReplayRecord(ctx context.Context, store proofstore.Store, manifests *replayManifestCache, record wal.Record, item app.ReplayedAccepted, idx model.RecordIndex) (string, model.ProofBundle, error) {
+	suite, err := cryptosuite.RequireAvailable(record.CryptoSuite)
+	if err != nil {
+		return "", model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "replayed wal record crypto_suite", err)
+	}
 	recordID := item.Record.RecordID
 	manifest, err := validateCommittedReplayIndex(ctx, store, manifests, recordID, idx)
 	if err != nil {
@@ -1605,15 +1611,26 @@ func validateCommittedReplayRecord(ctx context.Context, store proofstore.Store, 
 		!bytes.Equal(bundle.ServerRecord.ClaimHash, item.Record.ClaimHash) {
 		return "", model.ProofBundle{}, trusterr.New(trusterr.CodeDataLoss, "proof bundle server record does not match the replayed claim")
 	}
-	if err := validateProofBundleClaim(bundle); err != nil {
+	if err := validateProofBundleClaim(suite.ID, bundle); err != nil {
 		return "", model.ProofBundle{}, err
 	}
-	leafHash, err := merkle.HashLeaf(bundle.ServerRecord)
+	leafHash, err := merkle.HashLeafForSuite(suite.ID, suite.Merkle.Algorithm, bundle.ServerRecord)
 	if err != nil {
 		return "", model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "hash replay proof bundle leaf", err)
 	}
-	if !bytes.Equal(leafHash, bundle.CommittedReceipt.LeafHash) ||
-		!merkle.Verify(leafHash, idx.BatchLeafIndex, manifest.TreeSize, bundle.BatchProof.AuditPath, manifest.BatchRoot) {
+	pathValid, err := merkle.VerifyForSuite(
+		suite.ID,
+		suite.Merkle.Algorithm,
+		leafHash,
+		idx.BatchLeafIndex,
+		manifest.TreeSize,
+		bundle.BatchProof.AuditPath,
+		manifest.BatchRoot,
+	)
+	if err != nil {
+		return "", model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "verify replay proof bundle merkle path", err)
+	}
+	if !bytes.Equal(leafHash, bundle.CommittedReceipt.LeafHash) || !pathValid {
 		return "", model.ProofBundle{}, trusterr.New(trusterr.CodeDataLoss, "proof bundle merkle path does not match its committed batch manifest")
 	}
 	return idx.BatchID, bundle, nil
@@ -1674,7 +1691,17 @@ func validateDurableReplayDecision(ctx context.Context, engine app.LocalEngine, 
 	if bundle == nil {
 		return trusterr.New(trusterr.CodeDataLoss, "committed wal record has no persisted proof bundle")
 	}
-	expected, err := idempotency.BuildDecision(batchID, bundle.SignedClaim, bundle.ServerRecord, bundle.AcceptedReceipt)
+	provider, err := trustcrypto.ProviderForSuite(item.Signed.CryptoSuite)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "build replay idempotency crypto provider", err)
+	}
+	expected, err := idempotency.BuildDecisionWithProvider(
+		provider,
+		batchID,
+		bundle.SignedClaim,
+		bundle.ServerRecord,
+		bundle.AcceptedReceipt,
+	)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "build replay idempotency decision", err)
 	}
@@ -1684,7 +1711,18 @@ func validateDurableReplayDecision(ctx context.Context, engine app.LocalEngine, 
 	return nil
 }
 
-func validateProofBundleClaim(bundle model.ProofBundle) error {
+func validateProofBundleClaim(suiteID cryptosuite.ID, bundle model.ProofBundle) error {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "checkpointed proof crypto_suite", err)
+	}
+	if err := modelsuite.Require(suite.ID, bundle); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "checkpointed proof suite binding", err)
+	}
+	provider, err := trustcrypto.ProviderForSuite(suite.ID)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "checkpointed proof crypto provider", err)
+	}
 	signed := bundle.SignedClaim
 	record := bundle.ServerRecord
 	accepted := bundle.AcceptedReceipt
@@ -1703,15 +1741,19 @@ func validateProofBundleClaim(bundle model.ProofBundle) error {
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "canonicalize checkpointed proof claim", err)
 	}
-	claimHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, claimCBOR)
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, claimCBOR)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "hash checkpointed proof claim", err)
 	}
-	signatureHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, signed.Signature.Signature)
+	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "hash checkpointed proof signature", err)
 	}
-	if claim.RecordID(claimCBOR, signed.Signature) != record.RecordID ||
+	recordID, err := claim.RecordIDWithProvider(provider, claimCBOR, signed.Signature)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "derive checkpointed proof record id", err)
+	}
+	if recordID != record.RecordID ||
 		!bytes.Equal(claimHash, record.ClaimHash) ||
 		!bytes.Equal(signatureHash, record.ClientSignatureHash) {
 		return trusterr.New(trusterr.CodeDataLoss, "checkpointed proof claim is not bound to its server record")

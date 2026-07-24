@@ -17,6 +17,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/claim"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/idempotency"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -24,6 +25,20 @@ import (
 	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
+
+type fixedDurableDecision struct {
+	decision model.IdempotencyDecision
+}
+
+func (f fixedDurableDecision) GetIdempotencyDecision(
+	_ context.Context,
+	identity model.IdempotencyIdentity,
+) (model.IdempotencyDecision, bool, error) {
+	if identity != f.decision.Identity {
+		return model.IdempotencyDecision{}, false, nil
+	}
+	return f.decision, true, nil
+}
 
 func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 	t.Parallel()
@@ -116,6 +131,170 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.AcceptedReceipt, wantAccepted) {
 		t.Fatalf("replayed AcceptedReceipt mismatch\n got: %+v\nwant: %+v", got.AcceptedReceipt, wantAccepted)
+	}
+}
+
+func TestValidateCommittedReplayRecordCNSMV1(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	provider, err := trustcrypto.ProviderForSuite(cryptosuite.CNSMV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPublic, clientPrivate, err := trustcrypto.GenerateSM2Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, serverPrivate, err := trustcrypto.GenerateSM2Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientSigner, err := trustcrypto.NewSM2Signer("client-cn", clientPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSigner, err := trustcrypto.NewSM2Signer("server-cn", serverPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientDescriptor, err := trustcrypto.NewSM2PublicKey("client-cn", clientPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("cn replay checkpoint")
+	contentHash, err := trustcrypto.HashBytesWithProvider(provider, cryptosuite.HashSM3, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned, err := claim.NewFileClaimForSuite(
+		cryptosuite.CNSMV1,
+		"tenant-cn",
+		"client-cn",
+		"client-cn",
+		time.Unix(100, 0),
+		bytes.Repeat([]byte{0x42}, 16),
+		"cn-replay-checkpoint",
+		model.Content{
+			HashAlg:       cryptosuite.HashSM3,
+			ContentHash:   contentHash,
+			ContentLength: int64(len(raw)),
+		},
+		model.Metadata{EventType: "cn.replay"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := claim.SignWithProvider(ctx, provider, unsigned, clientSigner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	walPath := filepath.Join(t.TempDir(), "records.wal")
+	walOptions := wal.Options{
+		CryptoSuite: cryptosuite.CNSMV1,
+		NodeID:      "node-cn",
+		LogID:       "log-cn",
+		NamespaceID: "wal:" + walPath,
+	}
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, walOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	engine := app.LocalEngine{
+		ServerID:        "node-cn",
+		LogID:           "log-cn",
+		ServerKeyID:     "server-cn",
+		ClientPublicKey: clientDescriptor,
+		ServerSigner:    serverSigner,
+		CryptoProvider:  provider,
+		WAL:             writer,
+		Now:             func() time.Time { return time.Unix(200, 0) },
+	}
+	record, accepted, _, err := engine.Submit(ctx, signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const batchID = "batch-cn-replay"
+	closedAt := time.Unix(300, 0).UTC()
+	bundles, err := engine.CommitBatch(
+		batchID,
+		closedAt,
+		[]model.SignedClaim{signed},
+		[]model.ServerRecord{record},
+		[]model.AcceptedReceipt{accepted},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := newBoundTestLocalStoreForSuite(t, t.TempDir(), cryptosuite.CNSMV1)
+	if err := store.PutBundle(ctx, bundles[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutManifest(ctx, model.BatchManifest{
+		SchemaVersion:    model.SchemaBatchManifest,
+		CryptoSuite:      cryptosuite.CNSMV1,
+		BatchID:          batchID,
+		NodeID:           "node-cn",
+		LogID:            "log-cn",
+		State:            model.BatchStateCommitted,
+		TreeAlg:          cryptosuite.MerkleRFC6962SM3,
+		TreeSize:         1,
+		BatchRoot:        bundles[0].CommittedReceipt.BatchRoot,
+		RecordIDs:        []string{record.RecordID},
+		WALRange:         model.WALRange{From: record.WAL, To: record.WAL},
+		ClosedAtUnixN:    closedAt.UnixNano(),
+		CommittedAtUnixN: closedAt.Add(time.Nanosecond).UnixNano(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	index, ok, err := store.GetRecordIndex(ctx, record.RecordID)
+	if err != nil || !ok {
+		t.Fatalf("GetRecordIndex() ok=%v err=%v", ok, err)
+	}
+	walRecord := wal.Record{CryptoSuite: cryptosuite.CNSMV1, Position: record.WAL}
+	item := app.ReplayedAccepted{Signed: signed, Record: record, Accepted: accepted}
+	gotBatchID, gotBundle, err := validateCommittedReplayRecord(
+		ctx,
+		store,
+		newReplayManifestCache(),
+		walRecord,
+		item,
+		index,
+	)
+	if err != nil {
+		t.Fatalf("validateCommittedReplayRecord() error = %v", err)
+	}
+	if gotBatchID != batchID || gotBundle.RecordID != record.RecordID {
+		t.Fatalf("validateCommittedReplayRecord() batch=%q record=%q", gotBatchID, gotBundle.RecordID)
+	}
+	decision, err := idempotency.BuildDecisionWithProvider(
+		provider,
+		batchID,
+		bundles[0].SignedClaim,
+		bundles[0].ServerRecord,
+		bundles[0].AcceptedReceipt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.DurableIdempotency = fixedDurableDecision{decision: decision}
+	if err := validateDurableReplayDecision(ctx, engine, item, &gotBundle, batchID, true); err != nil {
+		t.Fatalf("validateDurableReplayDecision() error = %v", err)
+	}
+
+	walRecord.CryptoSuite = cryptosuite.INTLV1
+	if _, _, err := validateCommittedReplayRecord(
+		ctx,
+		store,
+		newReplayManifestCache(),
+		walRecord,
+		item,
+		index,
+	); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		t.Fatalf("mixed-suite replay error = %v, want DATA_LOSS", err)
 	}
 }
 
