@@ -39,7 +39,7 @@ import (
 
 const (
 	defaultNamespace = "default"
-	namespacePrefix  = "trustdb/proofstore/v1/ns/"
+	namespacePrefix  = "trustdb/proofstore/v5/ns/"
 )
 
 // maxStoredObjectBytes caps decode input size to guard against corrupt
@@ -506,10 +506,10 @@ const (
 	prefixGlobalStatus   = "global/outbox-status/"
 	prefixGlobalStream   = "global/outbox-stream-status/"
 	prefixAnchorResult   = "anchor/sth-result/v2/"
-	prefixAnchorLatest   = "anchor/sth-latest/v1/"
-	prefixAnchorTreeRoot = "anchor/sth-tree-root/v1/"
-	prefixAnchorSchedule = "anchor/sth-schedule/v1/"
-	prefixL5Coverage     = "anchor/l5-coverage/v1/"
+	prefixAnchorLatest   = "anchor/sth-latest/v2/"
+	prefixAnchorTreeRoot = "anchor/sth-tree-root/v2/"
+	prefixAnchorSchedule = "anchor/sth-schedule/v2/"
+	prefixL5Coverage     = "anchor/l5-coverage/v2/"
 	prefixCheckpoint     = "checkpoint/wal/v2/"
 	prefixIdempotency    = "idempotency/decision/"
 	storageSchemaKey     = "meta/storage-schema"

@@ -78,6 +78,42 @@ func TestPebbleEnablesPruningAfterDurableRestartIdempotency(t *testing.T) {
 	}
 }
 
+func TestPebbleV2AnchorKeyspaceDoesNotReadV1Schedule(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+	store, err := openPebbleTestStore(path)
+	if err != nil {
+		t.Fatalf("initialize v5 proofstore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close initialized store: %v", err)
+	}
+	db, err := pdb.Open(path, &pdb.Options{})
+	if err != nil {
+		t.Fatalf("open raw Pebble: %v", err)
+	}
+	if err := db.Set([]byte("anchor/schedule/v1/legacy"), []byte{0xa0}, pdb.Sync); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed v1 schedule key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw Pebble: %v", err)
+	}
+	store, err = openPebbleTestStore(path)
+	if err != nil {
+		t.Fatalf("reopen v5 proofstore: %v", err)
+	}
+	defer store.Close()
+	schedules, err := proofstore.STHAnchorScheduleStore(store).ListSTHAnchorSchedules(context.Background())
+	if err != nil {
+		t.Fatalf("list v2 schedules: %v", err)
+	}
+	if len(schedules) != 0 {
+		t.Fatalf("v2 keyspace exposed v1 schedule: %+v", schedules)
+	}
+}
+
 func TestPebbleSTHAnchorScheduleSurvivesRestartAndPreservesResult(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

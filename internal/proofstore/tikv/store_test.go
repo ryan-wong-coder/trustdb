@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -657,11 +658,33 @@ func TestNamespaceKeyPrefix(t *testing.T) {
 
 	got := namespaceKeyPrefix("tenant-a/log-a")
 	wantSuffix := base64.RawURLEncoding.EncodeToString([]byte("tenant-a/log-a")) + "/"
-	if !bytes.HasPrefix(got, []byte(namespacePrefix)) {
-		t.Fatalf("namespace prefix %q does not start with %q", got, namespacePrefix)
+	if wantPrefix := "trustdb/proofstore/v5/ns/"; namespacePrefix != wantPrefix || !bytes.HasPrefix(got, []byte(wantPrefix)) {
+		t.Fatalf("namespace prefix %q does not start with v5 prefix %q", got, wantPrefix)
 	}
 	if !bytes.HasSuffix(got, []byte(wantSuffix)) {
 		t.Fatalf("namespace prefix %q does not end with encoded namespace %q", got, wantSuffix)
+	}
+}
+
+func TestV5NamespaceDoesNotReadV1PhysicalKeys(t *testing.T) {
+	t.Parallel()
+
+	namespace := "tenant-a/log-a"
+	currentPrefix := namespaceKeyPrefix(namespace)
+	db, _ := newMockTiKVDB(t, string(currentPrefix))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(namespace))
+	legacyKey := []byte("trustdb/proofstore/v1/ns/" + encoded + "/" + storageSchemaKey)
+	if err := db.rawSet(legacyKey, []byte("legacy-marker")); err != nil {
+		t.Fatalf("seed v1 physical key: %v", err)
+	}
+	if _, closer, err := db.Get([]byte(storageSchemaKey)); !errors.Is(err, errNotFound) {
+		if err == nil {
+			_ = closer.Close()
+		}
+		t.Fatalf("v5 namespace read v1 key: %v", err)
+	}
+	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-v5", "log-v5", namespace); err != nil {
+		t.Fatalf("initialize empty v5 namespace: %v", err)
 	}
 }
 
