@@ -94,6 +94,7 @@ func BuildDecisionWithProvider(
 	}
 	decision := model.IdempotencyDecision{
 		SchemaVersion: model.SchemaIdempotencyDecision,
+		CryptoSuite:   suite.ID,
 		Identity:      identity,
 		ClaimHash:     append([]byte(nil), claimHash...),
 		Record:        cloneRecord(record),
@@ -124,6 +125,9 @@ func ValidateDecisionForSuite(suiteID cryptosuite.ID, identity model.Idempotency
 	}
 	if decision.SchemaVersion != model.SchemaIdempotencyDecision {
 		return fmt.Errorf("idempotency: unexpected decision schema %q", decision.SchemaVersion)
+	}
+	if err := cryptosuite.RequireSame(suite.ID, decision.CryptoSuite, decision.Record.CryptoSuite, decision.Accepted.CryptoSuite); err != nil {
+		return fmt.Errorf("idempotency: crypto_suite: %w", err)
 	}
 	if decision.Identity != identity {
 		return errors.New("idempotency: decision identity does not match lookup identity")

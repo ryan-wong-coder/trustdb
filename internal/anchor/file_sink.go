@@ -2,7 +2,7 @@ package anchor
 
 import (
 	"context"
-	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -39,6 +41,9 @@ type FileSink struct {
 // replay the log without touching the proofstore.
 type FileAnchorEntry struct {
 	SchemaVersion     string `json:"schema_version"`
+	CryptoSuite       string `json:"crypto_suite"`
+	NodeID            string `json:"node_id"`
+	LogID             string `json:"log_id"`
 	SinkName          string `json:"sink_name"`
 	AnchorID          string `json:"anchor_id"`
 	RootHashHex       string `json:"root_hash_hex"`
@@ -91,9 +96,15 @@ func (s *FileSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model
 	}
 
 	now := time.Now().UTC().UnixNano()
-	anchorID := DeterministicFileAnchorID(sth)
+	anchorID, err := deterministicAnchorID(FileSinkName, "file2-", sth)
+	if err != nil {
+		return model.STHAnchorResult{}, fmt.Errorf("%w: %v", ErrPermanent, err)
+	}
 	entry := FileAnchorEntry{
-		SchemaVersion:     "trustdb.anchor-file-entry.v1",
+		SchemaVersion:     "trustdb.anchor-file-entry.v2",
+		CryptoSuite:       string(sth.CryptoSuite),
+		NodeID:            sth.NodeID,
+		LogID:             sth.LogID,
 		SinkName:          s.Name(),
 		AnchorID:          anchorID,
 		RootHashHex:       hex.EncodeToString(sth.RootHash),
@@ -126,6 +137,7 @@ func (s *FileSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model
 	}
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		CryptoSuite:      sth.CryptoSuite,
 		NodeID:           sth.NodeID,
 		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,
@@ -146,18 +158,56 @@ func (s *FileSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model
 // recompute the id from a trusted STH and compare it against an
 // STHAnchorResult, which proves the sink did not lie about the id.
 func DeterministicFileAnchorID(sth model.SignedTreeHead) string {
-	h := sha256.New()
-	h.Write([]byte(FileSinkName))
-	h.Write([]byte{0})
-	h.Write([]byte(fmt.Sprintf("%d", sth.TreeSize)))
-	h.Write([]byte{0})
-	h.Write(sth.RootHash)
-	return "file-" + hex.EncodeToString(h.Sum(nil))[:32]
+	id, _ := deterministicAnchorID(FileSinkName, "file2-", sth)
+	return id
 }
 
 // DeterministicNoopAnchorID mirrors DeterministicFileAnchorID for the
 // NoopSink. Kept separate so verifiers have a single authoritative
 // source for each sink's id derivation.
 func DeterministicNoopAnchorID(sth model.SignedTreeHead) string {
-	return fmt.Sprintf("noop-sth-%d", sth.TreeSize)
+	id, _ := deterministicAnchorID(NoopSinkName, "noop2-", sth)
+	return id
+}
+
+func deterministicAnchorID(sinkName, prefix string, sth model.SignedTreeHead) (string, error) {
+	suite, err := cryptosuite.RequireAvailable(sth.CryptoSuite)
+	if err != nil {
+		return "", fmt.Errorf("anchor crypto_suite: %w", err)
+	}
+	if sth.TreeSize == 0 {
+		return "", fmt.Errorf("tree_size is empty")
+	}
+	if len(sth.RootHash) != suite.AnchorDigest.DigestBytes {
+		return "", fmt.Errorf(
+			"root_hash must be %d bytes for %s, got %d",
+			suite.AnchorDigest.DigestBytes,
+			suite.ID,
+			len(sth.RootHash),
+		)
+	}
+
+	input := make([]byte, 0, 128+len(sth.NodeID)+len(sth.LogID))
+	input = appendLengthFramed(input, []byte("trustdb.anchor-id.v2"))
+	input = appendLengthFramed(input, []byte(sinkName))
+	input = appendLengthFramed(input, []byte(sth.CryptoSuite))
+	input = appendLengthFramed(input, []byte(sth.NodeID))
+	input = appendLengthFramed(input, []byte(sth.LogID))
+	var treeSize [8]byte
+	binary.BigEndian.PutUint64(treeSize[:], sth.TreeSize)
+	input = appendLengthFramed(input, treeSize[:])
+	input = appendLengthFramed(input, sth.RootHash)
+
+	digest, err := trustcrypto.HashBytesForSuite(sth.CryptoSuite, suite.AnchorDigest.Algorithm, input)
+	if err != nil {
+		return "", fmt.Errorf("hash anchor id: %w", err)
+	}
+	return prefix + hex.EncodeToString(digest)[:32], nil
+}
+
+func appendLengthFramed(dst, value []byte) []byte {
+	var size [4]byte
+	binary.BigEndian.PutUint32(size[:], uint32(len(value)))
+	dst = append(dst, size[:]...)
+	return append(dst, value...)
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
-const SchemaDeadLetter = "trustdb.nats-dead-letter.v1"
+const SchemaDeadLetter = "trustdb.nats-dead-letter.v2"
 
 // DeadLetter is the complete, deterministic copy of one rejected JetStream
 // delivery. Its identity is derived from broker metadata and raw content; a
@@ -36,7 +36,7 @@ type DeadLetter struct {
 func NewDeadLetter(rejection Rejection) (DeadLetter, error) {
 	deadLetter := DeadLetter{
 		SchemaVersion:    SchemaDeadLetter,
-		FormatGeneration: formatregistry.NATSV1,
+		FormatGeneration: formatregistry.NATSV2,
 		ID:               rejection.ID,
 		Subject:          rejection.Subject,
 		Reply:            rejection.Reply,
@@ -72,7 +72,7 @@ func EncodeDeadLetter(deadLetter DeadLetter) ([]byte, error) {
 
 func DecodeDeadLetter(data []byte) (DeadLetter, error) {
 	var deadLetter DeadLetter
-	if err := cborx.UnmarshalLimit(data, &deadLetter, MaxDeadLetterBytes); err != nil {
+	if err := cborx.UnmarshalLimits(data, &deadLetter, MaxDeadLetterBytes, maxCBORArrayItems, maxCBORMapPairs); err != nil {
 		return DeadLetter{}, fmt.Errorf("decode NATS dead-letter message: %w", err)
 	}
 	if err := deadLetter.Validate(); err != nil {
@@ -85,7 +85,7 @@ func (d DeadLetter) Validate() error {
 	if d.SchemaVersion != SchemaDeadLetter {
 		return fmt.Errorf("unexpected NATS dead-letter schema: %s", d.SchemaVersion)
 	}
-	if d.FormatGeneration != formatregistry.NATSV1 {
+	if d.FormatGeneration != formatregistry.NATSV2 {
 		return fmt.Errorf("unexpected NATS dead-letter format generation: %s", d.FormatGeneration)
 	}
 	if strings.TrimSpace(d.Subject) == "" {
@@ -105,7 +105,7 @@ func (d DeadLetter) Validate() error {
 		return errors.New("NATS dead-letter has incomplete JetStream metadata")
 	}
 	wantID := rejectionIdentity(d.Stream, d.StreamSequence, d.Subject, d.Reply, d.Headers, d.Data)
-	if !validDigestID(d.ID, "tnj1") || d.ID != wantID {
+	if !validDigestID(d.ID, rejectionPrefix) || d.ID != wantID {
 		return fmt.Errorf("NATS dead-letter rejection id mismatch: got %q want %q", d.ID, wantID)
 	}
 	return nil

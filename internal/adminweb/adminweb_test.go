@@ -12,9 +12,9 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
+	"github.com/spf13/viper"
 	trustconfig "github.com/wowtrust/trustdb/internal/config"
 	"github.com/wowtrust/trustdb/internal/httpapi"
-	"github.com/spf13/viper"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -148,7 +148,7 @@ func TestProxyGETOnly(t *testing.T) {
 	}
 	hash, _ := bcrypt.GenerateFromPassword([]byte("x"), bcrypt.MinCost)
 	pub := http.NewServeMux()
-	pub.HandleFunc("GET /v1/records", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	pub.HandleFunc("GET /v2/records", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
 
 	metricsH, _ := httpapi.MetricsHandler()
 	ah, err := New(Options{
@@ -178,7 +178,7 @@ func TestProxyGETOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/api/proxy/v1/records", nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/api/proxy/v2/records", nil)
 	for _, c := range res.Cookies() {
 		req.AddCookie(c)
 	}
@@ -191,7 +191,7 @@ func TestProxyGETOnly(t *testing.T) {
 		t.Fatalf("proxy status = %d", res2.StatusCode)
 	}
 
-	req3, err := http.NewRequest(http.MethodPost, srv.URL+"/admin/api/proxy/v1/claims", strings.NewReader("x"))
+	req3, err := http.NewRequest(http.MethodPost, srv.URL+"/admin/api/proxy/v2/claims", strings.NewReader("x"))
 	if err != nil {
 		t.Fatal(err)
 	}

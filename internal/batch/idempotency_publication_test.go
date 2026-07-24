@@ -11,6 +11,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/idempotency"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -82,8 +83,8 @@ func (s *publishingCheckpointStore) snapshot() ([]string, []model.BatchManifest,
 }
 
 func TestServicePublishesIdempotencyBeforeCheckpoint(t *testing.T) {
-	store := &publishingCheckpointStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
-	svc := New(fakeEngine{}, store, Options{}, nil)
+	store := &publishingCheckpointStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "keyed")
 	if err := svc.persistBatch(context.Background(), "batch-keyed", time.Unix(0, 1).UTC(), []Accepted{item}); err != nil {
@@ -108,10 +109,10 @@ func TestServicePublishesIdempotencyBeforeCheckpoint(t *testing.T) {
 func TestServicePublicationFailurePreventsCheckpoint(t *testing.T) {
 	publishErr := errors.New("injected publication failure")
 	store := &publishingCheckpointStore{
-		LocalStore: proofstore.LocalStore{Root: t.TempDir()},
+		LocalStore: newBoundTestLocalStore(t, t.TempDir()),
 		publishErr: publishErr,
 	}
-	svc := New(fakeEngine{}, store, Options{}, nil)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "failed")
 	if err := svc.persistBatch(context.Background(), "batch-failed", time.Unix(0, 1).UTC(), []Accepted{item}); !errors.Is(err, publishErr) {
@@ -127,8 +128,8 @@ func TestServicePublicationFailurePreventsCheckpoint(t *testing.T) {
 }
 
 func TestServiceKeepsEmptyIdempotencyKeyOptOut(t *testing.T) {
-	store := &publishingCheckpointStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
-	svc := New(fakeEngine{}, store, Options{}, nil)
+	store := &publishingCheckpointStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "")
 	if err := svc.persistBatch(context.Background(), "batch-unkeyed", time.Unix(0, 1).UTC(), []Accepted{item}); err != nil {
@@ -164,7 +165,13 @@ func validIdempotencyAccepted(t *testing.T, idempotencyKey string) Accepted {
 	if err != nil {
 		t.Fatalf("Sign() error = %v", err)
 	}
-	writer, err := wal.OpenWriter(filepath.Join(t.TempDir(), "records.wal"), 1)
+	walPath := filepath.Join(t.TempDir(), "records.wal")
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, wal.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "server-a",
+		LogID:       "server-a",
+		NamespaceID: walPath,
+	})
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}

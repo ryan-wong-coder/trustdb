@@ -264,7 +264,7 @@ func TestClientSubmitLogBatchPreservesOrder(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/claims/batch" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/claims/batch" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
 		var batch submitClaimsBatchRequestEnvelope
@@ -343,7 +343,7 @@ func TestClientSubmitLogBatchReportsPartialFailure(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/claims/batch" {
+		if r.URL.Path != "/v2/claims/batch" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 		var batch submitClaimsBatchRequestEnvelope

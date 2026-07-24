@@ -143,7 +143,7 @@ function New-SmokeClaim([string]$InputPath, [string]$ClaimPath, [string]$ClientK
 }
 
 function Submit-Claim([string]$BaseURL, [string]$ClaimPath) {
-    Invoke-RestMethod -Method Post -Uri "$BaseURL/v1/claims" -ContentType "application/cbor" -InFile $ClaimPath -TimeoutSec 10
+    Invoke-RestMethod -Method Post -Uri "$BaseURL/v2/claims" -ContentType "application/cbor" -InFile $ClaimPath -TimeoutSec 10
 }
 
 if (Test-Path -LiteralPath $WorkDir) {
@@ -214,47 +214,47 @@ try {
 
     Write-Step "waiting for L3/L4/L5 artifacts"
     $first = $records[0]
-    $proof = Wait-Json "$base/v1/proofs/$($first.RecordID)" {
+    $proof = Wait-Json "$base/v2/proofs/$($first.RecordID)" {
         param($j)
         -not [string]::IsNullOrWhiteSpace($j.proof_bundle.committed_receipt.batch_id)
     } 30
     $batchID = $proof.proof_bundle.committed_receipt.batch_id
-    $global = Wait-Json "$base/v1/global-log/inclusion/$batchID" {
+    $global = Wait-Json "$base/v2/global-log/inclusion/$batchID" {
         param($j)
         $j.tree_size -gt 0 -and $j.sth.tree_size -gt 0
     } 30
     $treeSize = [uint64]$global.sth.tree_size
-    $anchor = Wait-Json "$base/v1/anchors/sth/$treeSize" {
+    $anchor = Wait-Json "$base/v2/anchors/sth/$treeSize" {
         param($j)
         $j.status -eq "published" -and $null -ne $j.result
     } 30
 
     Write-Step "checking record pagination and filters"
-    $page1 = Wait-Json "$base/v1/records?limit=2&direction=desc" {
+    $page1 = Wait-Json "$base/v2/records?limit=2&direction=desc" {
         param($j)
         @($j.records).Count -eq 2 -and -not [string]::IsNullOrWhiteSpace($j.next_cursor)
     } 10
     $cursor = [System.Uri]::EscapeDataString([string]$page1.next_cursor)
-    $page2 = Wait-Json "$base/v1/records?limit=2&direction=desc&cursor=$cursor" {
+    $page2 = Wait-Json "$base/v2/records?limit=2&direction=desc&cursor=$cursor" {
         param($j)
         @($j.records).Count -ge 1
     } 10
-    $recordIndex = Wait-Json "$base/v1/records/$($first.RecordID)" {
+    $recordIndex = Wait-Json "$base/v2/records/$($first.RecordID)" {
         param($j)
         $j.record_id -eq $first.RecordID -and $j.batch_id -eq $batchID
     } 10
     $batchFilter = [System.Uri]::EscapeDataString([string]$batchID)
-    Wait-Json "$base/v1/records?batch_id=$batchFilter&limit=10" {
+    Wait-Json "$base/v2/records?batch_id=$batchFilter&limit=10" {
         param($j)
         @($j.records | Where-Object { $_.record_id -eq $first.RecordID }).Count -eq 1
     } 10 | Out-Null
     $hashFilter = (Get-FileHash -Algorithm SHA256 -LiteralPath $first.File).Hash.ToLowerInvariant()
-    Wait-Json "$base/v1/records?content_hash=$hashFilter&limit=10" {
+    Wait-Json "$base/v2/records?content_hash=$hashFilter&limit=10" {
         param($j)
         @($j.records | Where-Object { $_.record_id -eq $first.RecordID }).Count -eq 1
     } 10 | Out-Null
     $queryFilter = [System.Uri]::EscapeDataString("payload-1")
-    Wait-Json "$base/v1/records?q=$queryFilter&limit=10" {
+    Wait-Json "$base/v2/records?q=$queryFilter&limit=10" {
         param($j)
         @($j.records | Where-Object { $_.record_id -eq $first.RecordID }).Count -eq 1
     } 10 | Out-Null
@@ -306,11 +306,11 @@ try {
     Write-Step "starting restored server on port $restorePort"
     $restoreServer = Start-TrustDBServer $restorePort $restoreWalDir $restoreProofDir $restorePebbleDir $serverKey $clientPub "server-restored"
     $restoreBase = "http://127.0.0.1:$restorePort"
-    Wait-Json "$restoreBase/v1/records/$($first.RecordID)" {
+    Wait-Json "$restoreBase/v2/records/$($first.RecordID)" {
         param($j)
         $j.record_id -eq $first.RecordID -and $j.batch_id -eq $batchID
     } 20 | Out-Null
-    Wait-Json "$restoreBase/v1/proofs/$($first.RecordID)" {
+    Wait-Json "$restoreBase/v2/proofs/$($first.RecordID)" {
         param($j)
         $j.proof_bundle.record_id -eq $first.RecordID
     } 20 | Out-Null

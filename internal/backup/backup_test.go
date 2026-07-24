@@ -25,13 +25,16 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	bundle := model.ProofBundle{
 		SchemaVersion: model.SchemaProofBundle,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      "record-1",
 		CommittedReceipt: model.CommittedReceipt{
-			BatchID:   "batch-1",
-			BatchRoot: repeatByte(0x44, 32),
+			SchemaVersion: model.SchemaCommittedReceipt,
+			CryptoSuite:   cryptosuite.INTLV1,
+			BatchID:       "batch-1",
+			BatchRoot:     repeatByte(0x44, 32),
 		},
 		BatchProof: model.BatchProof{TreeSize: 1},
 	}
@@ -40,6 +43,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	}
 	if err := src.PutManifest(ctx, model.BatchManifest{
 		SchemaVersion: model.SchemaBatchManifest,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       "batch-1",
 		State:         model.BatchStateCommitted,
 		TreeSize:      1,
@@ -51,6 +55,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	}
 	root := model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       "batch-1",
 		BatchRoot:     repeatByte(0x44, 32),
 		TreeSize:      1,
@@ -61,6 +66,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	}
 	if err := src.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 		SchemaVersion: model.SchemaGlobalLogOutbox,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       root.BatchID,
 		BatchRoot:     root,
 		Status:        model.AnchorStatePending,
@@ -92,6 +98,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	resultWriter := any(src).(proofstore.STHAnchorResultWriter)
 	if err := resultWriter.PutSTHAnchorResult(ctx, model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		CryptoSuite:      cryptosuite.INTLV1,
 		NodeID:           sth.NodeID,
 		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,
@@ -105,6 +112,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	}
 	if err := src.PutCheckpoint(ctx, model.WALCheckpoint{
 		SchemaVersion:   model.SchemaWALCheckpoint,
+		CryptoSuite:     cryptosuite.INTLV1,
 		LastSequence:    42,
 		RecordedAtUnixN: 12,
 	}); err != nil {
@@ -130,7 +138,7 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected verify report: %+v", verified)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	checkpoint := filepath.Join(t.TempDir(), "restore.checkpoint.json")
 	restored, err := RestoreWithOptions(ctx, dst, path, RestoreOptions{Resume: true, CheckpointPath: checkpoint})
 	if err != nil {
@@ -169,41 +177,23 @@ func TestBackupCreateVerifyRestoreRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRestoreRejectsSuiteMismatchBeforeApplyingEntries(t *testing.T) {
+func TestBackupV4RejectsCNSMSuiteUntilV5(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src"), SuiteID: cryptosuite.CNSMV1}
-	root := model.BatchRoot{
-		SchemaVersion: model.SchemaBatchRoot,
-		BatchID:       "cn-root",
-		BatchRoot:     repeatByte(0x33, 32),
-		TreeSize:      1,
-		ClosedAtUnixN: 1,
-	}
-	if err := src.PutRoot(ctx, root); err != nil {
-		t.Fatalf("PutRoot: %v", err)
-	}
+	src := newBoundTestLocalStoreForSuite(t, filepath.Join(t.TempDir(), "src"), cryptosuite.CNSMV1)
 	path := filepath.Join(t.TempDir(), "cn.tdbackup")
-	report, err := Create(ctx, src, path, Options{Compression: "none"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
+	if _, err := Create(ctx, src, path, Options{Compression: "none"}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), "backup v4") {
+		t.Fatalf("Create CN_SM_V1 backup v4 code=%s err=%v", trusterr.CodeOf(err), err)
 	}
-	if report.CryptoSuite != cryptosuite.CNSMV1 {
-		t.Fatalf("backup suite = %q", report.CryptoSuite)
-	}
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst"), SuiteID: cryptosuite.INTLV1}
-	if _, err := Restore(ctx, dst, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("Restore mismatch code=%s err=%v", trusterr.CodeOf(err), err)
-	}
-	if _, err := dst.LatestRoot(ctx); trusterr.CodeOf(err) != trusterr.CodeNotFound {
-		t.Fatalf("destination mutated before suite rejection: %v", err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("unsupported backup v4 output exists: %v", err)
 	}
 }
 
 func TestBackupRoundTripPreservesAnchorScheduleAndIndependentResult(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	scheduler, ok := any(src).(proofstore.STHAnchorScheduleStore)
 	if !ok {
 		t.Fatal("LocalStore does not implement STHAnchorScheduleStore")
@@ -275,7 +265,7 @@ func TestBackupRoundTripPreservesAnchorScheduleAndIndependentResult(t *testing.T
 		t.Fatalf("backup report = %+v", report)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	restored, err := Restore(ctx, dst, path)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -356,7 +346,7 @@ func TestRestoreRejectsLegacySchemaBeforeApplyingEntries(t *testing.T) {
 			if _, err := Verify(ctx, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), schema) {
 				t.Fatalf("Verify %s error=%v", schema, err)
 			}
-			dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+			dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 			if _, err := Restore(ctx, dst, path); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), schema) {
 				t.Fatalf("Restore %s error=%v", schema, err)
 			}
@@ -417,7 +407,7 @@ func TestVerifyRejectsMissingAndMixedSuiteBindings(t *testing.T) {
 func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	const rootCount = scanPageSize + 1
 	const closedAtUnixN = int64(100)
 
@@ -425,6 +415,7 @@ func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 		batchID := fmt.Sprintf("batch-%04d", i)
 		if err := src.PutRoot(ctx, model.BatchRoot{
 			SchemaVersion: model.SchemaBatchRoot,
+			CryptoSuite:   cryptosuite.INTLV1,
 			BatchID:       batchID,
 			BatchRoot:     repeatByte(byte(i), 32),
 			TreeSize:      1,
@@ -450,7 +441,7 @@ func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 		t.Fatalf("Verify Roots = %d, want %d", verified.Roots, rootCount)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	restored, err := Restore(ctx, dst, path)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -487,9 +478,10 @@ func TestBackupRootPaginationPreservesTimestampTies(t *testing.T) {
 func TestBackupCreateRejectsMissingManifestBundle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	if err := src.PutManifest(ctx, model.BatchManifest{
 		SchemaVersion: model.SchemaBatchManifest,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       "batch-missing-bundle",
 		State:         model.BatchStateCommitted,
 		TreeSize:      1,
@@ -524,10 +516,10 @@ func TestBackupCreateRejectsMissingManifestBundle(t *testing.T) {
 func TestBackupRoundTripPreservesGlobalOutboxStatuses(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	items := []model.GlobalLogOutboxItem{
-		{BatchID: "batch-pending", Status: model.AnchorStatePending, EnqueuedAtUnixN: 1},
-		{BatchID: "batch-published", Status: model.AnchorStatePublished, EnqueuedAtUnixN: 2, CompletedAtUnixN: 3},
+		{SchemaVersion: model.SchemaGlobalLogOutbox, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-pending", Status: model.AnchorStatePending, EnqueuedAtUnixN: 1},
+		{SchemaVersion: model.SchemaGlobalLogOutbox, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-published", Status: model.AnchorStatePublished, EnqueuedAtUnixN: 2, CompletedAtUnixN: 3},
 	}
 	for _, item := range items {
 		if err := src.EnqueueGlobalLog(ctx, item); err != nil {
@@ -542,7 +534,7 @@ func TestBackupRoundTripPreservesGlobalOutboxStatuses(t *testing.T) {
 	if report.GlobalOutboxes != len(items) {
 		t.Fatalf("GlobalOutboxes = %d, want %d", report.GlobalOutboxes, len(items))
 	}
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	if _, err := Restore(ctx, dst, path); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -562,7 +554,7 @@ func TestCreateRejectsDirectoryTarget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	store := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	store := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	path := filepath.Join(t.TempDir(), "trustdb.tdbackup")
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("Mkdir(target) error = %v", err)
@@ -619,7 +611,7 @@ func TestRestoreRejectsInvalidResumeCheckpoint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	backupPath := filepath.Join(t.TempDir(), "trustdb.tdbackup")
 	if _, err := Create(ctx, src, backupPath, Options{Compression: "none"}); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -629,7 +621,7 @@ func TestRestoreRejectsInvalidResumeCheckpoint(t *testing.T) {
 		t.Fatalf("WriteFile(checkpoint) error = %v", err)
 	}
 
-	dst := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "dst")}
+	dst := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "dst"))
 	_, err := RestoreWithOptions(ctx, dst, backupPath, RestoreOptions{
 		Resume:         true,
 		CheckpointPath: checkpointPath,
@@ -658,7 +650,7 @@ func TestCreateDoesNotReplaceTargetOnFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	path := filepath.Join(t.TempDir(), "trustdb.tdbackup")
 	original := []byte("existing backup content")
 	if err := os.WriteFile(path, original, 0o600); err != nil {
@@ -681,15 +673,18 @@ func TestCreateUsesCollisionResistantArchiveNames(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	src := proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "src")}
+	src := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "src"))
 	ids := []string{"rec/1", "rec_2F1"}
 	for _, id := range ids {
 		if err := src.PutBundle(ctx, model.ProofBundle{
 			SchemaVersion: model.SchemaProofBundle,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      id,
 			CommittedReceipt: model.CommittedReceipt{
-				BatchID:   "batch/collide",
-				BatchRoot: repeatByte(0x11, 32),
+				SchemaVersion: model.SchemaCommittedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
+				BatchID:       "batch/collide",
+				BatchRoot:     repeatByte(0x11, 32),
 			},
 			BatchProof: model.BatchProof{TreeSize: 2},
 		}); err != nil {
@@ -698,6 +693,7 @@ func TestCreateUsesCollisionResistantArchiveNames(t *testing.T) {
 	}
 	if err := src.PutManifest(ctx, model.BatchManifest{
 		SchemaVersion: model.SchemaBatchManifest,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       "batch/collide",
 		State:         model.BatchStateCommitted,
 		TreeSize:      2,
@@ -831,6 +827,7 @@ func repeatByte(b byte, n int) []byte {
 func backupScheduleSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byte) model.SignedTreeHead {
 	return model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
 		RootHash:       repeatByte(seed, 32),
@@ -848,6 +845,7 @@ func backupScheduleSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byt
 func backupScheduleResult(key model.STHAnchorScheduleKey, sth model.SignedTreeHead, anchorID string, publishedAt int64) model.STHAnchorResult {
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		CryptoSuite:      cryptosuite.INTLV1,
 		NodeID:           key.NodeID,
 		LogID:            key.LogID,
 		TreeSize:         sth.TreeSize,

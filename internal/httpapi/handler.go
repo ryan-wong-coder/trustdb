@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
@@ -31,12 +32,14 @@ const (
 	maxClaimBatchBytes        = 16 << 20
 	maxClaimBatchItems        = 1000
 	maxClaimBatchWorkers      = 64
+	maxClaimCBORMapPairs      = 4096
 	maxPooledRequestBodyBytes = maxClaimBytes
 )
 
 var requestBodyBufferPool = sync.Pool{New: func() any { return new([]byte) }}
 
 type Handler struct {
+	CryptoSuite   cryptosuite.ID
 	Submitter     submission.Submitter
 	Batch         BatchService
 	Global        GlobalLogService
@@ -45,6 +48,10 @@ type Handler struct {
 	Metrics       http.Handler
 	Statuses      RecordStatusService
 	StatusHub     *statusnotify.Hub
+}
+
+type cryptoSuiteProvider interface {
+	CryptoSuite() cryptosuite.ID
 }
 
 type BatchService interface {
@@ -312,49 +319,49 @@ func buildMux(h Handler) http.Handler {
 	h = normalizeHandler(h)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
-	mux.HandleFunc("POST /v1/claims", h.submitClaim)
-	mux.HandleFunc("POST /v1/claims/batch", h.submitClaimsBatch)
-	mux.HandleFunc("GET /v1/records", h.listRecords)
-	mux.HandleFunc("GET /v1/records/{record_id}", h.getRecordIndex)
+	mux.HandleFunc("POST /v2/claims", h.submitClaim)
+	mux.HandleFunc("POST /v2/claims/batch", h.submitClaimsBatch)
+	mux.HandleFunc("GET /v2/records", h.listRecords)
+	mux.HandleFunc("GET /v2/records/{record_id}", h.getRecordIndex)
 	if h.Statuses != nil {
-		mux.HandleFunc("GET /v1/records/{record_id}/status", h.getRecordStatus)
-		mux.HandleFunc("POST /v1/records/status:batchGet", h.getRecordStatuses)
+		mux.HandleFunc("GET /v2/records/{record_id}/status", h.getRecordStatus)
+		mux.HandleFunc("POST /v2/records/status:batchGet", h.getRecordStatuses)
 	}
 	if h.StatusHub != nil && h.Statuses != nil {
-		mux.HandleFunc("POST /v1/status-subscriptions", h.createStatusSubscription)
-		mux.HandleFunc("DELETE /v1/status-subscriptions/{subscription_id}", h.deleteStatusSubscription)
-		mux.HandleFunc("GET /v1/status-subscriptions/{subscription_id}/statuses", h.getSubscriptionStatuses)
-		mux.HandleFunc("GET /v1/status-subscriptions/{subscription_id}/events", h.streamStatusSubscription)
+		mux.HandleFunc("POST /v2/status-subscriptions", h.createStatusSubscription)
+		mux.HandleFunc("DELETE /v2/status-subscriptions/{subscription_id}", h.deleteStatusSubscription)
+		mux.HandleFunc("GET /v2/status-subscriptions/{subscription_id}/statuses", h.getSubscriptionStatuses)
+		mux.HandleFunc("GET /v2/status-subscriptions/{subscription_id}/events", h.streamStatusSubscription)
 	}
-	mux.HandleFunc("GET /v1/proofs/{record_id}", h.getProof)
-	mux.HandleFunc("GET /v1/roots", h.listRoots)
-	mux.HandleFunc("GET /v1/roots/latest", h.latestRoot)
-	mux.HandleFunc("GET /v1/batches", h.listRoots)
-	mux.HandleFunc("GET /v1/batches/{batch_id}", h.getBatch)
-	mux.HandleFunc("GET /v1/batches/{batch_id}/tree/leaves", h.listBatchTreeLeaves)
-	mux.HandleFunc("GET /v1/batches/{batch_id}/tree/nodes", h.listBatchTreeNodes)
+	mux.HandleFunc("GET /v2/proofs/{record_id}", h.getProof)
+	mux.HandleFunc("GET /v2/roots", h.listRoots)
+	mux.HandleFunc("GET /v2/roots/latest", h.latestRoot)
+	mux.HandleFunc("GET /v2/batches", h.listRoots)
+	mux.HandleFunc("GET /v2/batches/{batch_id}", h.getBatch)
+	mux.HandleFunc("GET /v2/batches/{batch_id}/tree/leaves", h.listBatchTreeLeaves)
+	mux.HandleFunc("GET /v2/batches/{batch_id}/tree/nodes", h.listBatchTreeNodes)
 	if h.Global != nil {
-		mux.HandleFunc("GET /v1/sth", h.listSTHs)
-		mux.HandleFunc("GET /v1/sth/latest", h.latestSTH)
-		mux.HandleFunc("GET /v1/sth/{tree_size}", h.getSTH)
-		mux.HandleFunc("GET /v1/global-log/leaves", h.listGlobalLeaves)
-		mux.HandleFunc("GET /v1/global-log/tree", h.getGlobalTree)
-		mux.HandleFunc("GET /v1/global-log/tree/nodes", h.listGlobalTreeNodes)
-		mux.HandleFunc("GET /v1/global-log/tree/leaves", h.listGlobalLeaves)
-		mux.HandleFunc("GET /v1/global-log/inclusion/{batch_id}", h.getGlobalInclusion)
-		mux.HandleFunc("GET /v1/global-log/evidence/{batch_id}", h.getGlobalEvidence)
-		mux.HandleFunc("GET /v1/global-log/consistency", h.getGlobalConsistency)
+		mux.HandleFunc("GET /v2/sth", h.listSTHs)
+		mux.HandleFunc("GET /v2/sth/latest", h.latestSTH)
+		mux.HandleFunc("GET /v2/sth/{tree_size}", h.getSTH)
+		mux.HandleFunc("GET /v2/global-log/leaves", h.listGlobalLeaves)
+		mux.HandleFunc("GET /v2/global-log/tree", h.getGlobalTree)
+		mux.HandleFunc("GET /v2/global-log/tree/nodes", h.listGlobalTreeNodes)
+		mux.HandleFunc("GET /v2/global-log/tree/leaves", h.listGlobalLeaves)
+		mux.HandleFunc("GET /v2/global-log/inclusion/{batch_id}", h.getGlobalInclusion)
+		mux.HandleFunc("GET /v2/global-log/evidence/{batch_id}", h.getGlobalEvidence)
+		mux.HandleFunc("GET /v2/global-log/consistency", h.getGlobalConsistency)
 	}
 	if h.Anchors != nil {
-		mux.HandleFunc("GET /v1/anchors/sth", h.listAnchors)
-		mux.HandleFunc("GET /v1/anchors/sth/{tree_size}", h.getAnchor)
+		mux.HandleFunc("GET /v2/anchors/sth", h.listAnchors)
+		mux.HandleFunc("GET /v2/anchors/sth/{tree_size}", h.getAnchor)
 	}
 	if h.AnchorSystems != nil {
-		mux.HandleFunc("GET /v1/anchor-systems", h.listAnchorSystems)
-		mux.HandleFunc("GET /v1/anchor-systems/{system_id}", h.getAnchorSystem)
-		mux.HandleFunc("GET /v1/anchor-systems/{system_id}/status", h.getAnchorSystemStatus)
-		mux.HandleFunc("GET /v1/anchor-systems/{system_id}/resources", h.listAnchorSystemResources)
-		mux.HandleFunc("GET /v1/anchor-systems/{system_id}/resources/{kind}/{resource_id}", h.getAnchorSystemResource)
+		mux.HandleFunc("GET /v2/anchor-systems", h.listAnchorSystems)
+		mux.HandleFunc("GET /v2/anchor-systems/{system_id}", h.getAnchorSystem)
+		mux.HandleFunc("GET /v2/anchor-systems/{system_id}/status", h.getAnchorSystemStatus)
+		mux.HandleFunc("GET /v2/anchor-systems/{system_id}/resources", h.listAnchorSystemResources)
+		mux.HandleFunc("GET /v2/anchor-systems/{system_id}/resources/{kind}/{resource_id}", h.getAnchorSystemResource)
 	}
 	if h.Metrics != nil {
 		mux.Handle("GET /metrics", h.Metrics)
@@ -384,6 +391,11 @@ func normalizeHandler(h Handler) Handler {
 	if h.Statuses == nil && h.Batch != nil {
 		if statuses, ok := h.Batch.(RecordStatusService); ok && !isTypedNil(statuses) {
 			h.Statuses = statuses
+		}
+	}
+	if h.CryptoSuite == "" && h.Batch != nil {
+		if provider, ok := h.Batch.(cryptoSuiteProvider); ok {
+			h.CryptoSuite = provider.CryptoSuite()
 		}
 	}
 	if h.StatusHub == nil {
@@ -512,13 +524,13 @@ func decodeCBORRequest(body io.Reader, contentLength int64, maxBytes int, out an
 		if err := readKnownLengthRequestBody(body, contentLength, *buffer); err != nil {
 			return err
 		}
-		return cborx.UnmarshalLimit(*buffer, out, maxBytes)
+		return cborx.UnmarshalLimits(*buffer, out, maxBytes, maxClaimBatchItems, maxClaimCBORMapPairs)
 	}
 	raw, err := readBoundedRequestBody(body, contentLength, maxBytes)
 	if err != nil {
 		return err
 	}
-	return cborx.UnmarshalLimit(raw, out, maxBytes)
+	return cborx.UnmarshalLimits(raw, out, maxBytes, maxClaimBatchItems, maxClaimCBORMapPairs)
 }
 
 func decodeJSONRequest(body io.Reader, maxBytes int64, out any) error {
@@ -823,7 +835,7 @@ func (h Handler) listRecords(w http.ResponseWriter, r *http.Request) {
 		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
 		return
 	}
-	opts, err := parseRecordListOptions(r)
+	opts, err := parseRecordListOptions(r, h.CryptoSuite)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -885,6 +897,7 @@ func (h Handler) getBatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, batchResponse{
 		Root: model.BatchRoot{
 			SchemaVersion: model.SchemaBatchRoot,
+			CryptoSuite:   manifest.CryptoSuite,
 			BatchID:       manifest.BatchID,
 			NodeID:        manifest.NodeID,
 			LogID:         manifest.LogID,
@@ -971,7 +984,7 @@ func (h Handler) requireBatchTreeIndex(ctx context.Context, batchID string) erro
 	return nil
 }
 
-func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
+func parseRecordListOptions(r *http.Request, suiteID cryptosuite.ID) (model.RecordListOptions, error) {
 	limit := 100
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -1005,13 +1018,9 @@ func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
 		opts.BatchID = opts.Query
 		opts.Query = ""
 	}
-	hashRaw := firstQueryValue(r, "content_hash", "sha256")
-	if hashRaw == "" && looksLikeHexSHA256(opts.Query) {
-		hashRaw = opts.Query
-		opts.Query = ""
-	}
+	hashRaw := strings.TrimSpace(r.URL.Query().Get("content_hash"))
 	if hashRaw != "" {
-		hash, err := parseSHA256Hex(hashRaw)
+		hash, err := parseContentHashHex(hashRaw, suiteID)
 		if err != nil {
 			return model.RecordListOptions{}, err
 		}
@@ -1262,27 +1271,34 @@ func firstQueryValue(r *http.Request, names ...string) string {
 	return ""
 }
 
-func looksLikeHexSHA256(raw string) bool {
-	raw = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "sha256:")
-	if len(raw) != 64 {
-		return false
+func parseContentHashHex(raw string, suiteID cryptosuite.ID) ([]byte, error) {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "HTTP crypto_suite", err)
 	}
-	for _, r := range raw {
-		if r < '0' || r > '9' && r < 'a' || r > 'f' {
-			return false
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if algorithm, encoded, ok := strings.Cut(raw, ":"); ok {
+		if algorithm != suite.ContentHash.Algorithm {
+			return nil, trusterr.New(
+				trusterr.CodeInvalidArgument,
+				fmt.Sprintf("content_hash algorithm must be %s for crypto_suite %s", suite.ContentHash.Algorithm, suite.ID),
+			)
 		}
+		raw = encoded
 	}
-	return true
-}
-
-func parseSHA256Hex(raw string) ([]byte, error) {
-	raw = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "sha256:")
-	if len(raw) != 64 {
-		return nil, trusterr.New(trusterr.CodeInvalidArgument, "content_hash must be a 64-character sha256 hex string")
+	expectedHexLen := suite.ContentHash.DigestBytes * 2
+	if len(raw) != expectedHexLen {
+		return nil, trusterr.New(
+			trusterr.CodeInvalidArgument,
+			fmt.Sprintf("content_hash must be a %d-character %s hex string", expectedHexLen, suite.ContentHash.Algorithm),
+		)
 	}
 	hash, err := hex.DecodeString(raw)
-	if err != nil || len(hash) != 32 {
-		return nil, trusterr.New(trusterr.CodeInvalidArgument, "content_hash must be a valid sha256 hex string")
+	if err != nil || len(hash) != suite.ContentHash.DigestBytes {
+		return nil, trusterr.New(
+			trusterr.CodeInvalidArgument,
+			fmt.Sprintf("content_hash must be a valid %s hex string", suite.ContentHash.Algorithm),
+		)
 	}
 	return hash, nil
 }

@@ -411,7 +411,7 @@ func TestWALInspectCommand(t *testing.T) {
 
 	tmp := t.TempDir()
 	walPath := filepath.Join(tmp, "trustdb.wal")
-	writer, err := wal.OpenWriter(walPath, 1)
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -424,7 +424,7 @@ func TestWALInspectCommand(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"wal", "inspect", "--wal", walPath})
+	cmd.SetArgs([]string{"wal", "inspect", "--wal", walPath, "--crypto-suite", "INTL_V1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("wal inspect error = %v stderr=%s", err, errOut.String())
 	}
@@ -442,7 +442,7 @@ func TestWALDumpCommand(t *testing.T) {
 
 	tmp := t.TempDir()
 	walPath := filepath.Join(tmp, "trustdb.wal")
-	writer, err := wal.OpenWriter(walPath, 1)
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -455,7 +455,7 @@ func TestWALDumpCommand(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"wal", "dump", "--wal", walPath})
+	cmd.SetArgs([]string{"wal", "dump", "--wal", walPath, "--crypto-suite", "INTL_V1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("wal dump error = %v stderr=%s", err, errOut.String())
 	}
@@ -476,7 +476,7 @@ func TestWALInspectCommandDirectoryMode(t *testing.T) {
 
 	tmp := t.TempDir()
 	walDir := filepath.Join(tmp, "wal")
-	writer, err := wal.OpenDirWriter(walDir, wal.Options{MaxSegmentBytes: 120})
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{MaxSegmentBytes: 120}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -491,7 +491,7 @@ func TestWALInspectCommandDirectoryMode(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"wal", "inspect", "--wal", walDir})
+	cmd.SetArgs([]string{"wal", "inspect", "--wal", walDir, "--crypto-suite", "INTL_V1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("wal inspect (dir) error = %v stderr=%s", err, errOut.String())
 	}
@@ -519,7 +519,7 @@ func TestWALDumpCommandDirectoryMode(t *testing.T) {
 
 	tmp := t.TempDir()
 	walDir := filepath.Join(tmp, "wal")
-	writer, err := wal.OpenDirWriter(walDir, wal.Options{MaxSegmentBytes: 120})
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{MaxSegmentBytes: 120}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -534,7 +534,7 @@ func TestWALDumpCommandDirectoryMode(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"wal", "dump", "--wal", walDir})
+	cmd.SetArgs([]string{"wal", "dump", "--wal", walDir, "--crypto-suite", "INTL_V1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("wal dump (dir) error = %v stderr=%s", err, errOut.String())
 	}
@@ -565,7 +565,7 @@ func TestWALRepairCommandDirectoryModeTruncatesTail(t *testing.T) {
 
 	tmp := t.TempDir()
 	walDir := filepath.Join(tmp, "wal")
-	writer, err := wal.OpenDirWriter(walDir, wal.Options{MaxSegmentBytes: 200})
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{MaxSegmentBytes: 200}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -578,7 +578,7 @@ func TestWALRepairCommandDirectoryModeTruncatesTail(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	inspect, err := wal.InspectDir(walDir)
+	inspect, err := wal.InspectDir(walDir, newBoundTestWALOptions(t, walDir, wal.Options{}))
 	if err != nil {
 		t.Fatalf("InspectDir() error = %v", err)
 	}
@@ -601,7 +601,7 @@ func TestWALRepairCommandDirectoryModeTruncatesTail(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"wal", "repair", "--wal", walDir})
+	cmd.SetArgs([]string{"wal", "repair", "--wal", walDir, "--crypto-suite", "INTL_V1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("wal repair (dir) error = %v stderr=%s", err, errOut.String())
 	}

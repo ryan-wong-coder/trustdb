@@ -20,11 +20,11 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/httpapi"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -61,13 +61,14 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	// Compact rotation threshold + small batch size so the test exercises
 	// rotation and commits in under a second while only submitting a
 	// handful of claims.
-	walOpts := wal.Options{
+	var walOpts wal.Options
+	walOpts = newBoundTestWALOptions(t, walDir, wal.Options{
 		MaxSegmentBytes: 280,
 		OnRotate: func(_, to uint64) {
 			metrics.WALActiveSegmentID.Set(float64(to))
-			_ = refreshWALSegmentsTotal(metrics, walDir)
+			metrics.WALSegmentsTotal.Inc()
 		},
-	}
+	})
 	writer, mode, err := openWALWriterWithOptions(walDir, walOpts)
 	if err != nil {
 		t.Fatalf("openWALWriterWithOptions() error = %v", err)
@@ -77,7 +78,7 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	}
 	defer writer.Close()
 	metrics.WALActiveSegmentID.Set(float64(writer.ActiveSegmentID()))
-	if err := refreshWALSegmentsTotal(metrics, walDir); err != nil {
+	if err := refreshWALSegmentsTotal(metrics, walDir, walOpts); err != nil {
 		t.Fatalf("refreshWALSegmentsTotal() error = %v", err)
 	}
 
@@ -90,16 +91,16 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
-	proofStore := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: proofDir}}
+	proofStore := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, proofDir)}
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 16, Workers: 2}, metrics)
 	defer ingestSvc.Shutdown(context.Background())
 
 	rt := &runtimeConfig{logger: silentLogger()}
-	batchSvc := batch.New(engine, proofStore, batch.Options{
+	batchSvc := batch.New(engine, proofStore, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:            16,
 		MaxRecords:           2,
 		MaxDelay:             50 * time.Millisecond,
-		OnCheckpointAdvanced: newPruneHook(rt, walDir, 0, metrics),
+		OnCheckpointAdvanced: newPruneHook(rt, walDir, 0, metrics, walOpts),
 	}, metrics)
 	defer batchSvc.Shutdown(context.Background())
 
@@ -136,9 +137,9 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 			t.Fatalf("Marshal(%d) error = %v", i, err)
 		}
 
-		resp, err := http.Post(server.URL+"/v1/claims", "application/cbor", bytes.NewReader(body))
+		resp, err := http.Post(server.URL+"/v2/claims", "application/cbor", bytes.NewReader(body))
 		if err != nil {
-			t.Fatalf("POST /v1/claims (%d) error = %v", i, err)
+			t.Fatalf("POST /v2/claims (%d) error = %v", i, err)
 		}
 		var decoded struct {
 			RecordID      string `json:"record_id"`
@@ -198,7 +199,7 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 
 	// Directory state matches the segments gauge so there is no drift
 	// between what the gauge reports and what is actually on disk.
-	segs, err := wal.ListSegments(walDir)
+	segs, err := wal.ListSegments(walDir, walOpts)
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -216,13 +217,13 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	// Finally: the proof store is consistent. LatestRoot should reflect
 	// the most recent batch (tree_size = MaxRecords since every batch is
 	// size 2 and we submitted an even count).
-	rootResp, err := http.Get(server.URL + "/v1/roots/latest")
+	rootResp, err := http.Get(server.URL + "/v2/roots/latest")
 	if err != nil {
-		t.Fatalf("GET /v1/roots/latest error = %v", err)
+		t.Fatalf("GET /v2/roots/latest error = %v", err)
 	}
 	defer rootResp.Body.Close()
 	if rootResp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /v1/roots/latest status = %d", rootResp.StatusCode)
+		t.Fatalf("GET /v2/roots/latest status = %d", rootResp.StatusCode)
 	}
 }
 
@@ -230,7 +231,8 @@ func TestPruneHookRefreshesSegmentGaugeWithoutRemoval(t *testing.T) {
 	t.Parallel()
 
 	walDir := t.TempDir()
-	writer, err := wal.OpenDirWriter(walDir, wal.Options{InitialSegmentID: 3})
+	walOpts := newBoundTestWALOptions(t, walDir, wal.Options{InitialSegmentID: 3})
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, walOpts))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -240,7 +242,7 @@ func TestPruneHookRefreshesSegmentGaugeWithoutRemoval(t *testing.T) {
 
 	_, metrics := observability.NewRegistry()
 	metrics.WALSegmentsTotal.Set(99)
-	hook := newPruneHook(&runtimeConfig{logger: silentLogger()}, walDir, 0, metrics)
+	hook := newPruneHook(&runtimeConfig{logger: silentLogger()}, walDir, 0, metrics, walOpts)
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3, LastSequence: 10})
 
 	if got := testutil.ToFloat64(metrics.WALSegmentsTotal); got != 1 {
@@ -265,7 +267,7 @@ func TestPruneHookCachesSuccessfulCutoffAndRetriesFailures(t *testing.T) {
 		}
 		return 0, 0, nil
 	}
-	hook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, pruner)
+	hook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, wal.Options{}, pruner)
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3}) // fails; must remain retryable
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3}) // succeeds and caches
 	hook(context.Background(), model.WALCheckpoint{SegmentID: 3}) // identical cutoff skips
@@ -278,7 +280,7 @@ func TestPruneHookCachesSuccessfulCutoffAndRetriesFailures(t *testing.T) {
 	}
 
 	panicCalls := 0
-	panicHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, func(_ string, _ uint64) (int, int64, error) {
+	panicHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 0, nil, wal.Options{}, func(_ string, _ uint64) (int, int64, error) {
 		panicCalls++
 		if panicCalls == 1 {
 			panic("injected prune panic")
@@ -299,7 +301,7 @@ func TestPruneHookCachesSuccessfulCutoffAndRetriesFailures(t *testing.T) {
 	}
 
 	noPruneCalls := 0
-	noPruneHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 10, nil, func(string, uint64) (int, int64, error) {
+	noPruneHook := newPruneHookWithPruner(&runtimeConfig{logger: silentLogger()}, t.TempDir(), 10, nil, wal.Options{}, func(string, uint64) (int, int64, error) {
 		noPruneCalls++
 		return 0, 0, nil
 	})
@@ -326,7 +328,7 @@ func waitForHTTPProof(t *testing.T, baseURL, recordID string) {
 	var lastErr error
 	var lastStatus int
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/v1/proofs/" + recordID)
+		resp, err := http.Get(baseURL + "/v2/proofs/" + recordID)
 		if err == nil {
 			code := resp.StatusCode
 			lastStatus = code

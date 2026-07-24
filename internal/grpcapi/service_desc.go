@@ -69,7 +69,7 @@ var TrustDBService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "trustdb/v1/cbor",
+	Metadata: "trustdb/v2/cbor",
 }
 
 type TrustDBService_SubmitClaimStreamServer interface {

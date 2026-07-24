@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/anchor"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
@@ -24,16 +25,18 @@ import (
 func seedOtsAnchor(t *testing.T, dir string, calendarURL string) model.STHAnchorResult {
 	t.Helper()
 	ctx := context.Background()
-	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: dir})
+	store, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendFile, dir))
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
+	defer store.Close()
 
 	digest := make([]byte, 32)
 	for i := range digest {
 		digest[i] = byte(i + 1)
 	}
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       1,
@@ -60,6 +63,7 @@ func seedOtsAnchor(t *testing.T, dir string, calendarURL string) model.STHAnchor
 		t.Fatalf("marshal proof: %v", err)
 	}
 	ar := model.STHAnchorResult{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
 		SinkName:         anchor.OtsSinkName,
@@ -106,12 +110,15 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 	defer srv.Close()
 
 	seeded := seedOtsAnchor(t, proofDir, srv.URL)
-	store := &proofstore.LocalStore{Root: proofDir}
+	store := newBoundTestLocalStore(t, proofDir)
 	fileResult := seeded
 	fileResult.SinkName = "file"
 	fileResult.AnchorID = anchor.DeterministicFileAnchorID(seeded.STH)
 	fileResult.Proof = []byte("file-proof-must-remain-unchanged")
 	putSTHAnchorResult(t, store, fileResult)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seeded proofstore: %v", err)
+	}
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -119,6 +126,7 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 		"anchor", "upgrade",
 		"--tree-size", "1",
 		"--metastore-path", proofDir,
+		"--crypto-suite", "INTL_V1",
 		"--timeout", "5s",
 	})
 	if err := cmd.Execute(); err != nil {
@@ -138,7 +146,9 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 		t.Fatalf("per-calendar report missing Changed=true: %+v", report.Calendars)
 	}
 
-	keyed, ok := any(store).(proofstore.STHAnchorResultKeyedReader)
+	reopened := newBoundTestLocalStore(t, proofDir)
+	defer reopened.Close()
+	keyed, ok := any(reopened).(proofstore.STHAnchorResultKeyedReader)
 	if !ok {
 		t.Fatal("proofstore does not support keyed anchor result reads")
 	}
@@ -197,6 +207,7 @@ func TestAnchorUpgradeCommand_DryRunDoesNotPersist(t *testing.T) {
 		"anchor", "upgrade",
 		"--tree-size", "1",
 		"--metastore-path", proofDir,
+		"--crypto-suite", "INTL_V1",
 		"--dry-run",
 	})
 	if err := cmd.Execute(); err != nil {
@@ -216,7 +227,7 @@ func TestAnchorUpgradeCommand_DryRunDoesNotPersist(t *testing.T) {
 		t.Fatal("report.DryRun should echo --dry-run")
 	}
 
-	store := &proofstore.LocalStore{Root: proofDir}
+	store := newBoundTestLocalStore(t, proofDir)
 	got, ok, err := store.GetSTHAnchorResult(context.Background(), seeded.TreeSize)
 	if err != nil || !ok {
 		t.Fatalf("GetSTHAnchorResult: ok=%v err=%v", ok, err)
@@ -236,7 +247,7 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 	tmp := t.TempDir()
 	proofDir := filepath.Join(tmp, "proofs")
 	ctx := context.Background()
-	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: proofDir})
+	store, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendFile, proofDir))
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
@@ -244,6 +255,7 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 	root := make([]byte, 32)
 	root[0] = 0x01
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       2,
@@ -255,6 +267,7 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
 	ar := model.STHAnchorResult{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
 		SinkName:         "file",
@@ -265,10 +278,13 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 		PublishedAtUnixN: time.Now().UnixNano(),
 	}
 	putSTHAnchorResult(t, store, ar)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seeded proofstore: %v", err)
+	}
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
-	cmd.SetArgs([]string{"anchor", "upgrade", "--tree-size", "2", "--metastore-path", proofDir})
+	cmd.SetArgs([]string{"anchor", "upgrade", "--tree-size", "2", "--metastore-path", proofDir, "--crypto-suite", "INTL_V1"})
 	err = cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for non-ots STH")
@@ -285,13 +301,14 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 	proofDir := filepath.Join(tmp, "proofs")
 	outPath := filepath.Join(tmp, "sth-2.tdsth-anchor-result")
 	ctx := context.Background()
-	store, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: proofDir})
+	store, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendFile, proofDir))
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
 
 	root := bytes.Repeat([]byte{0xaa}, 32)
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       2,
@@ -303,6 +320,7 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
 	result := model.STHAnchorResult{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
 		SinkName:         "file",
@@ -313,6 +331,9 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 		PublishedAtUnixN: time.Now().UnixNano(),
 	}
 	putSTHAnchorResult(t, store, result)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seeded proofstore: %v", err)
+	}
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -320,6 +341,7 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 		"anchor", "export",
 		"--tree-size", "2",
 		"--metastore-path", proofDir,
+		"--crypto-suite", "INTL_V1",
 		"--out", outPath,
 	})
 	if err := cmd.Execute(); err != nil {

@@ -25,4 +25,4 @@
 
 ## 兼容性
 
-HTTP、gRPC、SDK 和 proof schema 不变。以下 v2 描述记录的是本次历史优化当时的边界；当前实现已统一升级为 proofstore storage schema v4。旧版本或无标记但非空的存储会返回 failed precondition，系统不会自动删除、迁移或双读旧 proofstore。
+以下性能结论来自历史优化阶段；当前公开 HTTP/gRPC/SDK 已切换到 V2，proofstore 使用 storage schema v5。旧版本或无标记但非空的存储会返回 failed precondition，系统不会扫描、迁移或双读旧 proofstore。

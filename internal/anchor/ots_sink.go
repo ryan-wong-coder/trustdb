@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
@@ -218,6 +218,9 @@ func (s *OtsSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorResult{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "anchor ots canceled", err)
 	}
+	if sth.CryptoSuite != cryptosuite.INTLV1 || sth.TreeAlg != cryptosuite.MerkleRFC6962SHA256 {
+		return model.STHAnchorResult{}, fmt.Errorf("%w: OTS accepts only INTL_V1 SHA-256 STHs", ErrPermanent)
+	}
 	if sth.TreeSize == 0 {
 		return model.STHAnchorResult{}, fmt.Errorf("%w: tree_size is empty", ErrPermanent)
 	}
@@ -283,6 +286,7 @@ func (s *OtsSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.
 	}
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		CryptoSuite:      sth.CryptoSuite,
 		NodeID:           sth.NodeID,
 		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,
@@ -355,13 +359,11 @@ func readOtsBodyLimit(r io.Reader) ([]byte, error) {
 // reported STHAnchorResult.AnchorID — a cheap tamper check before
 // attempting the (more expensive) proof replay.
 func DeterministicOtsAnchorID(sth model.SignedTreeHead) string {
-	h := sha256.New()
-	h.Write([]byte(OtsSinkName))
-	h.Write([]byte{0})
-	h.Write([]byte(fmt.Sprintf("%d", sth.TreeSize)))
-	h.Write([]byte{0})
-	h.Write(sth.RootHash)
-	return "ots-" + hex.EncodeToString(h.Sum(nil))[:32]
+	if sth.CryptoSuite != cryptosuite.INTLV1 {
+		return ""
+	}
+	id, _ := deterministicAnchorID(OtsSinkName, "ots2-", sth)
+	return id
 }
 
 // normaliseCalendars strips whitespace, drops empty entries, and

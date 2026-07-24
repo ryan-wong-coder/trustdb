@@ -296,7 +296,7 @@ async function upgradeOts(r: LocalRecord) {
       </div>
       <div class="px-4 pb-3 flex flex-wrap items-center gap-2 text-[11.5px] text-ink-500">
         <span class="rounded-full border border-accent/20 bg-accent/10 px-2.5 py-1 text-accent">
-          {{ source === 'server' ? '服务端分页 · /v1/records' : '本地缓存' }}
+          {{ source === 'server' ? '服务端分页 · /v2/records' : '本地缓存' }}
         </span>
         <span v-if="listError" class="text-warn">
           {{ listError }}

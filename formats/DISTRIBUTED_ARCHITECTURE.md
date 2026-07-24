@@ -14,8 +14,8 @@ TrustDB 单机路径：`ingest` → WAL → `batch` → proofstore（file/Pebble
 
 - TiKV **不是**旁路元数据目录或仅索引服务，而是可选的 **proofstore 后端**，需实现与 file/Pebble 相同的 `proofstore.Store` 契约（含 `CommitGlobalLogAppend`、`BatchArtifactWriter` 等）。
 - 配置通过 `metastore: tikv` 与 PD 地址等参数选择（见 `internal/config` 与 `internal/proofstore/factory.go`）。TiKV 后端必须连接原生 TiKV proofstore，不能退化为本地临时缓存。
-- TiKV 物理 key 必须带 TrustDB 应用级 namespace 前缀：`trustdb/proofstore/v1/ns/<base64url(namespace)>/`。默认 namespace 为 `default`；一个 namespace 只属于一个逻辑 `(node_id, log_id)` Global Log。active-passive 替换节点仅在复用相同逻辑身份时复用 namespace；独立租户或独立 log 必须使用不同 namespace。
-- 每个 TiKV namespace 必须包含 `meta/storage-schema = trustdb-proofstore-v4`。仅空 namespace 可初始化该标记；旧版本、缺少标记但已有数据的 namespace 均 fail closed，不自动迁移或双读旧 anchor queue。
+- TiKV 物理 key 必须带 TrustDB 应用级 namespace 前缀：`trustdb/proofstore/v5/ns/<base64url(namespace)>/`。默认 namespace 为 `default`；一个 namespace 只属于一个逻辑 `(node_id, log_id)` Global Log。active-passive 替换节点仅在复用相同逻辑身份时复用 namespace；独立租户或独立 log 必须使用不同 namespace。
+- 每个 TiKV namespace 必须包含 `meta/storage-schema = trustdb-proofstore-v5`。仅空 namespace 可初始化该标记；旧版本、缺少标记但已有数据的 namespace 均 fail closed，不自动迁移或双读旧 anchor queue。
 - 值编码与 Pebble/file 一致：确定性 CBOR + 与 Pebble 相同的 bundle 信封语义，便于备份与迁移。
 
 ### 2. 存算分离

@@ -13,7 +13,7 @@ import (
 func TestLocalStoreLatestSignedTreeHeadReferencePreservesMaximum(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, treeSize := range []uint64{3, 1, 2} {
 		if err := store.PutSignedTreeHead(ctx, localTestSignedTreeHead(treeSize)); err != nil {
@@ -32,7 +32,7 @@ func TestLocalStoreLatestSignedTreeHeadReferencePreservesMaximum(t *testing.T) {
 func TestLocalStoreLatestSignedTreeHeadRebuildsMissingReference(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, treeSize := range []uint64{1, 2} {
 		if err := store.PutSignedTreeHead(ctx, localTestSignedTreeHead(treeSize)); err != nil {
@@ -54,7 +54,7 @@ func TestLocalStoreLatestSignedTreeHeadRebuildsMissingReference(t *testing.T) {
 func TestLocalStoreLatestSignedTreeHeadRepairsStaleReferenceFromState(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, treeSize := range []uint64{1, 2} {
 		if err := store.PutSignedTreeHead(ctx, localTestSignedTreeHead(treeSize)); err != nil {
@@ -64,7 +64,7 @@ func TestLocalStoreLatestSignedTreeHeadRepairsStaleReferenceFromState(t *testing
 	if err := writeCBORAtomic(store.latestSignedTreeHeadReferencePath(), uint64(1)); err != nil {
 		t.Fatalf("write stale reference: %v", err)
 	}
-	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{TreeSize: 2}); err != nil {
+	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{CryptoSuite: "INTL_V1", TreeSize: 2}); err != nil {
 		t.Fatalf("PutGlobalLogState: %v", err)
 	}
 	latest, ok, err := store.LatestSignedTreeHead(ctx)
@@ -79,12 +79,12 @@ func TestLocalStoreLatestSignedTreeHeadRepairsStaleReferenceFromState(t *testing
 func TestLocalStoreLatestSignedTreeHeadKeepsPublishedReferenceWhenStateIsAhead(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	if err := store.PutSignedTreeHead(ctx, localTestSignedTreeHead(1)); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
-	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{TreeSize: 2}); err != nil {
+	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{CryptoSuite: "INTL_V1", TreeSize: 2}); err != nil {
 		t.Fatalf("PutGlobalLogState: %v", err)
 	}
 	latest, ok, err := store.LatestSignedTreeHead(ctx)
@@ -96,7 +96,7 @@ func TestLocalStoreLatestSignedTreeHeadKeepsPublishedReferenceWhenStateIsAhead(t
 func TestLocalStoreLatestSignedTreeHeadRebuildsCorruptReference(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	if err := store.PutSignedTreeHead(ctx, localTestSignedTreeHead(1)); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
@@ -113,7 +113,7 @@ func TestLocalStoreLatestSignedTreeHeadRebuildsCorruptReference(t *testing.T) {
 func TestLocalStoreLatestSignedTreeHeadRejectsCorruptCanonicalItem(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	if err := store.PutSignedTreeHead(ctx, localTestSignedTreeHead(1)); err != nil {
 		t.Fatalf("PutSignedTreeHead: %v", err)
@@ -132,7 +132,7 @@ func TestLocalStoreLatestSignedTreeHeadRejectsCorruptCanonicalItem(t *testing.T)
 }
 
 func localTestSignedTreeHead(treeSize uint64) model.SignedTreeHead {
-	return model.SignedTreeHead{
+	return model.SignedTreeHead{CryptoSuite: "INTL_V1",
 		TreeSize:       treeSize,
 		RootHash:       []byte{byte(treeSize)},
 		TimestampUnixN: int64(treeSize),

@@ -65,7 +65,7 @@ metric_label() {
 }
 
 latest_sth_size() {
-  curl --fail --silent "$metrics_url/v1/sth/latest" 2>/dev/null | jq -r '.tree_size // 0' 2>/dev/null || printf '0'
+  curl --fail --silent "$metrics_url/v2/sth/latest" 2>/dev/null | jq -r '.tree_size // 0' 2>/dev/null || printf '0'
 }
 
 elapsed_seconds() {

@@ -236,11 +236,11 @@ function withParams(path: string, params: Record<string, string | number | undef
 }
 
 export async function getBatches(opts: { limit?: number; cursor?: string } = {}): Promise<{ roots: BatchRoot[]; next_cursor?: string }> {
-  return proxyJSON(withParams('/v1/batches', { limit: opts.limit, cursor: opts.cursor }))
+  return proxyJSON(withParams('/v2/batches', { limit: opts.limit, cursor: opts.cursor }))
 }
 
 export async function getRecords(opts: { limit?: number; cursor?: string; query?: string; level?: string } = {}): Promise<RecordsResponse> {
-  return proxyJSON(withParams('/v1/records', {
+  return proxyJSON(withParams('/v2/records', {
     limit: opts.limit,
     cursor: opts.cursor,
     q: opts.query,
@@ -249,29 +249,29 @@ export async function getRecords(opts: { limit?: number; cursor?: string; query?
 }
 
 export async function getBatchDetail(batchID: string): Promise<{ root: BatchRoot; manifest: BatchManifest; record_count: number }> {
-  return proxyJSON(`/v1/batches/${encodeURIComponent(batchID)}`)
+  return proxyJSON(`/v2/batches/${encodeURIComponent(batchID)}`)
 }
 
 export async function getBatchLeaves(batchID: string, opts: { limit?: number; cursor?: string } = {}): Promise<{ leaves: BatchTreeLeaf[]; next_cursor?: string }> {
-  return proxyJSON(withParams(`/v1/batches/${encodeURIComponent(batchID)}/tree/leaves`, { limit: opts.limit, cursor: opts.cursor }))
+  return proxyJSON(withParams(`/v2/batches/${encodeURIComponent(batchID)}/tree/leaves`, { limit: opts.limit, cursor: opts.cursor }))
 }
 
 export async function getBatchTreeNodes(batchID: string, opts: { level?: number; start?: number; limit?: number; cursor?: string } = {}): Promise<{ nodes: BatchTreeNode[]; next_cursor?: string }> {
-  return proxyJSON(withParams(`/v1/batches/${encodeURIComponent(batchID)}/tree/nodes`, { level: opts.level, start: opts.start, limit: opts.limit, cursor: opts.cursor }))
+  return proxyJSON(withParams(`/v2/batches/${encodeURIComponent(batchID)}/tree/nodes`, { level: opts.level, start: opts.start, limit: opts.limit, cursor: opts.cursor }))
 }
 
 export async function getProofPath(recordID: string): Promise<ProofResponse> {
-  return proxyJSON(`/v1/proofs/${encodeURIComponent(recordID)}`)
+  return proxyJSON(`/v2/proofs/${encodeURIComponent(recordID)}`)
 }
 
 export async function getGlobalTree(): Promise<{ ok: boolean; state?: GlobalLogState; sth?: SignedTreeHead }> {
-  return proxyJSON('/v1/global-log/tree')
+  return proxyJSON('/v2/global-log/tree')
 }
 
 export async function getGlobalTreeNodes(opts: { level?: number; start?: number; limit?: number; cursor?: string } = {}): Promise<{ nodes: GlobalLogNode[]; next_cursor?: string }> {
-  return proxyJSON(withParams('/v1/global-log/tree/nodes', { level: opts.level, start: opts.start, limit: opts.limit, cursor: opts.cursor }))
+  return proxyJSON(withParams('/v2/global-log/tree/nodes', { level: opts.level, start: opts.start, limit: opts.limit, cursor: opts.cursor }))
 }
 
 export async function getGlobalLeaves(opts: { limit?: number; cursor?: string } = {}): Promise<{ leaves: GlobalLogLeaf[]; next_cursor?: string }> {
-  return proxyJSON(withParams('/v1/global-log/tree/leaves', { limit: opts.limit, cursor: opts.cursor }))
+  return proxyJSON(withParams('/v2/global-log/tree/leaves', { limit: opts.limit, cursor: opts.cursor }))
 }

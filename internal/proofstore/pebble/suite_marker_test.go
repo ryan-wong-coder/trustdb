@@ -18,7 +18,7 @@ func TestPebbleSuiteMarkerInitializesAtomicallyAndReopens(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	marker, err := ensureStorageSchema(db, cryptosuite.INTLV1)
+	marker, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test")
 	if err != nil {
 		t.Fatalf("ensureStorageSchema: %v", err)
 	}
@@ -30,10 +30,10 @@ func TestPebbleSuiteMarkerInitializesAtomicallyAndReopens(t *testing.T) {
 	} else {
 		_ = closer.Close()
 	}
-	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); err != nil {
+	if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); err != nil {
 		t.Fatalf("reopen marker: %v", err)
 	}
-	if _, err := ensureStorageSchema(db, cryptosuite.CNSMV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+	if _, err := ensureStorageSchema(db, cryptosuite.CNSMV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("mismatch code=%s err=%v", trusterr.CodeOf(err), err)
 	}
 }
@@ -49,7 +49,7 @@ func TestPebbleSuiteMarkerRejectsMissingCorruptAndUnknownState(t *testing.T) {
 		if err := db.Set([]byte("data"), []byte("present"), pdb.Sync); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("missing marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
@@ -62,7 +62,7 @@ func TestPebbleSuiteMarkerRejectsMissingCorruptAndUnknownState(t *testing.T) {
 		if err := db.Set([]byte(idempotencyReadyKey), []byte(idempotencyReadyV1), pdb.Sync); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("partial marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
@@ -75,7 +75,7 @@ func TestPebbleSuiteMarkerRejectsMissingCorruptAndUnknownState(t *testing.T) {
 		if err := db.Set([]byte(storageSchemaKey), []byte{0xff}, pdb.Sync); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
+		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 			t.Fatalf("corrupt marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
@@ -85,13 +85,13 @@ func TestPebbleSuiteMarkerRejectsMissingCorruptAndUnknownState(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer db.Close()
-		marker, _ := proofstoremeta.New(cryptosuite.INTLV1)
+		marker, _ := proofstoremeta.New(cryptosuite.INTLV1, "node-1", "log-1", "test")
 		marker.CryptoSuite = cryptosuite.ID("UNKNOWN")
 		data, _ := cborx.Marshal(marker)
 		if err := db.Set([]byte(storageSchemaKey), data, pdb.Sync); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		if _, err := ensureStorageSchema(db, cryptosuite.INTLV1, "node-1", "log-1", "test"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 			t.Fatalf("unknown marker code=%s err=%v", trusterr.CodeOf(err), err)
 		}
 	})
@@ -112,7 +112,7 @@ func TestPebbleSuiteMarkerSerializesConcurrentInitialization(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := ensureStorageSchema(db, suiteID)
+			_, err := ensureStorageSchema(db, suiteID, "node-1", "log-1", "test")
 			results <- err
 		}()
 	}

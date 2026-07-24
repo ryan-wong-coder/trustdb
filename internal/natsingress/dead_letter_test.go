@@ -42,7 +42,7 @@ func TestDeadLetterCanonicalRoundTripPreservesCompleteRejection(t *testing.T) {
 	if decoded.ID == decoded.Headers.Get(HeaderMessageID) {
 		t.Fatal("dead-letter trusted the malformed caller message ID as its identity")
 	}
-	if decoded.Subject != "trustdb.ingress.v1.claims" || decoded.Reply != "reply.subject" || decoded.Stream != "TRUSTDB_INGRESS" || decoded.Consumer != "trustdb-ingress" {
+	if decoded.Subject != "trustdb.ingress.v2.claims" || decoded.Reply != "reply.subject" || decoded.Stream != "TRUSTDB_INGRESS_V2" || decoded.Consumer != "trustdb-ingress-v2" {
 		t.Fatalf("decoded broker identity = %+v", decoded)
 	}
 	if decoded.StreamSequence != 17 || decoded.ConsumerSequence != 9 || decoded.NumDelivered != 3 {
@@ -53,7 +53,7 @@ func TestDeadLetterCanonicalRoundTripPreservesCompleteRejection(t *testing.T) {
 	}
 
 	digest := sha256.Sum256(encoded)
-	const wantSHA256 = "32fb7ceab5489f187b7bdaeeb05cf4ffd7601f54face466f853794b9da33547f"
+	const wantSHA256 = "a4c7c10ded76ccaff3af5615e790b6b7caf63e4f669e940e88af82502c8e31a4"
 	if got := hex.EncodeToString(digest[:]); got != wantSHA256 {
 		t.Fatalf("dead-letter CBOR SHA-256 = %s, want %s", got, wantSHA256)
 	}
@@ -62,12 +62,12 @@ func TestDeadLetterCanonicalRoundTripPreservesCompleteRejection(t *testing.T) {
 func TestDeadLetterLimitMatchesAvailableNATSGeneration(t *testing.T) {
 	t.Parallel()
 
-	descriptor, ok := formatregistry.Lookup(formatregistry.NATSV1)
+	descriptor, ok := formatregistry.Lookup(formatregistry.NATSV2)
 	if !ok {
-		t.Fatal("NATS v1 format generation is not registered")
+		t.Fatal("NATS v2 format generation is not registered")
 	}
-	if descriptor.Availability != formatregistry.AvailabilityAvailable || descriptor.MaxBytes != MaxDeadLetterBytes {
-		t.Fatalf("NATS v1 descriptor = %+v, dead-letter max = %d", descriptor, MaxDeadLetterBytes)
+	if descriptor.Availability != formatregistry.AvailabilityAvailable || descriptor.MaxBytes < MaxDeadLetterBytes {
+		t.Fatalf("NATS v2 descriptor = %+v, dead-letter max = %d", descriptor, MaxDeadLetterBytes)
 	}
 }
 
@@ -78,7 +78,7 @@ func TestDeadLetterRejectsTamperingUnknownFieldsAndOversize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadLetter.FormatGeneration = "trustdb.nats-ingress.v2"
+	deadLetter.FormatGeneration = formatregistry.NATSV1
 	if _, err := EncodeDeadLetter(deadLetter); err == nil || !strings.Contains(err.Error(), "format generation") {
 		t.Fatalf("EncodeDeadLetter(format generation) error = %v", err)
 	}
@@ -155,12 +155,12 @@ func fixtureRejection() Rejection {
 		"X-Trace":         {"trace-a", "trace-b"},
 	}
 	rejection := Rejection{
-		Subject:          "trustdb.ingress.v1.claims",
+		Subject:          "trustdb.ingress.v2.claims",
 		Reply:            "reply.subject",
 		Headers:          headers,
 		Data:             []byte{0xff, 0x01, 0x02, 0x03},
-		Stream:           "TRUSTDB_INGRESS",
-		Consumer:         "trustdb-ingress",
+		Stream:           "TRUSTDB_INGRESS_V2",
+		Consumer:         "trustdb-ingress-v2",
 		StreamSequence:   17,
 		ConsumerSequence: 9,
 		NumDelivered:     3,

@@ -26,10 +26,9 @@ import (
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
-	"github.com/wowtrust/trustdb/internal/wal"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 func TestDecodeSingleJSONRejectsTrailingData(t *testing.T) {
@@ -147,56 +146,11 @@ func TestVerifyCmdRemoteSkipAnchor(t *testing.T) {
 	}
 }
 
-func TestVerifyCmdLocalSingleProof(t *testing.T) {
-	ctx := context.Background()
-
-	server, _, clientPub, serverPub, contentPath, recordID := runServeForVerify(t, ctx)
-	bundle, global, anchorResult := fetchSingleProofInputs(t, ctx, server, recordID)
-	single, err := sproof.New(bundle, sproof.Options{
-		GlobalProof:     &global,
-		AnchorResult:    anchorResult,
-		ExportedAtUnixN: time.Unix(600, 0).UnixNano(),
-	})
-	if err != nil {
-		t.Fatalf("sproof.New: %v", err)
+func TestSingleProofV1WriterIsReserved(t *testing.T) {
+	_, err := sproof.New(model.ProofBundle{CryptoSuite: cryptosuite.INTLV1}, sproof.Options{})
+	if trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("sproof.New() code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
 	}
-	sproofPath := filepath.Join(t.TempDir(), "proof.sproof")
-	if err := sproof.WriteFile(sproofPath, single); err != nil {
-		t.Fatalf("sproof.WriteFile: %v", err)
-	}
-
-	t.Run("default verifies L5", func(t *testing.T) {
-		rt, outBuf := newVerifyRuntime(t)
-		cmd := newVerifyCommand(rt)
-		cmd.SetArgs([]string{
-			"--file", contentPath,
-			"--sproof", sproofPath,
-			"--client-public-key", writePubKey(t, "client-key", clientPub),
-			"--server-public-key", writePubKey(t, "server-key", serverPub),
-		})
-		cmd.SetContext(ctx)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("verify: %v", err)
-		}
-		assertVerifyLevel(t, outBuf, "L5")
-	})
-
-	t.Run("skip anchor stops at L4", func(t *testing.T) {
-		rt, outBuf := newVerifyRuntime(t)
-		cmd := newVerifyCommand(rt)
-		cmd.SetArgs([]string{
-			"--file", contentPath,
-			"--sproof", sproofPath,
-			"--client-public-key", writePubKey(t, "client-key", clientPub),
-			"--server-public-key", writePubKey(t, "server-key", serverPub),
-			"--skip-anchor",
-		})
-		cmd.SetContext(ctx)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("verify: %v", err)
-		}
-		assertVerifyLevel(t, outBuf, "L4")
-	})
 }
 
 // TestVerifyCmdRejectsConflictingFlags asserts the CLI guards against
@@ -372,7 +326,7 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 	anchorPath := filepath.Join(tmp, "anchors.jsonl")
 
 	_, metrics := observability.NewRegistry()
-	writer, _, err := openWALWriterWithOptions(walDir, wal.Options{})
+	writer, _, err := openBoundTestWALWriter(t, walDir, 0)
 	if err != nil {
 		t.Fatalf("openWALWriterWithOptions: %v", err)
 	}
@@ -388,7 +342,7 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Unix(500, 0) },
 	}
-	proofStore := proofstore.LocalStore{Root: proofDir}
+	proofStore := newBoundTestLocalStore(t, proofDir)
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 4, Workers: 1}, metrics)
 	t.Cleanup(func() { _ = ingestSvc.Shutdown(context.Background()) })
 
@@ -432,7 +386,7 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 	})
 	globalOutbox.Start(ctx)
 	t.Cleanup(globalOutbox.Stop)
-	batchSvc := batch.New(engine, proofStore, batch.Options{
+	batchSvc := batch.New(engine, proofStore, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:        4,
 		MaxRecords:       1, // force immediate commit per claim
 		MaxDelay:         20 * time.Millisecond,
@@ -474,9 +428,9 @@ func runServeForVerify(t *testing.T, ctx context.Context) (*httptest.Server, ed2
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	resp, err := http.Post(server.URL+"/v1/claims", "application/cbor", bytes.NewReader(body))
+	resp, err := http.Post(server.URL+"/v2/claims", "application/cbor", bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("POST /v1/claims: %v", err)
+		t.Fatalf("POST /v2/claims: %v", err)
 	}
 	var decoded struct {
 		RecordID string `json:"record_id"`

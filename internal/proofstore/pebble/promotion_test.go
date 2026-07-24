@@ -15,17 +15,17 @@ import (
 )
 
 func TestGlobalPublicationPersistsIntentBeforeChunkedL4Projection(t *testing.T) {
-	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeFull}))
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
 	defer store.Close()
 	ctx := context.Background()
 	const batchID = "batch-pebble-intent-first"
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaGlobalLogOutbox,
 		BatchID:       batchID,
-		BatchRoot: model.BatchRoot{
+		BatchRoot: model.BatchRoot{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       batchID,
 			BatchRoot:     bytes.Repeat([]byte{0x31}, 32),
@@ -50,7 +50,7 @@ func TestGlobalPublicationPersistsIntentBeforeChunkedL4Projection(t *testing.T) 
 		t.Fatalf("close dangling batch index: %v", err)
 	}
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
-	sth := model.SignedTreeHead{
+	sth := model.SignedTreeHead{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaSignedTreeHead, TreeAlg: model.DefaultMerkleTreeAlg,
 		TreeSize: 1, RootHash: bytes.Repeat([]byte{0x41}, 32), TimestampUnixN: 101,
 		NodeID: key.NodeID, LogID: key.LogID,
@@ -89,7 +89,7 @@ func TestGlobalPublicationPersistsIntentBeforeChunkedL4Projection(t *testing.T) 
 func TestStageRecordIndexPromotionMutationCounts(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeFull}))
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestPromoteBatchRecordsPreservesIndexModeTransitions(t *testing.T) {
 	t.Parallel()
 
 	t.Run("no storage tokens to full backfills tokens", func(t *testing.T) {
-		store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeNoStorageTokens})
+		store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeNoStorageTokens}))
 		if err != nil {
 			t.Fatalf("OpenWithOptions: %v", err)
 		}
@@ -198,7 +198,7 @@ func TestPromoteBatchRecordsPreservesIndexModeTransitions(t *testing.T) {
 
 	for _, mode := range []string{RecordIndexModeNoStorageTokens, RecordIndexModeTimeOnly} {
 		t.Run("full to "+mode+" cleans stale indexes", func(t *testing.T) {
-			store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+			store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeFull}))
 			if err != nil {
 				t.Fatalf("OpenWithOptions: %v", err)
 			}
@@ -241,7 +241,7 @@ func TestPromoteBatchRecordsMigratesLegacyInlineIndexes(t *testing.T) {
 		{name: "canonical batch with mixed and missing secondaries", mixed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+			store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeFull}))
 			if err != nil {
 				t.Fatalf("OpenWithOptions: %v", err)
 			}
@@ -314,7 +314,7 @@ func TestPromoteBatchRecordsMigratesLegacyInlineIndexes(t *testing.T) {
 }
 
 func promotionRecordIndex(withTokens bool) model.RecordIndex {
-	idx := model.RecordIndex{
+	idx := model.RecordIndex{CryptoSuite: "INTL_V1",
 		SchemaVersion:   model.SchemaRecordIndex,
 		RecordID:        "tr-promotion-0001",
 		BatchID:         "batch-promotion",

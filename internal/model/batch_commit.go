@@ -1,6 +1,6 @@
 package model
 
-import "crypto/sha256"
+import "github.com/wowtrust/trustdb/internal/cryptosuite"
 
 const (
 	BatchComputePlanOnly     = "plan_only"
@@ -22,10 +22,11 @@ type BatchComputeOptions struct {
 }
 
 type BatchTreeSnapshot struct {
+	CryptoSuite    cryptosuite.ID
 	BatchID        string
 	CreatedAtUnixN int64
 	RecordIDs      []string
-	LeafHashes     [][sha256.Size]byte
+	LeafHashes     [][cryptosuite.DigestSize]byte
 	Nodes          []BatchTreeSnapshotNode
 }
 
@@ -33,7 +34,7 @@ type BatchTreeSnapshotNode struct {
 	Level      uint64
 	StartIndex uint64
 	Width      uint64
-	Hash       [sha256.Size]byte
+	Hash       [cryptosuite.DigestSize]byte
 }
 
 type BatchCommit struct {

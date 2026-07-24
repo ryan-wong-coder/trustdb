@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/app"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -17,7 +18,7 @@ func BenchmarkBatchProofModeInline1024(b *testing.B) {
 	engine := benchmarkLocalEngine(b)
 	items := benchmarkBatchItems(1024)
 	closedAt := time.Unix(1_900, 0).UTC()
-	svc := New(engine, benchmarkBatchStore{}, Options{ProofMode: ProofModeInline}, nil)
+	svc := New(engine, benchmarkBatchStore{}, Options{CryptoSuite: cryptosuite.INTLV1, ProofMode: ProofModeInline}, nil)
 	defer svc.Shutdown(context.Background())
 
 	b.ReportAllocs()
@@ -33,7 +34,7 @@ func BenchmarkBatchProofModeAsync1024(b *testing.B) {
 	items := benchmarkBatchItems(1024)
 	signed, records, accepted := splitBenchmarkBatchItems(items)
 	closedAt := time.Unix(1_900, 0).UTC()
-	svc := New(engine, benchmarkBatchStore{}, Options{ProofMode: ProofModeAsync}, nil)
+	svc := New(engine, benchmarkBatchStore{}, Options{CryptoSuite: cryptosuite.INTLV1, ProofMode: ProofModeAsync}, nil)
 	defer svc.Shutdown(context.Background())
 
 	b.ReportAllocs()

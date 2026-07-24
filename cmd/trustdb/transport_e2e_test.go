@@ -15,13 +15,13 @@ import (
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/batch"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/httpapi"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 	"github.com/wowtrust/trustdb/sdk"
@@ -87,35 +87,26 @@ func TestHTTPAndGRPCTransportsShareProofSemantics(t *testing.T) {
 				t.Fatalf("submit result = %+v", res)
 			}
 
-			proof := waitForSingleProofLevel(t, tt.proofWith, res.RecordID, sdk.ProofLevelL5)
-			if proof.GlobalProof == nil {
-				t.Fatalf("single proof missing global proof: %+v", proof)
+			artifacts := waitForProofArtifactsLevel(t, tt.proofWith, res.RecordID, sdk.ProofLevelL5)
+			if artifacts.GlobalProof == nil {
+				t.Fatalf("proof artifacts missing global proof: %+v", artifacts)
 			}
-			if proof.AnchorResult == nil || proof.AnchorResult.SinkName != anchor.NoopSinkName {
-				t.Fatalf("single proof anchor = %+v", proof.AnchorResult)
+			if artifacts.AnchorResult == nil || artifacts.AnchorResult.SinkName != anchor.NoopSinkName {
+				t.Fatalf("proof artifacts anchor = %+v", artifacts.AnchorResult)
 			}
-			if proof.GlobalProof.BatchID != proof.ProofBundle.CommittedReceipt.BatchID {
+			if artifacts.GlobalProof.BatchID != artifacts.Bundle.CommittedReceipt.BatchID {
 				t.Fatalf("global proof batch_id = %q, bundle batch_id = %q",
-					proof.GlobalProof.BatchID,
-					proof.ProofBundle.CommittedReceipt.BatchID,
+					artifacts.GlobalProof.BatchID,
+					artifacts.Bundle.CommittedReceipt.BatchID,
 				)
 			}
 
-			sproofPath := filepath.Join(t.TempDir(), fmt.Sprintf("transport-%d.sproof", i))
-			if err := sdk.WriteSingleProofFile(sproofPath, proof); err != nil {
-				t.Fatalf("WriteSingleProofFile: %v", err)
-			}
-			loadedProof, err := sdk.ReadSingleProofFile(sproofPath)
-			if err != nil {
-				t.Fatalf("ReadSingleProofFile: %v", err)
-			}
-
-			verified, err := sdk.VerifySingleProof(bytes.NewReader(tt.payload), loadedProof, sdk.TrustedKeys{
+			verified, err := sdk.VerifyArtifacts(bytes.NewReader(tt.payload), artifacts, sdk.TrustedKeys{
 				ClientPublicKey: env.clientPub,
 				ServerPublicKey: env.serverPub,
 			}, sdk.VerifyOptions{})
 			if err != nil {
-				t.Fatalf("VerifySingleProof: %v", err)
+				t.Fatalf("VerifyArtifacts: %v", err)
 			}
 			if !verified.Valid || verified.ProofLevel != sdk.ProofLevelL5 || verified.RecordID != res.RecordID {
 				t.Fatalf("verify result = %+v", verified)
@@ -153,7 +144,8 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 	}
 
 	tmp := t.TempDir()
-	writer, _, err := openWALWriterWithOptions(filepath.Join(tmp, "wal"), wal.Options{})
+	walPath := filepath.Join(tmp, "wal")
+	writer, _, err := openWALWriterWithOptions(walPath, newBoundTestWALOptions(t, walPath, wal.Options{}))
 	if err != nil {
 		t.Fatalf("openWALWriterWithOptions: %v", err)
 	}
@@ -170,7 +162,7 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 		Idempotency:     app.NewIdempotencyIndex(),
 		Now:             func() time.Time { return time.Now().UTC() },
 	}
-	proofStore := proofstore.LocalStore{Root: filepath.Join(tmp, "proofs")}
+	proofStore := newBoundTestLocalStore(t, filepath.Join(tmp, "proofs"))
 	ingestSvc := ingest.New(engine, ingest.Options{QueueSize: 16, Workers: 2}, metrics)
 	t.Cleanup(func() { ingestSvc.Shutdown(context.Background()) })
 
@@ -211,7 +203,7 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 	globalOutbox.Start(context.Background())
 	t.Cleanup(globalOutbox.Stop)
 
-	batchSvc := batch.New(engine, proofStore, batch.Options{
+	batchSvc := batch.New(engine, proofStore, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:        16,
 		MaxRecords:       1,
 		MaxDelay:         20 * time.Millisecond,
@@ -263,35 +255,44 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 	}
 }
 
-func waitForSingleProofLevel(t *testing.T, client *sdk.Client, recordID, wantLevel string) sdk.SingleProof {
+func waitForProofArtifactsLevel(t *testing.T, client *sdk.Client, recordID, wantLevel string) sdk.ProofArtifacts {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	var (
-		lastProof sdk.SingleProof
-		lastErr   error
+		lastArtifacts sdk.ProofArtifacts
+		lastErr       error
 	)
 	for time.Now().Before(deadline) {
-		proof, err := client.ExportSingleProof(context.Background(), recordID)
-		if err == nil {
-			lastProof = proof
-			if proof.AnchorResult != nil && proof.GlobalProof != nil && wantLevel == sdk.ProofLevelL5 {
-				return proof
-			}
-			if wantLevel != sdk.ProofLevelL5 && proof.ProofBundle.RecordID != "" {
-				return proof
-			}
-		} else {
+		bundle, err := client.GetProofBundle(context.Background(), recordID)
+		if err != nil {
 			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		lastArtifacts.Bundle = bundle
+		evidence, err := client.GetGlobalEvidence(context.Background(), bundle.CommittedReceipt.BatchID)
+		if err != nil {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		lastArtifacts.GlobalProof = &evidence.GlobalProof
+		lastArtifacts.AnchorResult = evidence.AnchorResult
+		if evidence.AnchorResult != nil && wantLevel == sdk.ProofLevelL5 {
+			return lastArtifacts
+		}
+		if wantLevel != sdk.ProofLevelL5 {
+			return lastArtifacts
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("single proof for %s never reached %s; last_record=%q global=%v anchor=%v last_err=%v",
+	t.Fatalf("proof artifacts for %s never reached %s; last_record=%q global=%v anchor=%v last_err=%v",
 		recordID,
 		wantLevel,
-		lastProof.RecordID,
-		lastProof.GlobalProof != nil,
-		lastProof.AnchorResult != nil,
+		lastArtifacts.Bundle.RecordID,
+		lastArtifacts.GlobalProof != nil,
+		lastArtifacts.AnchorResult != nil,
 		lastErr,
 	)
-	return sdk.SingleProof{}
+	return sdk.ProofArtifacts{}
 }

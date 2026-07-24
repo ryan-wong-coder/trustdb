@@ -24,6 +24,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/claim"
 	trustconfig "github.com/wowtrust/trustdb/internal/config"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/httpapi"
@@ -32,6 +33,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/l5projector"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/natsingress"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -299,19 +301,21 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if err := validateSemanticModes(batchProofMode, proofstoreRecordIndexMode, proofstoreArtifactSyncMode); err != nil {
 				return err
 			}
+			nodeID := stringValue(cmd, rt, "server-id", "server_id")
+			logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
 			reg, metrics := observability.NewRegistry()
-			walOpts := wal.Options{
+			var walOpts wal.Options
+			walOpts = wal.Options{
 				MaxSegmentBytes:     walMaxSegmentBytes,
 				FsyncMode:           walFsyncMode,
 				GroupCommitInterval: walGroupCommitInterval,
 				OnRotate: func(_, to uint64) {
 					metrics.WALActiveSegmentID.Set(float64(to))
-					// The count gauge is refreshed on rotate rather than
-					// read live so prometheus scrapes remain cheap; a
-					// fresh segment becoming active implies +1 file.
-					if err := refreshWALSegmentsTotal(metrics, walPath); err != nil {
-						rt.logger.Warn().Err(err).Str("wal", walPath).Msg("wal segment metric refresh failed")
-					}
+					// The callback runs inside the writer's namespace
+					// maintenance barrier. A successful rotation publishes
+					// exactly one new segment, so update without recursively
+					// opening a reader lock.
+					metrics.WALSegmentsTotal.Inc()
 				},
 				OnAppend: func(mode string, d time.Duration) {
 					metrics.WALAppendLatency.WithLabelValues(mode).Observe(d.Seconds())
@@ -323,6 +327,11 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 					rt.logger.Error().Err(err).Str("fsync_mode", mode).Str("wal", walPath).Msg("wal fsync failed")
 				},
 			}
+			walOpts, walID, err := bindWALNamespaceOptions(walOpts, serverKey.CryptoSuite, nodeID, logID, walPath)
+			if err != nil {
+				return err
+			}
+			logID = walOpts.LogID
 			writer, walMode, err := openWALWriterWithOptions(walPath, walOpts)
 			if err != nil {
 				return err
@@ -346,7 +355,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			// not after the first rotate/prune.
 			metrics.WALActiveSegmentID.Set(float64(writer.ActiveSegmentID()))
 			if walMode == "directory" {
-				if err := refreshWALSegmentsTotal(metrics, walPath); err != nil {
+				if err := refreshWALSegmentsTotal(metrics, walPath, walOpts); err != nil {
 					rt.logger.Warn().Err(err).Str("wal", walPath).Msg("wal segment metric refresh failed")
 				}
 			} else {
@@ -354,15 +363,6 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			}
 
 			idempotency := app.NewIdempotencyIndex()
-			nodeID := stringValue(cmd, rt, "server-id", "server_id")
-			walID, err := filepath.Abs(filepath.Clean(walPath))
-			if err != nil {
-				return trusterr.Wrap(trusterr.CodeInvalidArgument, "resolve wal identity", err)
-			}
-			logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
-			if logID == "" {
-				logID = nodeID
-			}
 			engine := app.LocalEngine{
 				ServerID:        nodeID,
 				LogID:           logID,
@@ -410,6 +410,9 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				IndexStorageTokens:           !strings.EqualFold(proofstoreRecordIndexMode, "no_storage_tokens"),
 				IndexStorageTokensConfigured: cmd.Flags().Changed("proofstore-index-storage-tokens"),
 				CryptoSuite:                  serverKey.CryptoSuite,
+				NodeID:                       nodeID,
+				LogID:                        logID,
+				NamespaceID:                  proofstoreNamespaceID(metaKind, metaPath, proofstoreTiKVKeyspace, proofstoreTiKVNamespace),
 			})
 			if err != nil {
 				return err
@@ -454,6 +457,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				Bool("global_log_enabled", rt.cfg.GlobalLog.Enabled).
 				Msg("semantic performance profile active")
 			batchOpts := batch.Options{
+				CryptoSuite:              serverKey.CryptoSuite,
 				QueueSize:                batchQueueSize,
 				MaxRecords:               batchMaxRecords,
 				MaxDelay:                 batchMaxDelay,
@@ -491,6 +495,9 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				}
 				statusHub, err = statusnotify.New(statusnotify.Config{
 					StatePath:   filepath.Join(proofDir, "status-subscriptions.json"),
+					NodeID:      nodeID,
+					LogID:       logID,
+					NamespaceID: proofstoreNamespaceID(metaKind, metaPath, proofstoreTiKVKeyspace, proofstoreTiKVNamespace),
 					Routes:      routes,
 					Signer:      serverSigner,
 					CryptoSuite: suiteID,
@@ -525,7 +532,7 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 			if walMode == "directory" {
 				pruneGuard, guarded := proofStore.(proofstore.WALCheckpointPruneGuard)
 				if proofstore.WALCheckpointPruneSafe(proofStore) && guarded {
-					pruneHook := newPruneHook(rt, walPath, walKeepSegments, metrics)
+					pruneHook := newPruneHook(rt, walPath, walKeepSegments, metrics, walOpts)
 					batchOpts.OnCheckpointAdvanced = func(ctx context.Context, cp model.WALCheckpoint) {
 						ran, err := pruneGuard.WithWALCheckpointPruneGuard(ctx, cp, func() error {
 							pruneHook(ctx, cp)
@@ -1171,6 +1178,7 @@ func newGlobalLogEnqueueHook(rt *runtimeConfig, store proofstore.Store, worker *
 		}
 		item := model.GlobalLogOutboxItem{
 			SchemaVersion: model.SchemaGlobalLogOutbox,
+			CryptoSuite:   root.CryptoSuite,
 			BatchID:       root.BatchID,
 			BatchRoot:     root,
 			Status:        model.AnchorStatePending,
@@ -1217,6 +1225,7 @@ func backfillGlobalLogOutbox(ctx context.Context, store proofstore.Store) (int, 
 			}
 			item := model.GlobalLogOutboxItem{
 				SchemaVersion: model.SchemaGlobalLogOutbox,
+				CryptoSuite:   root.CryptoSuite,
 				BatchID:       root.BatchID,
 				BatchRoot:     root,
 				Status:        model.AnchorStatePending,
@@ -1274,15 +1283,17 @@ func restoreBatchSeq(ctx context.Context, rt *runtimeConfig, store proofstore.St
 // can verify pruning is actually happening. Errors are logged only — they
 // never propagate back into the batch pipeline because correctness of the
 // committed batch does not depend on prune succeeding.
-func newPruneHook(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics) func(context.Context, model.WALCheckpoint) {
-	return newPruneHookWithPruner(rt, walDir, keepSegments, metrics, wal.PruneSegmentsBefore)
+func newPruneHook(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics, opts wal.Options) func(context.Context, model.WALCheckpoint) {
+	return newPruneHookWithPruner(rt, walDir, keepSegments, metrics, opts, func(dir string, cutoff uint64) (int, int64, error) {
+		return wal.PruneSegmentsBefore(dir, cutoff, opts)
+	})
 }
 
 type pruneSegmentsFunc func(string, uint64) (int, int64, error)
 
-func newPruneHookWithPruner(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics, prune pruneSegmentsFunc) func(context.Context, model.WALCheckpoint) {
+func newPruneHookWithPruner(rt *runtimeConfig, walDir string, keepSegments int, metrics *observability.Metrics, opts wal.Options, prune pruneSegmentsFunc) func(context.Context, model.WALCheckpoint) {
 	refreshSegments := func() {
-		if err := refreshWALSegmentsTotal(metrics, walDir); err != nil {
+		if err := refreshWALSegmentsTotal(metrics, walDir, opts); err != nil {
 			rt.logger.Warn().Err(err).Str("wal", walDir).Msg("wal segment metric refresh failed")
 		}
 	}
@@ -1342,11 +1353,11 @@ func newPruneHookWithPruner(rt *runtimeConfig, walDir string, keepSegments int, 
 	}
 }
 
-func refreshWALSegmentsTotal(metrics *observability.Metrics, walDir string) error {
+func refreshWALSegmentsTotal(metrics *observability.Metrics, walDir string, opts wal.Options) error {
 	if metrics == nil {
 		return nil
 	}
-	segs, err := wal.ListSegments(walDir)
+	segs, err := wal.ListSegments(walDir, opts)
 	if err != nil {
 		return err
 	}
@@ -1451,13 +1462,6 @@ func validateSemanticModes(proofMode, recordIndexMode, artifactSyncMode string) 
 	return nil
 }
 
-// openWALWriter is the rotate-hook-free variant used by tests and existing
-// callers that only care about mode selection. It forwards to the options
-// form with just MaxSegmentBytes populated.
-func openWALWriter(walPath string, maxSegmentBytes int64) (*wal.Writer, string, error) {
-	return openWALWriterWithOptions(walPath, wal.Options{MaxSegmentBytes: maxSegmentBytes})
-}
-
 // openWALWriterWithOptions opens the server's segment-rotating WAL directory.
 // Regular files fail closed: serve does not automatically adopt or migrate the
 // old single-file layout.
@@ -1480,7 +1484,7 @@ func openWALWriterWithOptions(walPath string, opts wal.Options) (*wal.Writer, st
 	}
 }
 
-func scanWALRecords(walPath string, minSegmentID uint64, visit func(wal.Record) error) error {
+func scanWALRecords(walPath string, minSegmentID uint64, opts wal.Options, visit func(wal.Record) error) error {
 	info, err := os.Stat(walPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1489,31 +1493,9 @@ func scanWALRecords(walPath string, minSegmentID uint64, visit func(wal.Record) 
 		return err
 	}
 	if info.IsDir() {
-		return wal.ScanDirFrom(walPath, minSegmentID, visit)
+		return wal.ScanDirFrom(walPath, minSegmentID, opts, visit)
 	}
-	return wal.Scan(walPath, visit)
-}
-
-func inspectWALSequenceBounds(walPath string) (uint64, uint64, error) {
-	info, err := os.Stat(walPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, 0, nil
-		}
-		return 0, 0, err
-	}
-	if info.IsDir() {
-		inspection, err := wal.InspectDir(walPath)
-		if err != nil {
-			return 0, 0, err
-		}
-		return inspection.FirstSequence, inspection.LastSequence, nil
-	}
-	inspection, err := wal.Inspect(walPath)
-	if err != nil {
-		return 0, 0, err
-	}
-	return inspection.FirstSequence, inspection.LastSequence, nil
+	return wal.Scan(walPath, opts, visit)
 }
 
 type preparedReplay struct {
@@ -1598,6 +1580,10 @@ func validateCommittedReplayIndex(ctx context.Context, store proofstore.Store, m
 }
 
 func validateCommittedReplayRecord(ctx context.Context, store proofstore.Store, manifests *replayManifestCache, record wal.Record, item app.ReplayedAccepted, idx model.RecordIndex) (string, model.ProofBundle, error) {
+	suite, err := cryptosuite.RequireAvailable(record.CryptoSuite)
+	if err != nil {
+		return "", model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "replayed wal record crypto_suite", err)
+	}
 	recordID := item.Record.RecordID
 	manifest, err := validateCommittedReplayIndex(ctx, store, manifests, recordID, idx)
 	if err != nil {
@@ -1628,15 +1614,26 @@ func validateCommittedReplayRecord(ctx context.Context, store proofstore.Store, 
 		!bytes.Equal(bundle.ServerRecord.ClaimHash, item.Record.ClaimHash) {
 		return "", model.ProofBundle{}, trusterr.New(trusterr.CodeDataLoss, "proof bundle server record does not match the replayed claim")
 	}
-	if err := validateProofBundleClaim(bundle); err != nil {
+	if err := validateProofBundleClaim(suite.ID, bundle); err != nil {
 		return "", model.ProofBundle{}, err
 	}
-	leafHash, err := merkle.HashLeaf(bundle.ServerRecord)
+	leafHash, err := merkle.HashLeafForSuite(suite.ID, suite.Merkle.Algorithm, bundle.ServerRecord)
 	if err != nil {
 		return "", model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "hash replay proof bundle leaf", err)
 	}
-	if !bytes.Equal(leafHash, bundle.CommittedReceipt.LeafHash) ||
-		!merkle.Verify(leafHash, idx.BatchLeafIndex, manifest.TreeSize, bundle.BatchProof.AuditPath, manifest.BatchRoot) {
+	pathValid, err := merkle.VerifyForSuite(
+		suite.ID,
+		suite.Merkle.Algorithm,
+		leafHash,
+		idx.BatchLeafIndex,
+		manifest.TreeSize,
+		bundle.BatchProof.AuditPath,
+		manifest.BatchRoot,
+	)
+	if err != nil {
+		return "", model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDataLoss, "verify replay proof bundle merkle path", err)
+	}
+	if !bytes.Equal(leafHash, bundle.CommittedReceipt.LeafHash) || !pathValid {
 		return "", model.ProofBundle{}, trusterr.New(trusterr.CodeDataLoss, "proof bundle merkle path does not match its committed batch manifest")
 	}
 	return idx.BatchID, bundle, nil
@@ -1697,7 +1694,17 @@ func validateDurableReplayDecision(ctx context.Context, engine app.LocalEngine, 
 	if bundle == nil {
 		return trusterr.New(trusterr.CodeDataLoss, "committed wal record has no persisted proof bundle")
 	}
-	expected, err := idempotency.BuildDecision(batchID, bundle.SignedClaim, bundle.ServerRecord, bundle.AcceptedReceipt)
+	provider, err := trustcrypto.ProviderForSuite(item.Signed.CryptoSuite)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "build replay idempotency crypto provider", err)
+	}
+	expected, err := idempotency.BuildDecisionWithProvider(
+		provider,
+		batchID,
+		bundle.SignedClaim,
+		bundle.ServerRecord,
+		bundle.AcceptedReceipt,
+	)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "build replay idempotency decision", err)
 	}
@@ -1707,7 +1714,18 @@ func validateDurableReplayDecision(ctx context.Context, engine app.LocalEngine, 
 	return nil
 }
 
-func validateProofBundleClaim(bundle model.ProofBundle) error {
+func validateProofBundleClaim(suiteID cryptosuite.ID, bundle model.ProofBundle) error {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "checkpointed proof crypto_suite", err)
+	}
+	if err := modelsuite.Require(suite.ID, bundle); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "checkpointed proof suite binding", err)
+	}
+	provider, err := trustcrypto.ProviderForSuite(suite.ID)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "checkpointed proof crypto provider", err)
+	}
 	signed := bundle.SignedClaim
 	record := bundle.ServerRecord
 	accepted := bundle.AcceptedReceipt
@@ -1726,15 +1744,19 @@ func validateProofBundleClaim(bundle model.ProofBundle) error {
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "canonicalize checkpointed proof claim", err)
 	}
-	claimHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, claimCBOR)
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, claimCBOR)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "hash checkpointed proof claim", err)
 	}
-	signatureHash, err := trustcrypto.HashBytes(model.DefaultHashAlg, signed.Signature.Signature)
+	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "hash checkpointed proof signature", err)
 	}
-	if claim.RecordID(claimCBOR, signed.Signature) != record.RecordID ||
+	recordID, err := claim.RecordIDWithProvider(provider, claimCBOR, signed.Signature)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "derive checkpointed proof record id", err)
+	}
+	if recordID != record.RecordID ||
 		!bytes.Equal(claimHash, record.ClaimHash) ||
 		!bytes.Equal(signatureHash, record.ClientSignatureHash) {
 		return trusterr.New(trusterr.CodeDataLoss, "checkpointed proof claim is not bound to its server record")
@@ -1784,7 +1806,7 @@ func loadManifestItemsFromWAL(ctx context.Context, walPath string, engine app.Lo
 	if minSegmentID == 0 {
 		minSegmentID = 1
 	}
-	err := scanWALRecords(walPath, minSegmentID, func(record wal.Record) error {
+	err := scanWALRecords(walPath, minSegmentID, engine.WAL.BindingOptions(), func(record wal.Record) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1843,45 +1865,23 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	if foundCheckpoint && checkpoint.SchemaVersion != "" &&
-		checkpoint.SchemaVersion != model.SchemaWALCheckpoint &&
-		checkpoint.SchemaVersion != model.SchemaWALCheckpointContiguous {
+	if foundCheckpoint && checkpoint.SchemaVersion != model.SchemaWALCheckpoint {
 		return 0, 0, 0, trusterr.New(trusterr.CodeFailedPrecondition, "unsupported wal checkpoint schema: "+checkpoint.SchemaVersion)
 	}
-	// v1 checkpoints were derived from batch min/max envelopes and could leap
-	// across gaps. Only a positive v2 value certifies a skippable committed
-	// prefix. A v2 zero marker is valid migration state, but still requires the
-	// retained WAL to begin at sequence one.
-	trustedCheckpoint := checkpointSafe && foundCheckpoint && checkpoint.SchemaVersion == model.SchemaWALCheckpointContiguous
+	if engine.WAL == nil {
+		return 0, 0, 0, trusterr.New(trusterr.CodeFailedPrecondition, "wal writer is required for replay")
+	}
+	walBinding := engine.WAL.BindingOptions()
+	trustedCheckpoint := checkpointSafe && foundCheckpoint
 	hasCheckpoint := trustedCheckpoint && checkpoint.LastSequence > 0
-	legacyCheckpoint := checkpointSafe && foundCheckpoint && checkpoint.SchemaVersion != model.SchemaWALCheckpointContiguous
 	requireFullPrefix := !hasCheckpoint
 	if hasCheckpoint && checkpoint.LastSequence > 0 && (checkpoint.SegmentID == 0 || checkpoint.LastOffset < 0) {
 		return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "contiguous wal checkpoint has an invalid position")
 	}
-	// A non-zero legacy marker needs tail validation before replay can enqueue
-	// anything. This intentionally rare migration path may inspect the WAL
-	// twice; normal no-checkpoint and checkpoint-unsafe startup stay single-pass.
-	if legacyCheckpoint && checkpoint.LastSequence > 0 {
-		firstSequence, lastSequence, err := inspectWALSequenceBounds(walPath)
-		if err != nil {
-			return 0, 0, 0, trusterr.Wrap(trusterr.CodeDataLoss, "inspect wal before legacy checkpoint migration", err)
-		}
-		if firstSequence > 1 {
-			return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated because the retained wal prefix is missing")
-		}
-		if firstSequence == 0 {
-			return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated because the retained wal is empty")
-		}
-		if checkpoint.LastSequence > lastSequence {
-			return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated beyond the retained wal tail")
-		}
-	}
 	// In directory mode we can skip entire segments that a committed
-	// checkpoint already covers. Legacy single-file WALs still go through
-	// the record-level skip below because they cannot skip by segment.
-	// Reading the checkpoint before the WAL also means a crash while
-	// appending a new segment cannot trick us into scanning deleted files.
+	// checkpoint already covers. Reading the checkpoint before the WAL also
+	// means a crash while appending a new segment cannot trick us into scanning
+	// deleted files.
 	var minSegmentID uint64
 	if hasCheckpoint && checkpoint.LastSequence > 0 {
 		minSegmentID = checkpoint.SegmentID
@@ -1950,7 +1950,6 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	var replayed int
 	var skipped int
 	var firstRetainedSequence uint64
-	var lastRetainedSequence uint64
 	var committedRunFrom model.WALPosition
 	var committedRunTo model.WALPosition
 	var committedRunBatchID string
@@ -1966,14 +1965,13 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 		committedRunBatchID = ""
 		return err
 	}
-	if err := scanWALRecords(walPath, minSegmentID, func(record wal.Record) error {
+	if err := scanWALRecords(walPath, minSegmentID, walBinding, func(record wal.Record) error {
 		if firstRetainedSequence == 0 {
 			firstRetainedSequence = record.Position.Sequence
 			if requireFullPrefix && firstRetainedSequence != 1 {
 				return trusterr.New(trusterr.CodeDataLoss, "wal cannot be fully replayed because the retained prefix is missing")
 			}
 		}
-		lastRetainedSequence = record.Position.Sequence
 		// Records at or below the checkpoint are guaranteed to be covered
 		// by a committed manifest, so ReplayAccepted (CBOR decode + receipt
 		// re-signing) can be skipped. Durable restart idempotency is handled
@@ -2104,10 +2102,6 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	if requireFullPrefix && firstRetainedSequence == 0 && foundCheckpoint && checkpoint.LastSequence > 0 {
 		return recovered, replayed, skipped, trusterr.New(trusterr.CodeDataLoss, "wal cannot be fully replayed because the retained wal is empty")
 	}
-	if legacyCheckpoint && checkpoint.LastSequence > lastRetainedSequence {
-		return recovered, replayed, skipped, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated beyond the retained wal tail")
-	}
-
 	for _, prepared := range preparedManifests {
 		if prepared.count != len(prepared.manifest.RecordIDs) {
 			return recovered, replayed, skipped, trusterr.New(trusterr.CodeFailedPrecondition, "prepared manifest "+prepared.manifest.BatchID+" references missing record "+prepared.missingRecordID())
@@ -2121,9 +2115,7 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	// Checkpoint persistence is best-effort. A failed flush remains dirty in
 	// the service and is retried by the next committed batch; replayed records
 	// are still correct and the unpruned WAL remains the recovery source.
-	if err := batchSvc.StartCheckpointAdvance(ctx); err != nil && legacyCheckpoint {
-		return recovered, replayed, skipped, trusterr.Wrap(trusterr.CodeDataLoss, "persist migrated wal checkpoint", err)
-	}
+	_ = batchSvc.StartCheckpointAdvance(ctx)
 	if metrics != nil {
 		if skipped > 0 {
 			metrics.WALReplayRecords.WithLabelValues("skipped").Add(float64(skipped))
@@ -2143,6 +2135,25 @@ func stringOrLiteral(cmd *cobra.Command, flagName, flagValue, fallback string) s
 		return flagValue
 	}
 	return fallback
+}
+
+func proofstoreNamespaceID(kind, path, tikvKeyspace, tikvNamespace string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), string(proofstore.BackendTiKV)) {
+		keyspace := strings.TrimSpace(tikvKeyspace)
+		if keyspace == "" {
+			keyspace = "default"
+		}
+		namespace := strings.TrimSpace(tikvNamespace)
+		if namespace == "" {
+			namespace = "default"
+		}
+		return "tikv:" + keyspace + ":" + namespace
+	}
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		absolute = filepath.Clean(path)
+	}
+	return strings.ToLower(strings.TrimSpace(kind)) + ":" + absolute
 }
 
 func splitCSV(text string) []string {

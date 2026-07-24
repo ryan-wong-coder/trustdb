@@ -17,9 +17,9 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -63,7 +63,13 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	}
 
 	walPath := filepath.Join(t.TempDir(), "trustdb.wal")
-	writer, err := wal.OpenWriter(walPath, 1)
+	walOptions := wal.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "server-http",
+		LogID:       "server-http",
+		NamespaceID: "wal:" + walPath,
+	}
+	writer, err := wal.OpenWriterWithOptions(walPath, 1, walOptions)
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -76,7 +82,12 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 		Now:             func() time.Time { return time.Unix(200, 0) },
 	}
 	svc := ingest.New(engine, ingest.Options{QueueSize: 8, Workers: 2}, nil)
-	batchSvc := batch.New(engine, proofstore.LocalStore{Root: filepath.Join(t.TempDir(), "proofs")}, batch.Options{QueueSize: 8, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	batchSvc := batch.New(engine, newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "proofs")), batch.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   8,
+		MaxRecords:  1,
+		MaxDelay:    time.Hour,
+	}, nil)
 	handler := New(svc, nil, batchSvc)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -94,9 +105,9 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 		}
 	})
 
-	resp, err := http.Post(server.URL+"/v1/claims", "application/cbor", bytes.NewReader(body))
+	resp, err := http.Post(server.URL+"/v2/claims", "application/cbor", bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("POST /v1/claims error = %v", err)
+		t.Fatalf("POST /v2/claims error = %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
@@ -112,8 +123,8 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	if !accepted.BatchEnqueued {
 		t.Fatalf("accepted response did not enqueue batch: %+v", accepted)
 	}
-	waitForHTTPStatus(t, server.URL+"/v1/proofs/"+accepted.RecordID, http.StatusOK)
-	waitForHTTPStatus(t, server.URL+"/v1/roots/latest", http.StatusOK)
+	waitForHTTPStatus(t, server.URL+"/v2/proofs/"+accepted.RecordID, http.StatusOK)
+	waitForHTTPStatus(t, server.URL+"/v2/roots/latest", http.StatusOK)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -126,7 +137,7 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatalf("WAL Close() error = %v", err)
 	}
-	records, err := wal.ReadAll(walPath)
+	records, err := wal.ReadAll(walPath, walOptions)
 	if err != nil {
 		t.Fatalf("ReadAll() error = %v", err)
 	}

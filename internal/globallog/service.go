@@ -177,6 +177,9 @@ func (s *Service) AppendBatchRoots(ctx context.Context, roots []model.BatchRoot)
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log append requires at least one batch root")
 	}
 	for i := range roots {
+		if err := cryptosuite.RequireSame(s.provider.Suite(), roots[i].CryptoSuite); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("global log batch root %d crypto_suite", i), err)
+		}
 		if roots[i].BatchID == "" {
 			return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log batch_id is required")
 		}
@@ -258,6 +261,7 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 		}
 		leaf := model.GlobalLogLeaf{
 			SchemaVersion:      model.SchemaGlobalLogLeaf,
+			CryptoSuite:        s.provider.Suite(),
 			NodeID:             root.NodeID,
 			LogID:              root.LogID,
 			BatchID:            root.BatchID,
@@ -304,6 +308,7 @@ func (s *Service) appendBatchRootsOnce(ctx context.Context, roots []model.BatchR
 
 func validateGlobalLogReplayRoot(existing, incoming model.BatchRoot) error {
 	if existing.BatchID != incoming.BatchID ||
+		existing.CryptoSuite != incoming.CryptoSuite ||
 		existing.NodeID != incoming.NodeID ||
 		existing.LogID != incoming.LogID ||
 		existing.TreeSize != incoming.TreeSize ||
@@ -316,6 +321,7 @@ func validateGlobalLogReplayRoot(existing, incoming model.BatchRoot) error {
 
 func validateGlobalLogReplayLeaf(existing model.GlobalLogLeaf, incoming model.BatchRoot) error {
 	if existing.BatchID != incoming.BatchID ||
+		existing.CryptoSuite != incoming.CryptoSuite ||
 		existing.NodeID != incoming.NodeID ||
 		existing.LogID != incoming.LogID ||
 		existing.BatchTreeSize != incoming.TreeSize ||
@@ -388,6 +394,7 @@ func (s *Service) InclusionProof(ctx context.Context, batchID string, treeSize u
 	}
 	return model.GlobalLogProof{
 		SchemaVersion: model.SchemaGlobalLogProof,
+		CryptoSuite:   s.provider.Suite(),
 		NodeID:        leaf.NodeID,
 		LogID:         leaf.LogID,
 		BatchID:       batchID,
@@ -499,6 +506,7 @@ func (s *Service) CompactHistory(ctx context.Context, tileSize uint64) (int, err
 		}
 		tile := model.GlobalLogTile{
 			SchemaVersion:  model.SchemaGlobalLogTile,
+			CryptoSuite:    s.provider.Suite(),
 			Level:          0,
 			StartIndex:     tileStart,
 			Width:          uint64(len(hashes)),
@@ -521,6 +529,9 @@ func HashLeaf(leaf model.GlobalLogLeaf) ([]byte, error) {
 func HashLeafWithProvider(provider trustcrypto.Provider, leaf model.GlobalLogLeaf) ([]byte, error) {
 	if provider == nil {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "global log crypto provider is required")
+	}
+	if err := cryptosuite.RequireSame(provider.Suite(), leaf.CryptoSuite); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "global log leaf crypto_suite", err)
 	}
 	leaf.LeafHash = nil
 	leaf.AppendedAtUnixN = 0
@@ -570,6 +581,9 @@ func VerifySTHWithProvider(ctx context.Context, sth model.SignedTreeHead, public
 	if sth.TreeAlg != suite.Merkle.Algorithm {
 		return fmt.Errorf("verify signed tree head: tree algorithm %q does not match suite %s", sth.TreeAlg, suite.ID)
 	}
+	if err := cryptosuite.RequireSame(suite.ID, sth.CryptoSuite, publicKey.Suite); err != nil {
+		return fmt.Errorf("verify signed tree head: %w", err)
+	}
 	sig := sth.Signature
 	sth.Signature = model.Signature{}
 	payload, err := cborx.Marshal(sth)
@@ -603,6 +617,9 @@ func VerifyInclusionForSuite(suiteID cryptosuite.ID, proof model.GlobalLogProof)
 	if proof.SchemaVersion != model.SchemaGlobalLogProof {
 		return false, nil
 	}
+	if err := cryptosuite.RequireSame(suiteID, proof.CryptoSuite, proof.STH.CryptoSuite); err != nil {
+		return false, err
+	}
 	if proof.STH.SchemaVersion != model.SchemaSignedTreeHead || proof.TreeSize != proof.STH.TreeSize {
 		return false, nil
 	}
@@ -631,6 +648,7 @@ func (s *Service) signSTH(ctx context.Context, leaves []model.GlobalLogLeaf) (mo
 	}
 	sth := model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    s.provider.Suite(),
 		TreeAlg:        s.profile.Algorithm(),
 		TreeSize:       uint64(len(leaves)),
 		RootHash:       root,
@@ -665,6 +683,7 @@ func (s *Service) signSTHFromState(ctx context.Context, state model.GlobalLogSta
 	}
 	sth := model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    s.provider.Suite(),
 		TreeAlg:        s.profile.Algorithm(),
 		TreeSize:       state.TreeSize,
 		RootHash:       append([]byte(nil), state.RootHash...),
@@ -696,12 +715,16 @@ func (s *Service) loadState(ctx context.Context) (model.GlobalLogState, error) {
 		return model.GlobalLogState{}, err
 	}
 	if ok {
+		if err := cryptosuite.RequireSame(s.provider.Suite(), state.CryptoSuite); err != nil {
+			return model.GlobalLogState{}, trusterr.Wrap(trusterr.CodeDataLoss, "global log state crypto_suite", err)
+		}
 		return state, nil
 	}
 	// One-time rebuild path for pre-state stores and tests. New production
 	// appends stay on the incremental path after this state is persisted.
 	state = model.GlobalLogState{
 		SchemaVersion: model.SchemaGlobalLogState,
+		CryptoSuite:   s.provider.Suite(),
 		Frontier:      nil,
 	}
 	for nextLeafIndex := uint64(0); ; {
@@ -735,6 +758,9 @@ func (s *Service) loadState(ctx context.Context) (model.GlobalLogState, error) {
 }
 
 func (s *Service) appendState(state model.GlobalLogState, leaf model.GlobalLogLeaf) (model.GlobalLogState, []model.GlobalLogNode, error) {
+	if err := cryptosuite.RequireSame(s.provider.Suite(), state.CryptoSuite, leaf.CryptoSuite); err != nil {
+		return model.GlobalLogState{}, nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "global log append crypto_suite", err)
+	}
 	if len(leaf.LeafHash) != s.profile.Size() {
 		return model.GlobalLogState{}, nil, trusterr.New(trusterr.CodeInvalidArgument, "global leaf hash has the wrong digest size")
 	}
@@ -748,6 +774,7 @@ func (s *Service) appendState(state model.GlobalLogState, leaf model.GlobalLogLe
 	level := uint64(0)
 	nodes := []model.GlobalLogNode{{
 		SchemaVersion:  model.SchemaGlobalLogNode,
+		CryptoSuite:    s.provider.Suite(),
 		Level:          0,
 		StartIndex:     start,
 		Width:          1,
@@ -770,6 +797,7 @@ func (s *Service) appendState(state model.GlobalLogState, leaf model.GlobalLogLe
 		start = parentStart
 		nodes = append(nodes, model.GlobalLogNode{
 			SchemaVersion:  model.SchemaGlobalLogNode,
+			CryptoSuite:    s.provider.Suite(),
 			Level:          level,
 			StartIndex:     start,
 			Width:          uint64(1) << level,
@@ -787,6 +815,7 @@ func (s *Service) appendState(state model.GlobalLogState, leaf model.GlobalLogLe
 	}
 	return model.GlobalLogState{
 		SchemaVersion:  model.SchemaGlobalLogState,
+		CryptoSuite:    s.provider.Suite(),
 		TreeSize:       state.TreeSize + 1,
 		RootHash:       root,
 		Frontier:       trimFrontier(frontier),

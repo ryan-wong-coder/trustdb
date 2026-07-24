@@ -145,18 +145,19 @@ Core paths:
 - Anchor path: STH/global roots are coalesced into one durable Pending target and one immutable InFlight attempt per log and sink, then published by the configured anchor worker.
 - Storage path: proof data is stored in file, Pebble, or TiKV proofstores.
 - Backup path: proofstore data can be exported to `.tdbackup`, verified, and restored with resumable restore state; portable backups exclude node-local WAL checkpoints.
+- Crypto-agility transition: `.tdbackup v4` remains available only for `INTL_V1`. A `CN_SM_V1` store fails closed at backup/restore entry points until authenticated, SM4-protected backup v5 is delivered in [#473](https://github.com/wowtrust/trustdb/issues/473); the logical-backup subsystem itself is retained.
 - Observability path: `/metrics` exposes ingest, batch, global log, anchor, WAL, backup, and storage metrics.
 
-File, Pebble, and each TiKV namespace use proofstore storage schema v4. Opening
+File, Pebble, and each TiKV namespace use proofstore storage schema v5. Opening
 an older or unversioned non-empty store fails explicitly; TrustDB does not
-silently migrate or dual-read obsolete anchor queue layouts. Rebuild the store
-or restore a current logical backup before starting this version.
+scan, migrate, or dual-read obsolete key layouts. Start this version with an
+empty V5 namespace and a new LogID.
 
 `wal.fsync_mode=strict` waits for each accepted record's WAL file fsync before returning. `group` bounds the asynchronous dirty window by `wal.group_commit_interval`; `batch` defers accepted-record data fsync until rotation or close. Writer startup and the namespace barriers used for WAL directory creation, file publication, rotation, and pruning are independent of that append policy. On Windows, TrustDB fails closed when the underlying filesystem rejects its best-available directory flush. Choose `strict` when the receipt contract requires a per-record fsync; end-to-end crash durability still depends on the filesystem and storage guarantees.
 
 Automatic WAL checkpoint skipping and segment pruning are enabled only when the proofstore can durably order committed artifacts and restart-idempotency decisions before a checkpoint, then scope that checkpoint to the node-local WAL. Pebble atomically publishes keyed restart-idempotency decisions with committed manifests and enables checkpoint skipping and pruning while that projection is ready. TiKV provides the same capability only when the store is explicitly bound to the current compute node and absolute local WAL identity. The development file backend lacks the complete idempotency projection barrier and therefore retains and replays WAL.
 
-During upgrade, a legacy v1 checkpoint is rebuilt only from a complete retained WAL beginning at sequence 1. If an older deployment already pruned that prefix, startup fails closed with `DataLoss`; restore the complete WAL from a trusted backup rather than deleting the checkpoint marker, which cannot prove the missing records were committed.
+Recovery accepts only the V2 WAL and checkpoint generation bound to the configured crypto suite, NodeID, LogID, and storage namespace. Legacy or unbound recovery data fails closed; this version does not migrate or fall back to an earlier WAL/checkpoint format.
 
 ## Quick Start
 
@@ -274,19 +275,19 @@ Implemented HTTP endpoints:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /healthz` | Health check. |
-| `POST /v1/claims` | Submit a signed claim. |
-| `POST /v1/claims/batch` | Submit a CBOR batch of signed claims. |
-| `GET /v1/records` | Paginated record list and search. |
-| `GET /v1/records/{record_id}` | Read record index details. |
-| `GET /v1/proofs/{record_id}` | Fetch L3 proof bundle. |
-| `GET /v1/roots` | List batch roots. |
-| `GET /v1/roots/latest` | Fetch latest batch root. |
-| `GET /v1/sth/latest` | Fetch latest SignedTreeHead. |
-| `GET /v1/sth/{tree_size}` | Fetch a specific STH. |
-| `GET /v1/global-log/inclusion/{batch_id}` | Fetch global-log inclusion proof for a batch. |
-| `GET /v1/global-log/evidence/{batch_id}` | Fetch covering Global Log evidence and the matching published anchor result when available. |
-| `GET /v1/global-log/consistency?from=&to=` | Fetch global-log consistency proof. |
-| `GET /v1/anchors/sth/{tree_size}` | Fetch an immutable published STH anchor result. |
+| `POST /v2/claims` | Submit a signed claim. |
+| `POST /v2/claims/batch` | Submit a CBOR batch of signed claims. |
+| `GET /v2/records` | Paginated record list and search. |
+| `GET /v2/records/{record_id}` | Read record index details. |
+| `GET /v2/proofs/{record_id}` | Fetch L3 proof bundle. |
+| `GET /v2/roots` | List batch roots. |
+| `GET /v2/roots/latest` | Fetch latest batch root. |
+| `GET /v2/sth/latest` | Fetch latest SignedTreeHead. |
+| `GET /v2/sth/{tree_size}` | Fetch a specific STH. |
+| `GET /v2/global-log/inclusion/{batch_id}` | Fetch global-log inclusion proof for a batch. |
+| `GET /v2/global-log/evidence/{batch_id}` | Fetch covering Global Log evidence and the matching published anchor result when available. |
+| `GET /v2/global-log/consistency?from=&to=` | Fetch global-log consistency proof. |
+| `GET /v2/anchors/sth/{tree_size}` | Fetch an immutable published STH anchor result. |
 | `GET /metrics` | Prometheus metrics. |
 
 The optional gRPC listener is enabled with `--grpc-listen` or `server.grpc_listen`. It uses TrustDB's deterministic CBOR payload model so HTTP and gRPC transports share proof semantics. HTTP and gRPC share TLS 1.2/1.3 and mTLS listener policy; CA pinning, zero-listener-restart rotation, revocation hooks, SDK/desktop configuration, and the strict separation between transport and proof trust are documented in [TLS and mutual TLS transport security](docs/integrations/TLS_MTLS.md).

@@ -13,9 +13,9 @@ import (
 
 func TestBatchTreeSnapshotUsesFortyTilesInOneTransaction(t *testing.T) {
 	db, countingClient := newMockTiKVDB(t, "batch-tree-tiles/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 	const leafCount = 8192
-	snapshot := model.BatchTreeSnapshot{
+	snapshot := model.BatchTreeSnapshot{CryptoSuite: "INTL_V1",
 		BatchID:        "batch-8192",
 		CreatedAtUnixN: time.Now().UnixNano(),
 		RecordIDs:      make([]string, leafCount),
@@ -140,7 +140,7 @@ func readAllBatchTreeNodes(t *testing.T, store *Store, batchID string, level uin
 
 func TestBatchTreeTileReadsRejectCorruptSchema(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "batch-tree-corrupt/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 	tile := batchTreeLeafTile{
 		SchemaVersion: "trustdb.batch-tree-leaf-tile.invalid",
 		BatchID:       "corrupt",
@@ -160,8 +160,8 @@ func TestBatchTreeTileReadsRejectCorruptSchema(t *testing.T) {
 
 func TestBatchTreeReadsDoNotFallbackToLegacyKeys(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "batch-tree-no-legacy/")
-	store := &Store{db: db}
-	legacy := model.BatchTreeLeaf{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "legacy", RecordID: "record-0", LeafIndex: 0, LeafHash: []byte{1}}
+	store := &Store{binding: testStoreBinding(), db: db}
+	legacy := model.BatchTreeLeaf{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "legacy", RecordID: "record-0", LeafIndex: 0, LeafHash: []byte{1}}
 	if err := store.writeCBOR([]byte("batch-tree/leaf/legacy/00000000000000000000"), legacy); err != nil {
 		t.Fatalf("write legacy leaf: %v", err)
 	}

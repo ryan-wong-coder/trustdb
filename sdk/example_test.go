@@ -47,7 +47,7 @@ func ExampleBuildSignedFileClaim() {
 		panic(err)
 	}
 	fmt.Println(signed.SchemaVersion)
-	// Output: trustdb.signed-claim.v1
+	// Output: trustdb.signed-claim.v2
 }
 
 func ExampleBuildSignedJSONLogClaim() {

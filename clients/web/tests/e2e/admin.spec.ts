@@ -82,15 +82,15 @@ async function mockAdminAPI(page: Page) {
     await route.fulfill({ json: { ok: true } })
   })
 
-  await page.route('**/admin/api/proxy/v1/roots/latest', async (route) => {
+  await page.route('**/admin/api/proxy/v2/roots/latest', async (route) => {
     await route.fulfill({ json: { batch_id: 'batch-1', tree_size: 2 } })
   })
 
-  await page.route('**/admin/api/proxy/v1/batches?*', async (route) => {
+  await page.route('**/admin/api/proxy/v2/batches?*', async (route) => {
     await route.fulfill({ json: { roots: [{ batch_id: 'batch-1', tree_size: 2, closed_at_unix_nano: 1_700_000_000_000_000_000, batch_root: [9] }] } })
   })
 
-  await page.route('**/admin/api/proxy/v1/batches/batch-1', async (route) => {
+  await page.route('**/admin/api/proxy/v2/batches/batch-1', async (route) => {
     await route.fulfill({
       json: {
         root: { batch_id: 'batch-1', tree_size: 2, closed_at_unix_nano: 1_700_000_000_000_000_000, batch_root: [9] },
@@ -100,15 +100,15 @@ async function mockAdminAPI(page: Page) {
     })
   })
 
-  await page.route('**/admin/api/proxy/v1/batches/batch-1/tree/leaves?*', async (route) => {
+  await page.route('**/admin/api/proxy/v2/batches/batch-1/tree/leaves?*', async (route) => {
     await route.fulfill({ json: { leaves: [{ batch_id: 'batch-1', record_id: 'record-abcdef123456', leaf_index: 0, leaf_hash: [1] }] } })
   })
 
-  await page.route('**/admin/api/proxy/v1/batches/batch-1/tree/nodes?*', async (route) => {
+  await page.route('**/admin/api/proxy/v2/batches/batch-1/tree/nodes?*', async (route) => {
     await route.fulfill({ json: { nodes: [{ batch_id: 'batch-1', level: 0, start_index: 0, width: 1, hash: [1] }, { batch_id: 'batch-1', level: 1, start_index: 0, width: 2, hash: [9] }] } })
   })
 
-  await page.route('**/admin/api/proxy/v1/proofs/record-abcdef123456', async (route) => {
+  await page.route('**/admin/api/proxy/v2/proofs/record-abcdef123456', async (route) => {
     await route.fulfill({
       json: {
         record_id: 'record-abcdef123456',
@@ -122,19 +122,19 @@ async function mockAdminAPI(page: Page) {
     })
   })
 
-  await page.route('**/admin/api/proxy/v1/global-log/tree', async (route) => {
+  await page.route('**/admin/api/proxy/v2/global-log/tree', async (route) => {
     await route.fulfill({ json: { ok: true, state: { tree_size: 1, root_hash: [9] }, sth: { tree_size: 1, root_hash: [9], timestamp_unix_nano: 1_700_000_000_000_000_000 } } })
   })
 
-  await page.route('**/admin/api/proxy/v1/global-log/tree/nodes?*', async (route) => {
+  await page.route('**/admin/api/proxy/v2/global-log/tree/nodes?*', async (route) => {
     await route.fulfill({ json: { nodes: [{ level: 0, start_index: 0, width: 1, hash: [9] }] } })
   })
 
-  await page.route('**/admin/api/proxy/v1/global-log/tree/leaves?*', async (route) => {
+  await page.route('**/admin/api/proxy/v2/global-log/tree/leaves?*', async (route) => {
     await route.fulfill({ json: { leaves: [{ batch_id: 'batch-1', leaf_index: 0, batch_tree_size: 2, leaf_hash: [9] }] } })
   })
 
-  await page.route('**/admin/api/proxy/v1/records?*', async (route) => {
+  await page.route('**/admin/api/proxy/v2/records?*', async (route) => {
     await route.fulfill({
       json: {
         records: [

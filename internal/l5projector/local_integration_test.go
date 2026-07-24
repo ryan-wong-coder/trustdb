@@ -7,17 +7,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/l5projector"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 func TestLocalProjectorMaterializesOlderBatchesWithoutBlockingEvidence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	_, privateKey, err := trustcrypto.GenerateEd25519Key()
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key: %v", err)
@@ -38,11 +38,11 @@ func TestLocalProjectorMaterializesOlderBatchesWithoutBlockingEvidence(t *testin
 	for i := range roots {
 		batchID := fmt.Sprintf("batch-%d", i)
 		roots[i] = model.BatchRoot{
-			SchemaVersion: model.SchemaBatchRoot, BatchID: batchID, BatchRoot: bytes.Repeat([]byte{byte(i + 1)}, 32),
+			SchemaVersion: model.SchemaBatchRoot, CryptoSuite: cryptosuite.INTLV1, BatchID: batchID, BatchRoot: bytes.Repeat([]byte{byte(i + 1)}, 32),
 			TreeSize: 1, ClosedAtUnixN: int64(i + 1), NodeID: nodeID, LogID: logID,
 		}
 		if err := store.PutRecordIndex(ctx, model.RecordIndex{
-			SchemaVersion: model.SchemaRecordIndex, RecordID: fmt.Sprintf("record-%d", i), BatchID: batchID,
+			SchemaVersion: model.SchemaRecordIndex, CryptoSuite: cryptosuite.INTLV1, RecordID: fmt.Sprintf("record-%d", i), BatchID: batchID,
 			NodeID: nodeID, LogID: logID, ProofLevel: "L4", ReceivedAtUnixN: int64(i + 1),
 		}); err != nil {
 			t.Fatalf("PutRecordIndex %d: %v", i, err)
@@ -54,7 +54,7 @@ func TestLocalProjectorMaterializesOlderBatchesWithoutBlockingEvidence(t *testin
 	}
 	anchored := sths[len(sths)-1]
 	result := model.STHAnchorResult{
-		SchemaVersion: model.SchemaSTHAnchorResult, NodeID: nodeID, LogID: logID, TreeSize: anchored.TreeSize,
+		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1, NodeID: nodeID, LogID: logID, TreeSize: anchored.TreeSize,
 		SinkName: sinkName, AnchorID: "anchor-5", RootHash: append([]byte(nil), anchored.RootHash...), STH: anchored, PublishedAtUnixN: 500,
 	}
 	if err := store.PutSTHAnchorResult(ctx, result); err != nil {

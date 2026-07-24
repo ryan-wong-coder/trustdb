@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
@@ -21,7 +22,7 @@ func (s *countingAnchorPageStore) ListSTHAnchorResultsPage(ctx context.Context, 
 
 func TestAPIAnchorsCompositeCursorRetainsSameTreeSinks(t *testing.T) {
 	t.Parallel()
-	store := &countingAnchorPageStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &countingAnchorPageStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	writer := proofstore.STHAnchorResultWriter(store)
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	sth := testSTH(key, 7, 0x77)
@@ -34,6 +35,7 @@ func TestAPIAnchorsCompositeCursorRetainsSameTreeSinks(t *testing.T) {
 	} {
 		result := model.STHAnchorResult{
 			SchemaVersion:    model.SchemaSTHAnchorResult,
+			CryptoSuite:      cryptosuite.INTLV1,
 			NodeID:           sth.NodeID,
 			LogID:            sth.LogID,
 			TreeSize:         sth.TreeSize,

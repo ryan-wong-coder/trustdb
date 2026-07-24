@@ -2,7 +2,6 @@ package wal
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,22 +15,31 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 const (
 	magic                  uint32 = 0x54445731
-	version                uint16 = 1
+	version                uint16 = 2
 	typeAccepted           uint16 = 1
-	headerSize                    = 4 + 2 + 2 + 8 + 8 + 8 + 32 + 4
+	headerSize                    = 4 + 2 + 2 + 8 + 8 + 8 + 32 + 2 + 4
 	crcSize                       = 4
 	recordHashSize                = 32
 	maxPayloadBytes               = 64 << 20
 	maxReusableRecordBytes        = 1 << 20
+	bindingSchema                 = "trustdb.wal-namespace.v2"
+	bindingFormat                 = "trustdb.wal.v2"
+	bindingFileName               = ".trustdb-wal-binding"
+	maxBindingBytes               = 4 << 10
+	bindingTempSuffix             = ".tmp"
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
+var bindingMu sync.Mutex
 
 // ErrAppendReservationInvalidated tells a caller that an earlier FIFO append
 // failed and this request must be retried to obtain a new exact WAL position.
@@ -52,10 +60,14 @@ const (
 	FsyncBatch  = "batch"
 )
 
-// Options controls the behaviour of a directory-mode Writer. A zero Options
-// is safe to use in tests: it disables auto-rotation and keeps everything in
-// a single segment.
+// Options controls the behaviour of a directory-mode Writer. Every V2 WAL
+// namespace is durably bound to one suite, node, log, and storage namespace
+// before the first segment can be published.
 type Options struct {
+	CryptoSuite cryptosuite.ID
+	NodeID      string
+	LogID       string
+	NamespaceID string
 	// MaxSegmentBytes, when > 0, makes Append rotate the active segment as
 	// soon as appending the next record would push the segment past this
 	// byte count. Records are never split across segment boundaries.
@@ -92,6 +104,15 @@ type Options struct {
 	// asynchronous group-commit timer that cannot be returned by Append. It
 	// may run from that timer and must be safe for concurrent use.
 	OnFsyncError func(string, error)
+}
+
+type Binding struct {
+	SchemaVersion string         `cbor:"schema_version"`
+	Format        string         `cbor:"format"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite"`
+	NodeID        string         `cbor:"node_id"`
+	LogID         string         `cbor:"log_id"`
+	NamespaceID   string         `cbor:"storage_namespace_id"`
 }
 
 // segmentFileExt is the on-disk suffix for each WAL segment. Segments are
@@ -137,6 +158,9 @@ type Writer struct {
 	fsyncHook       func(string, time.Duration)
 	fsyncErrorHook  func(string, error)
 	recordBuf       []byte
+	suiteID         cryptosuite.ID
+	binding         Binding
+	namespaceLock   *namespaceLock
 }
 
 type appendState struct {
@@ -190,6 +214,7 @@ type walFileOps struct {
 	mkdir        func(string, os.FileMode) error
 	openFile     func(string, int, os.FileMode) (*os.File, error)
 	remove       func(string) error
+	replace      func(string, string) error
 	truncateFile func(*os.File, int64) error
 	syncFile     func(*os.File) error
 	syncDir      func(string) error
@@ -202,6 +227,7 @@ func defaultWALFileOps() walFileOps {
 		mkdir:    os.Mkdir,
 		openFile: os.OpenFile,
 		remove:   os.Remove,
+		replace:  os.Rename,
 		truncateFile: func(file *os.File, size int64) error {
 			return file.Truncate(size)
 		},
@@ -212,11 +238,12 @@ func defaultWALFileOps() walFileOps {
 }
 
 type Record struct {
-	Position   model.WALPosition
-	UnixNano   int64
-	Payload    []byte
-	PrevHash   [32]byte
-	RecordHash [32]byte
+	CryptoSuite cryptosuite.ID
+	Position    model.WALPosition
+	UnixNano    int64
+	Payload     []byte
+	PrevHash    [32]byte
+	RecordHash  [32]byte
 }
 
 type InspectResult struct {
@@ -334,6 +361,161 @@ func closeAfterOpenError(file *os.File, operation string, cause error, ops walFi
 	return cause
 }
 
+func bindingForOptions(opts Options) (Binding, error) {
+	suiteID, err := requestedSuite(opts.CryptoSuite)
+	if err != nil {
+		return Binding{}, err
+	}
+	nodeID := strings.TrimSpace(opts.NodeID)
+	logID := strings.TrimSpace(opts.LogID)
+	namespaceID := strings.TrimSpace(opts.NamespaceID)
+	if nodeID == "" || logID == "" || namespaceID == "" {
+		return Binding{}, errors.New("wal: node_id, log_id, and storage namespace identity are required")
+	}
+	return Binding{
+		SchemaVersion: bindingSchema,
+		Format:        bindingFormat,
+		CryptoSuite:   suiteID,
+		NodeID:        nodeID,
+		LogID:         logID,
+		NamespaceID:   namespaceID,
+	}, nil
+}
+
+func validateBinding(stored, expected Binding) error {
+	if stored.SchemaVersion != bindingSchema || stored.Format != bindingFormat {
+		return fmt.Errorf("wal: unsupported namespace binding %q/%q", stored.SchemaVersion, stored.Format)
+	}
+	if stored != expected {
+		return fmt.Errorf(
+			"wal: namespace binding mismatch: stored=(%s,%q,%q,%q) configured=(%s,%q,%q,%q)",
+			stored.CryptoSuite,
+			stored.NodeID,
+			stored.LogID,
+			stored.NamespaceID,
+			expected.CryptoSuite,
+			expected.NodeID,
+			expected.LogID,
+			expected.NamespaceID,
+		)
+	}
+	return nil
+}
+
+func ensureBinding(path string, expected Binding, dataExists bool, ops walFileOps) error {
+	bindingMu.Lock()
+	defer bindingMu.Unlock()
+
+	file, err := ops.openFile(path, os.O_RDONLY, 0)
+	if err == nil {
+		data, readErr := io.ReadAll(io.LimitReader(file, maxBindingBytes+1))
+		closeErr := ops.closeFile(file)
+		if readErr != nil {
+			return fmt.Errorf("wal: read namespace binding: %w", readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("wal: close namespace binding: %w", closeErr)
+		}
+		if len(data) > maxBindingBytes {
+			return fmt.Errorf("wal: namespace binding exceeds %d bytes", maxBindingBytes)
+		}
+		var stored Binding
+		if err := cborx.UnmarshalLimit(data, &stored, maxBindingBytes); err != nil {
+			return fmt.Errorf("wal: decode namespace binding: %w", err)
+		}
+		if err := validateBinding(stored, expected); err != nil {
+			return err
+		}
+		// Re-publish a binding whose previous creator may have returned after
+		// rename but before the directory fsync completed.
+		if err := ops.syncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("wal: sync existing namespace binding directory: %w", err)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("wal: open namespace binding: %w", err)
+	}
+	tempPath := path + bindingTempSuffix
+	tempRemoved := false
+	if err := ops.remove(tempPath); err == nil {
+		tempRemoved = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("wal: remove interrupted namespace binding temp: %w", err)
+	}
+	if tempRemoved {
+		if err := ops.syncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("wal: publish namespace binding temp cleanup: %w", err)
+		}
+	}
+	if dataExists {
+		return errors.New("wal: non-empty V2 namespace has no durable binding")
+	}
+	data, err := cborx.Marshal(expected)
+	if err != nil {
+		return fmt.Errorf("wal: encode namespace binding: %w", err)
+	}
+	file, err = ops.openFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("wal: create namespace binding temp: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = ops.closeFile(file)
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: write namespace binding: %w", err)
+	}
+	if err := ops.syncFile(file); err != nil {
+		_ = ops.closeFile(file)
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: sync namespace binding: %w", err)
+	}
+	if err := ops.closeFile(file); err != nil {
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: close namespace binding: %w", err)
+	}
+	if err := ops.replace(tempPath, path); err != nil {
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: publish namespace binding rename: %w", err)
+	}
+	if err := ops.syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("wal: publish namespace binding: %w", err)
+	}
+	return nil
+}
+
+func validateStoredBinding(path string, opts Options) (Binding, error) {
+	expected, err := bindingForOptions(opts)
+	if err != nil {
+		return Binding{}, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Binding{}, errors.New("wal: V2 namespace has no durable binding")
+		}
+		return Binding{}, fmt.Errorf("wal: open namespace binding: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxBindingBytes+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return Binding{}, fmt.Errorf("wal: read namespace binding: %w", readErr)
+	}
+	if closeErr != nil {
+		return Binding{}, fmt.Errorf("wal: close namespace binding: %w", closeErr)
+	}
+	if len(data) > maxBindingBytes {
+		return Binding{}, fmt.Errorf("wal: namespace binding exceeds %d bytes", maxBindingBytes)
+	}
+	var stored Binding
+	if err := cborx.UnmarshalLimit(data, &stored, maxBindingBytes); err != nil {
+		return Binding{}, fmt.Errorf("wal: decode namespace binding: %w", err)
+	}
+	if err := validateBinding(stored, expected); err != nil {
+		return Binding{}, err
+	}
+	return expected, nil
+}
+
 type segmentChainState struct {
 	trustBoundary bool
 	haveSegment   bool
@@ -425,20 +607,39 @@ func (chain *segmentChainState) accept(segmentID uint64, state scanState) error 
 // preserving sequence counters and the cross-segment hash chain. Setting
 // opts.MaxSegmentBytes > 0 enables automatic segment rotation on Append.
 func OpenDirWriter(dir string, opts Options) (*Writer, error) {
-	return openDirWriterWithOps(dir, opts, defaultWALFileOps())
+	lock, err := acquireDirectoryNamespaceLock(dir, true)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := openDirWriterWithOps(dir, opts, defaultWALFileOps())
+	if err != nil {
+		_ = lock.close()
+		return nil, err
+	}
+	writer.namespaceLock = lock
+	lock.setActiveSegment(writer.ActiveSegmentID)
+	return writer, nil
 }
 
 func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, error) {
 	if dir == "" {
 		return nil, errors.New("wal: directory path is required")
 	}
-	if err := ensureDurableDirectory(dir, 0o755, ops); err != nil {
-		return nil, fmt.Errorf("wal: create dir: %w", err)
-	}
-	segments, err := ListSegments(dir)
+	binding, err := bindingForOptions(opts)
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureDurableDirectory(dir, 0o755, ops); err != nil {
+		return nil, fmt.Errorf("wal: create dir: %w", err)
+	}
+	segments, err := listSegments(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureBinding(filepath.Join(dir, bindingFileName), binding, len(segments) > 0, ops); err != nil {
+		return nil, err
+	}
+	suiteID := binding.CryptoSuite
 	var (
 		activeSeg uint64
 		sequence  uint64
@@ -473,6 +674,9 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 			}
 			if err := chain.accept(seg, state); err != nil {
 				return nil, err
+			}
+			if state.records > 0 && state.cryptoSuite != suiteID {
+				return nil, fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", seg, state.cryptoSuite, suiteID)
 			}
 			if state.records > 0 {
 				last = state
@@ -520,6 +724,8 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 		fsyncHook:      opts.OnFsync,
 		fsyncErrorHook: opts.OnFsyncError,
 		closeDone:      make(chan struct{}),
+		suiteID:        suiteID,
+		binding:        binding,
 	}, nil
 }
 
@@ -531,21 +737,54 @@ func (w *Writer) ActiveSegmentID() uint64 {
 	return w.segmentID
 }
 
-func OpenWriter(path string, segmentID uint64) (*Writer, error) {
-	return OpenWriterWithOptions(path, segmentID, Options{FsyncMode: FsyncStrict})
+// BindingOptions returns only the immutable namespace identity needed by V2
+// readers and maintenance operations. Runtime tuning and callbacks are never
+// copied across this boundary.
+func (w *Writer) BindingOptions() Options {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return Options{
+		CryptoSuite: w.binding.CryptoSuite,
+		NodeID:      w.binding.NodeID,
+		LogID:       w.binding.LogID,
+		NamespaceID: w.binding.NamespaceID,
+	}
 }
 
 func OpenWriterWithOptions(path string, segmentID uint64, opts Options) (*Writer, error) {
-	return openWriterWithOptionsAndOps(path, segmentID, opts, defaultWALFileOps())
+	lock, err := acquireSingleFileNamespaceLock(path, true)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := openWriterWithOptionsAndOps(path, segmentID, opts, defaultWALFileOps())
+	if err != nil {
+		_ = lock.close()
+		return nil, err
+	}
+	writer.namespaceLock = lock
+	return writer, nil
 }
 
 func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, ops walFileOps) (*Writer, error) {
 	if segmentID == 0 {
 		return nil, errors.New("wal: segment id must be greater than zero")
 	}
+	binding, err := bindingForOptions(opts)
+	if err != nil {
+		return nil, err
+	}
 	if err := ensureDurableDirectory(filepath.Dir(path), 0o755, ops); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
+	info, statErr := ops.stat(path)
+	dataExists := statErr == nil && info.Size() > 0
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("wal: stat existing log: %w", statErr)
+	}
+	if err := ensureBinding(path+".binding", binding, dataExists, ops); err != nil {
+		return nil, err
+	}
+	suiteID := binding.CryptoSuite
 	state, err := scanFile(path, false, false)
 	create := errors.Is(err, os.ErrNotExist)
 	if err != nil && !create {
@@ -556,6 +795,9 @@ func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, op
 	}
 	if state.records > 0 && state.segmentID != segmentID {
 		return nil, fmt.Errorf("wal: segment id mismatch: existing %d requested %d", state.segmentID, segmentID)
+	}
+	if state.records > 0 && state.cryptoSuite != suiteID {
+		return nil, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, suiteID)
 	}
 	flags := os.O_RDWR | os.O_APPEND
 	if create {
@@ -591,6 +833,8 @@ func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, op
 		fsyncHook:      opts.OnFsync,
 		fsyncErrorHook: opts.OnFsyncError,
 		closeDone:      make(chan struct{}),
+		suiteID:        suiteID,
+		binding:        binding,
 	}, nil
 }
 
@@ -635,7 +879,11 @@ func (w *Writer) appendReserved(ctx context.Context, payload []byte, at time.Tim
 	if prepareErr == nil {
 		prepareErr = ctx.Err()
 	}
-	w.completeReservation(reservation, prepareErr)
+	func() {
+		w.namespaceLock.beginWrite()
+		defer w.namespaceLock.endWrite()
+		w.completeReservation(reservation, prepareErr)
+	}()
 	return w.waitReservation(ctx, reservation)
 }
 
@@ -816,7 +1064,7 @@ func (w *Writer) commitAtExpected(ctx context.Context, payload []byte, at time.T
 	// an oversized record still makes forward progress instead of looping
 	// forever between rotations.
 	nextSeq := w.sequence + 1
-	encoded, recordHash := encodeRecordInto(w.recordBuf, w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
+	encoded, recordHash := encodeRecordIntoForSuite(w.recordBuf, w.suiteID, w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
 	rotate := w.dir != "" && w.maxBytes > 0 && w.offset > 0 && w.offset > w.maxBytes-int64(len(encoded))
 	if rotate {
 		beforeRotate, publish, err := w.rotateLocked()
@@ -830,7 +1078,7 @@ func (w *Writer) commitAtExpected(ctx context.Context, payload []byte, at time.T
 			return model.WALPosition{}, [32]byte{}, err
 		}
 		nextSeq = w.sequence + 1
-		encoded, recordHash = encodeRecordInto(encoded[:0], w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
+		encoded, recordHash = encodeRecordIntoForSuite(encoded[:0], w.suiteID, w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
 		pos = model.WALPosition{SegmentID: w.segmentID, Offset: w.offset, Sequence: nextSeq}
 	}
 	if cap(encoded) <= maxReusableRecordBytes {
@@ -1024,11 +1272,15 @@ func (w *Writer) Close() error {
 		w.file = nil
 	}
 	w.closeErr = errors.Join(closeErrors...)
-	closeErr := w.closeErr
 	done := w.closeDone
 	w.mu.Unlock()
 	w.observeFsyncs([]fsyncObservation{fsync})
 	w.backgroundHooks.Wait()
+	lockErr := w.namespaceLock.close()
+	w.mu.Lock()
+	w.closeErr = errors.Join(w.closeErr, lockErr)
+	closeErr := w.closeErr
+	w.mu.Unlock()
 	close(done)
 	return closeErr
 }
@@ -1154,7 +1406,16 @@ func normalizeGroupInterval(d time.Duration) time.Duration {
 	return d
 }
 
-func ReadAll(path string) ([]Record, error) {
+func ReadAll(path string, opts Options) ([]Record, error) {
+	lock, err := acquireSingleFileNamespaceLock(path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return nil, err
+	}
 	state, err := scanFile(path, false, true)
 	if err != nil {
 		return nil, err
@@ -1162,20 +1423,35 @@ func ReadAll(path string) ([]Record, error) {
 	if err := validateSingleFileStart(state); err != nil {
 		return nil, err
 	}
+	if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+		return nil, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, binding.CryptoSuite)
+	}
 	return state.recordsList, nil
 }
 
-// Scan streams every valid record in a legacy single-file WAL to visit.
+// Scan streams every valid record in an explicitly bound V2 single-file WAL.
 // Unlike ReadAll it never builds a []Record, so startup recovery can keep
 // memory proportional to the active recovery window rather than the WAL size.
-func Scan(path string, visit func(Record) error) error {
+func Scan(path string, opts Options, visit func(Record) error) error {
+	lock, err := acquireSingleFileNamespaceLock(path, false)
+	if err != nil {
+		return err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return err
+	}
 	first := true
-	_, err := scanFileVisit(path, false, [32]byte{}, func(record Record) error {
+	_, err = scanFileVisit(path, false, [32]byte{}, func(record Record) error {
 		if first {
 			first = false
 			if record.Position.Sequence != 1 {
 				return fmt.Errorf("wal: first record starts at sequence %d, want 1", record.Position.Sequence)
 			}
+		}
+		if record.CryptoSuite != binding.CryptoSuite {
+			return fmt.Errorf("wal: record crypto_suite %s does not match configured %s", record.CryptoSuite, binding.CryptoSuite)
 		}
 		if visit != nil {
 			return visit(record)
@@ -1195,7 +1471,19 @@ func validateSingleFileStart(state scanState) error {
 // ListSegments returns the segment ids found in dir, in ascending order.
 // Non-segment files are ignored; a missing directory is treated as empty
 // rather than an error to keep callers tolerant of first-boot states.
-func ListSegments(dir string) ([]uint64, error) {
+func ListSegments(dir string, opts Options) ([]uint64, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.close()
+	if _, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts); err != nil {
+		return nil, err
+	}
+	return listSegments(dir)
+}
+
+func listSegments(dir string) ([]uint64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1239,8 +1527,8 @@ func ListSegments(dir string) ([]uint64, error) {
 
 // ReadAllDir reads every currently retained WAL record in dir, verifying the
 // hash chain across segment boundaries. Equivalent to ReadAllDirFrom(dir, 0).
-func ReadAllDir(dir string) ([]Record, error) {
-	return ReadAllDirFrom(dir, 0)
+func ReadAllDir(dir string, opts Options) ([]Record, error) {
+	return ReadAllDirFrom(dir, 0, opts)
 }
 
 // ReadAllDirFrom reads records from segments whose id >= minSegmentID. When
@@ -1248,8 +1536,17 @@ func ReadAllDir(dir string) ([]Record, error) {
 // on-disk id is greater than 1, or minSegmentID skips files, the first
 // non-empty record's link to the absent prefix is trusted once. Every later
 // segment id and hash link remains strict.
-func ReadAllDirFrom(dir string, minSegmentID uint64) ([]Record, error) {
-	segments, err := ListSegments(dir)
+func ReadAllDirFrom(dir string, minSegmentID uint64, opts Options) ([]Record, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return nil, err
+	}
+	segments, err := listSegments(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -1283,6 +1580,9 @@ func ReadAllDirFrom(dir string, minSegmentID uint64) ([]Record, error) {
 		if err := chain.accept(seg, state); err != nil {
 			return nil, err
 		}
+		if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+			return nil, fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", seg, state.cryptoSuite, binding.CryptoSuite)
+		}
 		if state.records == 0 {
 			continue
 		}
@@ -1295,8 +1595,17 @@ func ReadAllDirFrom(dir string, minSegmentID uint64) ([]Record, error) {
 // >= minSegmentID. It verifies the same hash-chain invariants as
 // ReadAllDirFrom, but invokes visit record-by-record instead of collecting a
 // slice. A nil visit performs validation only.
-func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) error {
-	segments, err := ListSegments(dir)
+func ScanDirFrom(dir string, minSegmentID uint64, opts Options, visit func(Record) error) error {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return err
+	}
+	segments, err := listSegments(dir)
 	if err != nil {
 		return err
 	}
@@ -1324,6 +1633,9 @@ func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) erro
 						return err
 					}
 				}
+				if record.CryptoSuite != binding.CryptoSuite {
+					return fmt.Errorf("wal: record crypto_suite %s does not match configured %s", record.CryptoSuite, binding.CryptoSuite)
+				}
 				return visit(record)
 			}
 		}
@@ -1333,6 +1645,9 @@ func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) erro
 		}
 		if err := chain.accept(seg, state); err != nil {
 			return err
+		}
+		if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+			return fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", seg, state.cryptoSuite, binding.CryptoSuite)
 		}
 	}
 	return nil
@@ -1346,7 +1661,18 @@ func ScanDirFrom(dir string, minSegmentID uint64, visit func(Record) error) erro
 // function does not re-check the checkpoint itself. Pruning is idempotent,
 // but it returns success only after each oldest-first removal has crossed a
 // directory metadata barrier.
-func PruneSegmentsBefore(dir string, segmentID uint64) (int, int64, error) {
+func PruneSegmentsBefore(dir string, segmentID uint64, opts Options) (int, int64, error) {
+	lock, err := acquireDirectoryMaintenanceLock(dir)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer lock.close()
+	if activeSegment, ok := lock.writerActiveSegment(); ok && segmentID > activeSegment {
+		return 0, 0, fmt.Errorf("wal: prune cutoff %d would remove active segment %d", segmentID, activeSegment)
+	}
+	if _, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts); err != nil {
+		return 0, 0, err
+	}
 	return pruneSegmentsBeforeWithOps(dir, segmentID, defaultWALFileOps())
 }
 
@@ -1354,7 +1680,7 @@ func pruneSegmentsBeforeWithOps(dir string, segmentID uint64, ops walFileOps) (i
 	if segmentID <= 1 {
 		return 0, 0, nil
 	}
-	segments, err := ListSegments(dir)
+	segments, err := listSegments(dir)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1474,13 +1800,25 @@ func isDecimalSegmentStem(stem string) bool {
 	return true
 }
 
-func Inspect(path string) (InspectResult, error) {
+func Inspect(path string, opts Options) (InspectResult, error) {
+	lock, err := acquireSingleFileNamespaceLock(path, false)
+	if err != nil {
+		return InspectResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return InspectResult{}, err
+	}
 	state, err := scanFile(path, false, false)
 	if err != nil {
 		return InspectResult{}, err
 	}
 	if err := validateSingleFileStart(state); err != nil {
 		return InspectResult{}, err
+	}
+	if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+		return InspectResult{}, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, binding.CryptoSuite)
 	}
 	return InspectResult{
 		Path:          path,
@@ -1510,8 +1848,17 @@ type DirInspectResult struct {
 // InspectDir produces a DirInspectResult by scanning every segment in the
 // directory with cross-segment hash chain verification. This is the CLI's
 // view of `wal inspect` for directory layouts.
-func InspectDir(dir string) (DirInspectResult, error) {
-	ids, err := ListSegments(dir)
+func InspectDir(dir string, opts Options) (DirInspectResult, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, false)
+	if err != nil {
+		return DirInspectResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return DirInspectResult{}, err
+	}
+	ids, err := listSegments(dir)
 	if err != nil {
 		return DirInspectResult{}, err
 	}
@@ -1535,6 +1882,9 @@ func InspectDir(dir string) (DirInspectResult, error) {
 		}
 		if err := chain.accept(id, state); err != nil {
 			return out, err
+		}
+		if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+			return out, fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", id, state.cryptoSuite, binding.CryptoSuite)
 		}
 		res := InspectResult{
 			Path:          segPath,
@@ -1560,7 +1910,23 @@ func InspectDir(dir string) (DirInspectResult, error) {
 	return out, nil
 }
 
-func Repair(path string) (RepairResult, error) {
+func Repair(path string, opts Options) (RepairResult, error) {
+	lock, err := acquireSingleFileNamespaceLock(path, true)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(path+".binding", opts)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	state, err := scanFile(path, true, false)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if state.records > 0 && state.cryptoSuite != binding.CryptoSuite {
+		return RepairResult{}, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, binding.CryptoSuite)
+	}
 	return repairWithOps(path, defaultWALFileOps())
 }
 
@@ -1656,12 +2022,56 @@ type DirRepairResult struct {
 // exists, so truncating earlier segments would cascade-invalidate
 // everything past them. Operators who hit that case should restore from
 // backup or investigate manually.
-func RepairDir(dir string) (DirRepairResult, error) {
+func RepairDir(dir string, opts Options) (DirRepairResult, error) {
+	lock, err := acquireDirectoryNamespaceLock(dir, true)
+	if err != nil {
+		return DirRepairResult{}, err
+	}
+	defer lock.close()
+	binding, err := validateStoredBinding(filepath.Join(dir, bindingFileName), opts)
+	if err != nil {
+		return DirRepairResult{}, err
+	}
+	if err := validateDirRecordSuitesBeforeRepair(dir, binding.CryptoSuite); err != nil {
+		return DirRepairResult{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "wal: repair preflight failed", err)
+	}
 	return repairDirWithOps(dir, defaultWALFileOps())
 }
 
+func validateDirRecordSuitesBeforeRepair(dir string, expected cryptosuite.ID) error {
+	ids, err := listSegments(dir)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	chain := segmentChainState{trustBoundary: ids[0] > 1}
+	for index, id := range ids {
+		path := filepath.Join(dir, segmentName(id))
+		if err := chain.validateNextSegment(id); err != nil {
+			return err
+		}
+		startPrev, err := chain.repairStartPrev(path)
+		if err != nil {
+			return err
+		}
+		state, err := scanFileFrom(path, index == len(ids)-1, false, startPrev)
+		if err != nil {
+			return err
+		}
+		if state.records > 0 && state.cryptoSuite != expected {
+			return fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", id, state.cryptoSuite, expected)
+		}
+		if err := chain.accept(id, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func repairDirWithOps(dir string, ops walFileOps) (DirRepairResult, error) {
-	ids, err := ListSegments(dir)
+	ids, err := listSegments(dir)
 	if err != nil {
 		return DirRepairResult{}, err
 	}
@@ -1760,6 +2170,7 @@ type scanState struct {
 	segmentID     uint64
 	firstPrev     [32]byte // prev-hash expected by the first record in this segment; used to stitch chains
 	lastHash      [32]byte
+	cryptoSuite   cryptosuite.ID
 }
 
 func scanFile(path string, tolerateTail, collect bool) (scanState, error) {
@@ -1816,7 +2227,11 @@ func scanFileVisit(path string, tolerateTail bool, startPrev [32]byte, visit fun
 			state.firstSequence = rec.Position.Sequence
 			state.segmentID = rec.Position.SegmentID
 			state.firstPrev = rec.PrevHash
+			state.cryptoSuite = rec.CryptoSuite
 		} else {
+			if rec.CryptoSuite != state.cryptoSuite {
+				return scanState{}, fmt.Errorf("wal: mixed crypto_suite at offset %d", offset)
+			}
 			if rec.Position.SegmentID != state.segmentID {
 				if tolerateTail {
 					return state, nil
@@ -1850,10 +2265,14 @@ type recordReadFrame struct {
 }
 
 func encodeRecord(segmentID, sequence uint64, unixNano int64, prevHash [32]byte, payload []byte) ([]byte, [32]byte) {
-	return encodeRecordInto(nil, segmentID, sequence, unixNano, prevHash, payload)
+	return encodeRecordIntoForSuite(nil, cryptosuite.INTLV1, segmentID, sequence, unixNano, prevHash, payload)
 }
 
 func encodeRecordInto(buf []byte, segmentID, sequence uint64, unixNano int64, prevHash [32]byte, payload []byte) ([]byte, [32]byte) {
+	return encodeRecordIntoForSuite(buf, cryptosuite.INTLV1, segmentID, sequence, unixNano, prevHash, payload)
+}
+
+func encodeRecordIntoForSuite(buf []byte, suiteID cryptosuite.ID, segmentID, sequence uint64, unixNano int64, prevHash [32]byte, payload []byte) ([]byte, [32]byte) {
 	total := headerSize + len(payload) + crcSize + recordHashSize
 	if cap(buf) < total {
 		buf = make([]byte, total)
@@ -1867,12 +2286,16 @@ func encodeRecordInto(buf []byte, segmentID, sequence uint64, unixNano int64, pr
 	binary.BigEndian.PutUint64(buf[16:24], sequence)
 	binary.BigEndian.PutUint64(buf[24:32], uint64(unixNano))
 	copy(buf[32:64], prevHash[:])
-	binary.BigEndian.PutUint32(buf[64:68], uint32(len(payload)))
-	copy(buf[68:68+len(payload)], payload)
-	crcOffset := 68 + len(payload)
+	binary.BigEndian.PutUint16(buf[64:66], suiteCode(suiteID))
+	binary.BigEndian.PutUint32(buf[66:70], uint32(len(payload)))
+	copy(buf[70:70+len(payload)], payload)
+	crcOffset := 70 + len(payload)
 	crc := crc32.Checksum(buf[:crcOffset], crcTable)
 	binary.BigEndian.PutUint32(buf[crcOffset:crcOffset+4], crc)
-	sum := sha256.Sum256(buf[:crcOffset+4])
+	sum, err := walHash(suiteID, buf[:crcOffset+4])
+	if err != nil {
+		panic(err)
+	}
 	copy(buf[crcOffset+4:], sum[:])
 	return buf, sum
 }
@@ -1904,7 +2327,11 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 	if prev != expectedPrev {
 		return Record{}, 0, fmt.Errorf("%w: hash chain mismatch at offset %d", errCorruptRecord, offset)
 	}
-	payloadLen := binary.BigEndian.Uint32(header[64:68])
+	suiteID, err := suiteFromCode(binary.BigEndian.Uint16(header[64:66]))
+	if err != nil {
+		return Record{}, 0, fmt.Errorf("%w: crypto_suite at offset %d: %v", errUnsupportedRecord, offset, err)
+	}
+	payloadLen := binary.BigEndian.Uint32(header[66:70])
 	if payloadLen == 0 {
 		return Record{}, 0, fmt.Errorf("%w: empty payload at offset %d", errCorruptRecord, offset)
 	}
@@ -1933,12 +2360,14 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 	if gotCRC != wantCRC {
 		return Record{}, 0, fmt.Errorf("%w: crc mismatch at offset %d", errCorruptRecord, offset)
 	}
-	h := sha256.New()
-	_, _ = h.Write(header)
-	_, _ = h.Write(payload)
-	_, _ = h.Write(trailer[:4])
-	var gotHash [recordHashSize]byte
-	h.Sum(gotHash[:0])
+	hashInput := make([]byte, 0, len(header)+len(payload)+4)
+	hashInput = append(hashInput, header...)
+	hashInput = append(hashInput, payload...)
+	hashInput = append(hashInput, trailer[:4]...)
+	gotHash, err := walHash(suiteID, hashInput)
+	if err != nil {
+		return Record{}, 0, fmt.Errorf("%w: storage hash at offset %d: %v", errUnsupportedRecord, offset, err)
+	}
 	var storedHash [32]byte
 	copy(storedHash[:], trailer[4:])
 	if gotHash != storedHash {
@@ -1948,6 +2377,7 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 	segmentID := binary.BigEndian.Uint64(header[8:16])
 	unixNano := int64(binary.BigEndian.Uint64(header[24:32]))
 	return Record{
+		CryptoSuite: suiteID,
 		Position: model.WALPosition{
 			SegmentID: segmentID,
 			Offset:    offset,
@@ -1958,4 +2388,51 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 		PrevHash:   prev,
 		RecordHash: storedHash,
 	}, int64(headerSize + len(payload) + crcSize + recordHashSize), nil
+}
+
+func requestedSuite(suiteID cryptosuite.ID) (cryptosuite.ID, error) {
+	if suiteID == "" {
+		return "", fmt.Errorf("wal: crypto_suite is required")
+	}
+	if _, err := cryptosuite.RequireAvailable(suiteID); err != nil {
+		return "", fmt.Errorf("wal: crypto_suite: %w", err)
+	}
+	return suiteID, nil
+}
+
+func suiteCode(suiteID cryptosuite.ID) uint16 {
+	switch suiteID {
+	case cryptosuite.INTLV1:
+		return 1
+	case cryptosuite.CNSMV1:
+		return 2
+	default:
+		panic("wal: unregistered crypto suite")
+	}
+}
+
+func suiteFromCode(code uint16) (cryptosuite.ID, error) {
+	switch code {
+	case 1:
+		return cryptosuite.INTLV1, nil
+	case 2:
+		return cryptosuite.CNSMV1, nil
+	default:
+		return "", fmt.Errorf("unknown suite code %d", code)
+	}
+}
+
+func walHash(suiteID cryptosuite.ID, data []byte) ([recordHashSize]byte, error) {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return [recordHashSize]byte{}, err
+	}
+	factory, err := trustcrypto.HashFactoryForSuite(suiteID, suite.StorageIntegrityHash.Algorithm)
+	if err != nil {
+		return [recordHashSize]byte{}, err
+	}
+	if factory.Size() != recordHashSize {
+		return [recordHashSize]byte{}, fmt.Errorf("storage hash size %d, want %d", factory.Size(), recordHashSize)
+	}
+	return factory.Sum32(data), nil
 }

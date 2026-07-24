@@ -2,11 +2,11 @@ package anchorschedule
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
 	"sort"
 	"strings"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
@@ -55,6 +55,9 @@ func BindAttemptResult(key model.STHAnchorScheduleKey, attempt model.STHAnchorAt
 	if result.SchemaVersion == "" {
 		result.SchemaVersion = model.SchemaSTHAnchorResult
 	}
+	if result.CryptoSuite == "" {
+		result.CryptoSuite = attempt.Target.CryptoSuite
+	}
 	if result.TreeSize == 0 {
 		result.TreeSize = attempt.Target.TreeSize
 	}
@@ -88,6 +91,9 @@ func BindAttemptResult(key model.STHAnchorScheduleKey, attempt model.STHAnchorAt
 func ValidateSchedule(schedule model.STHAnchorSchedule) error {
 	if schedule.SchemaVersion != model.SchemaSTHAnchorSchedule {
 		return trusterr.New(trusterr.CodeDataLoss, "unexpected anchor schedule schema")
+	}
+	if _, err := cryptosuite.RequireAvailable(schedule.CryptoSuite); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "invalid anchor schedule crypto_suite", err)
 	}
 	if err := ValidateKey(schedule.Key); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "invalid anchor schedule key", err)
@@ -161,6 +167,7 @@ func MergeCandidate(current model.STHAnchorSchedule, exists bool, candidate mode
 	if created {
 		current = model.STHAnchorSchedule{
 			SchemaVersion:  model.SchemaSTHAnchorSchedule,
+			CryptoSuite:    candidate.STH.CryptoSuite,
 			Key:            candidate.Key,
 			NextGeneration: 1,
 		}
@@ -170,6 +177,9 @@ func MergeCandidate(current model.STHAnchorSchedule, exists bool, candidate mode
 		}
 		if !SameKey(current.Key, candidate.Key) {
 			return model.STHAnchorSchedule{}, false, trusterr.New(trusterr.CodeDataLoss, "anchor schedule key does not match candidate")
+		}
+		if err := cryptosuite.RequireSame(current.CryptoSuite, candidate.STH.CryptoSuite); err != nil {
+			return model.STHAnchorSchedule{}, false, trusterr.Wrap(trusterr.CodeDataLoss, "anchor candidate crypto_suite", err)
 		}
 	}
 
@@ -455,6 +465,7 @@ func resultKeyOrderIdentity(key model.STHAnchorResultKey) string {
 
 func SameTarget(left, right model.SignedTreeHead) bool {
 	return left.SchemaVersion == right.SchemaVersion &&
+		left.CryptoSuite == right.CryptoSuite &&
 		left.TreeAlg == right.TreeAlg &&
 		left.TreeSize == right.TreeSize &&
 		bytes.Equal(left.RootHash, right.RootHash) &&
@@ -510,7 +521,11 @@ func ValidateResult(key model.STHAnchorScheduleKey, result model.STHAnchorResult
 	if err := ValidateKey(key); err != nil {
 		return err
 	}
-	if result.SchemaVersion != model.SchemaSTHAnchorResult || result.TreeSize == 0 || len(result.RootHash) != sha256.Size || result.AnchorID == "" || result.PublishedAtUnixN <= 0 {
+	suite, err := cryptosuite.RequireAvailable(result.CryptoSuite)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeInvalidArgument, "anchor result crypto_suite", err)
+	}
+	if result.SchemaVersion != model.SchemaSTHAnchorResult || result.TreeSize == 0 || len(result.RootHash) != suite.AnchorDigest.DigestBytes || result.AnchorID == "" || result.PublishedAtUnixN <= 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "valid STH anchor result is required")
 	}
 	if result.NodeID != key.NodeID || result.LogID != key.LogID || result.SinkName != key.SinkName {
@@ -518,6 +533,9 @@ func ValidateResult(key model.STHAnchorScheduleKey, result model.STHAnchorResult
 	}
 	if err := validateTarget(key, result.STH); err != nil {
 		return trusterr.Wrap(trusterr.CodeInvalidArgument, "anchor result signed tree head is invalid", err)
+	}
+	if err := cryptosuite.RequireSame(result.CryptoSuite, result.STH.CryptoSuite); err != nil {
+		return trusterr.Wrap(trusterr.CodeInvalidArgument, "anchor result crypto_suite", err)
 	}
 	if result.TreeSize != result.STH.TreeSize || !bytes.Equal(result.RootHash, result.STH.RootHash) {
 		return trusterr.New(trusterr.CodeInvalidArgument, "anchor result does not bind its signed tree head")
@@ -532,7 +550,11 @@ func ValidateLatestReference(ref model.STHAnchorLatestReference) error {
 	if err := ValidateResultKey(ref.Key); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "invalid latest anchor result key", err)
 	}
-	if len(ref.RootHash) != sha256.Size || ref.AnchorID == "" {
+	suite, err := cryptosuite.RequireAvailable(ref.CryptoSuite)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "invalid latest anchor crypto_suite", err)
+	}
+	if len(ref.RootHash) != suite.AnchorDigest.DigestBytes || ref.AnchorID == "" {
 		return trusterr.New(trusterr.CodeDataLoss, "invalid latest anchor result binding")
 	}
 	return nil
@@ -541,6 +563,7 @@ func ValidateLatestReference(ref model.STHAnchorLatestReference) error {
 func LatestReference(result model.STHAnchorResult) model.STHAnchorLatestReference {
 	return model.STHAnchorLatestReference{
 		SchemaVersion: model.SchemaSTHAnchorLatest,
+		CryptoSuite:   result.CryptoSuite,
 		Key:           ResultKey(result),
 		RootHash:      append([]byte(nil), result.RootHash...),
 		AnchorID:      result.AnchorID,
@@ -632,7 +655,11 @@ func Sort(schedules []model.STHAnchorSchedule) {
 }
 
 func validateTarget(key model.STHAnchorScheduleKey, sth model.SignedTreeHead) error {
-	if sth.SchemaVersion != model.SchemaSignedTreeHead || sth.TreeAlg != model.DefaultMerkleTreeAlg || sth.TreeSize == 0 || len(sth.RootHash) != sha256.Size || sth.TimestampUnixN <= 0 || sth.Signature.Alg == "" || sth.Signature.KeyID == "" || len(sth.Signature.Signature) == 0 {
+	suite, err := cryptosuite.RequireAvailable(sth.CryptoSuite)
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeInvalidArgument, "signed tree head crypto_suite", err)
+	}
+	if sth.SchemaVersion != model.SchemaSignedTreeHead || sth.TreeAlg != suite.Merkle.Algorithm || sth.TreeSize == 0 || len(sth.RootHash) != suite.Merkle.Hash.DigestBytes || sth.TimestampUnixN <= 0 || sth.Signature.Alg != suite.Signature.Algorithm || sth.Signature.KeyID == "" || len(sth.Signature.Signature) == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "valid signed tree head is required")
 	}
 	if sth.NodeID != key.NodeID || sth.LogID != key.LogID {

@@ -46,7 +46,8 @@ func TestLocalEnginePropagatesSourceIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sign() error = %v", err)
 	}
-	w, err := wal.OpenWriter(filepath.Join(t.TempDir(), "000000000001.wal"), 1)
+	walPath := filepath.Join(t.TempDir(), "000000000001.wal")
+	w, err := wal.OpenWriterWithOptions(walPath, 1, testWALOptions(walPath))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}

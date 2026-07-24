@@ -3,10 +3,14 @@ package statusnotify
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +19,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 type routeResolver struct {
@@ -68,7 +73,7 @@ func testResolverAndRequest(t testing.TB, route model.UpstreamNotificationRoute,
 		routes: map[string]model.UpstreamNotificationRoute{"tenant/client/key": route},
 		keys: map[string]model.ClientKey{"tenant/client/key": {
 			TenantID: "tenant", ClientID: "client", KeyID: "key", Alg: cryptosuite.SignatureEd25519,
-			PublicKey: publicKey, Status: model.KeyStatusValid,
+			CryptoSuite: cryptosuite.INTLV1, PublicKey: publicKey, Status: model.KeyStatusValid,
 		}},
 	}
 	request := CreateRequest{
@@ -79,6 +84,220 @@ func testResolverAndRequest(t testing.TB, route model.UpstreamNotificationRoute,
 		t.Fatal(err)
 	}
 	return resolver, request
+}
+
+func TestCNSMSubscriptionSignatureAndID(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := trustcrypto.GenerateSM2Key()
+	if err != nil {
+		t.Fatalf("GenerateSM2Key: %v", err)
+	}
+	signer, err := trustcrypto.NewSM2Signer("sm2-key", privateKey)
+	if err != nil {
+		t.Fatalf("NewSM2Signer: %v", err)
+	}
+	request := CreateRequest{
+		TenantID: "tenant-cn", ClientID: "client-cn", KeyID: "sm2-key",
+		RecordIDs: []string{"tr1-cn"}, SignedAtUnixN: time.Now().UTC().UnixNano(),
+		Nonce: "0123456789abcdef",
+	}
+	if err := SignCreateRequest(context.Background(), cryptosuite.CNSMV1, signer, &request); err != nil {
+		t.Fatalf("SignCreateRequest: %v", err)
+	}
+	clientKey := model.ClientKey{
+		TenantID: "tenant-cn", ClientID: "client-cn", KeyID: "sm2-key",
+		CryptoSuite: cryptosuite.CNSMV1, Alg: cryptosuite.SignatureSM2SM3,
+		PublicKey: publicKey, Status: model.KeyStatusValid,
+	}
+	if err := VerifyCreateRequest(request, clientKey, time.Now().UTC()); err != nil {
+		t.Fatalf("VerifyCreateRequest: %v", err)
+	}
+	first, err := subscriptionID(cryptosuite.CNSMV1, request)
+	if err != nil {
+		t.Fatalf("subscriptionID(CN_SM_V1): %v", err)
+	}
+	second, err := subscriptionID(cryptosuite.CNSMV1, request)
+	if err != nil || first != second || !strings.HasPrefix(first, subscriptionIDPrefix) {
+		t.Fatalf("CN subscription IDs first=%q second=%q err=%v", first, second, err)
+	}
+	intl, err := subscriptionID(cryptosuite.INTLV1, request)
+	if err != nil {
+		t.Fatalf("subscriptionID(INTL_V1): %v", err)
+	}
+	if intl == first {
+		t.Fatal("subscription ID did not bind crypto_suite")
+	}
+}
+
+func TestHubPersistentStateV2Binding(t *testing.T) {
+	t.Parallel()
+
+	_, serverPrivate, err := trustcrypto.GenerateSM2Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := trustcrypto.NewSM2Signer("server-cn", serverPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_000, 0).UTC()
+	subscription := Subscription{
+		ID:             subscriptionIDPrefix + base64.RawURLEncoding.EncodeToString([]byte("123456789012345678")),
+		TenantID:       "tenant-cn",
+		ClientID:       "client-cn",
+		KeyID:          "key-cn",
+		RecordIDs:      []string{"tr2-cn"},
+		CreatedAtUnixN: now.Add(-time.Minute).UnixNano(),
+		ExpiresAtUnixN: now.Add(time.Hour).UnixNano(),
+	}
+	valid := persistedState{
+		SchemaVersion: persistedStateSchema,
+		CryptoSuite:   cryptosuite.CNSMV1,
+		NodeID:        "node-cn",
+		LogID:         "log-cn",
+		NamespaceID:   "pebble:test-cn",
+		Subscriptions: []Subscription{subscription},
+	}
+	path := filepath.Join(t.TempDir(), "status-subscriptions.json")
+	writeState := func(value any) {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open := func() (*Hub, error) {
+		return New(Config{
+			StatePath:   path,
+			NodeID:      "node-cn",
+			LogID:       "log-cn",
+			NamespaceID: "pebble:test-cn",
+			Routes:      routeResolver{},
+			Signer:      signer,
+			CryptoSuite: cryptosuite.CNSMV1,
+			Clock:       func() time.Time { return now },
+		})
+	}
+
+	writeState(valid)
+	hub, err := open()
+	if err != nil {
+		t.Fatalf("open valid persistent state: %v", err)
+	}
+	if got, found := hub.Get(subscription.ID); !found || got.ID != subscription.ID {
+		t.Fatalf("reloaded subscription = %+v found=%v", got, found)
+	}
+	if err := hub.Delete(context.Background(), subscription.ID); err != nil {
+		t.Fatalf("persist deleted subscription: %v", err)
+	}
+	if err := hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := open()
+	if err != nil {
+		t.Fatalf("reopen persisted V2 state: %v", err)
+	}
+	if _, found := reopened.Get(subscription.ID); found {
+		t.Fatal("deleted subscription returned after restart")
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongSuite := valid
+	wrongSuite.CryptoSuite = cryptosuite.INTLV1
+	writeState(wrongSuite)
+	if _, err := open(); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("wrong-suite state error = %v, want FAILED_PRECONDITION", err)
+	}
+
+	wrongNode := valid
+	wrongNode.NodeID = "other-node"
+	writeState(wrongNode)
+	if _, err := open(); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("wrong-node state error = %v, want FAILED_PRECONDITION", err)
+	}
+
+	writeState(map[string]any{"subscriptions": []any{}})
+	if _, err := open(); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("legacy state error = %v, want FAILED_PRECONDITION", err)
+	}
+}
+
+func TestHubKeepsInstalledStateWhenDirectorySyncFails(t *testing.T) {
+	t.Parallel()
+
+	signer, _ := testSigner(t)
+	resolver, request := testResolverAndRequest(
+		t,
+		model.UpstreamNotificationRoute{},
+		[]string{"tr2-persist"},
+		Channels{},
+	)
+	statePath := filepath.Join(t.TempDir(), "status-subscriptions.json")
+	var syncCalls atomic.Int64
+	hub, err := New(Config{
+		StatePath:   statePath,
+		NodeID:      "node-persist",
+		LogID:       "log-persist",
+		NamespaceID: "pebble:persist",
+		Routes:      resolver,
+		Signer:      signer,
+		CryptoSuite: cryptosuite.INTLV1,
+		stateFileOps: &statusStateFileOps{
+			replace: os.Rename,
+			syncDir: func(string) error {
+				if syncCalls.Add(1) == 1 {
+					return errors.New("injected directory sync failure")
+				}
+				return nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := subscriptionID(cryptosuite.INTLV1, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Create(context.Background(), request); err == nil {
+		t.Fatal("Create() error = nil, want directory sync failure")
+	}
+	if got, found := hub.Get(id); !found || got.ID != id {
+		t.Fatalf("installed subscription was rolled back in memory: %+v found=%v", got, found)
+	}
+	retried, err := hub.Create(context.Background(), request)
+	if err != nil {
+		t.Fatalf("idempotent retry did not complete directory sync: %v", err)
+	}
+	if retried.ID != id || syncCalls.Load() != 2 {
+		t.Fatalf("retry result=%+v sync_calls=%d", retried, syncCalls.Load())
+	}
+	if err := hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := New(Config{
+		StatePath:   statePath,
+		NodeID:      "node-persist",
+		LogID:       "log-persist",
+		NamespaceID: "pebble:persist",
+		Routes:      resolver,
+		Signer:      signer,
+		CryptoSuite: cryptosuite.INTLV1,
+	})
+	if err != nil {
+		t.Fatalf("reopen installed state: %v", err)
+	}
+	defer reopened.Close()
+	if got, found := reopened.Get(id); !found || got.ID != id {
+		t.Fatalf("installed subscription missing after restart: %+v found=%v", got, found)
+	}
 }
 
 func TestHubCoalescesWebhookRefreshes(t *testing.T) {

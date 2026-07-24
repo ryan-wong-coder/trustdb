@@ -31,7 +31,7 @@ producer
    |
    | publish SignedClaim request
    v
-TRUSTDB_INGRESS (work-queue stream)
+TRUSTDB_INGRESS_V2 (work-queue stream)
    |
    | durable pull consumer, bounded MaxAckPending
    v
@@ -39,7 +39,7 @@ TrustDB shared submission service -> signature/key checks -> WAL acceptance
    |                                      |
    | accepted or terminal failure         | malformed broker delivery
    v                                      v
-TRUSTDB_INGRESS_RESULTS                 TRUSTDB_INGRESS_DLQ
+TRUSTDB_INGRESS_V2_RESULTS                 TRUSTDB_INGRESS_V2_DLQ
    |
    | immutable outcome stored first
    v
@@ -123,10 +123,10 @@ The default topology contains three distinct streams and one durable consumer:
 
 | Resource | Default | Required behavior |
 | --- | --- | --- |
-| Ingress stream | `TRUSTDB_INGRESS` | Work-queue retention on the concrete `trustdb.ingress.v1.claims` subject, `DiscardNew`, bounded bytes/message size, configured duplicate window. |
-| Durable consumer | `trustdb-ingress` | Explicit ACK, instant replay, exact subject filter, configured `AckWait`, `MaxDeliver`, `MaxAckPending`, request batch, and request expiry. |
-| Result stream | `TRUSTDB_INGRESS_RESULTS` | Limits retention on `trustdb.ingress.v1.results.*`, one immutable message per result subject, `DiscardNewPerSubject`. |
-| Dead-letter stream | `TRUSTDB_INGRESS_DLQ` | Limits retention on `trustdb.ingress.v1.dlq.*`, one immutable message per rejection subject, `DiscardNewPerSubject`. |
+| Ingress stream | `TRUSTDB_INGRESS_V2` | Work-queue retention on the concrete `trustdb.ingress.v2.claims` subject, `DiscardNew`, bounded bytes/message size, configured duplicate window. |
+| Durable consumer | `trustdb-ingress-v2` | Explicit ACK, instant replay, exact subject filter, configured `AckWait`, `MaxDeliver`, `MaxAckPending`, request batch, and request expiry. |
+| Result stream | `TRUSTDB_INGRESS_V2_RESULTS` | Limits retention on `trustdb.ingress.v2.results.*`, one immutable message per result subject, `DiscardNewPerSubject`. |
+| Dead-letter stream | `TRUSTDB_INGRESS_V2_DLQ` | Limits retention on `trustdb.ingress.v2.dlq.*`, one immutable message per rejection subject, `DiscardNewPerSubject`. |
 
 With `nats.provision: true`, TrustDB creates missing resources. It never
 silently rewrites an existing stream or consumer: every relevant field is

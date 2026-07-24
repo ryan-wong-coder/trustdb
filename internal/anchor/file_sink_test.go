@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -19,10 +20,13 @@ func fileSinkSTH(treeSize uint64) model.SignedTreeHead {
 	root[31] = byte(treeSize)
 	return model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
 		RootHash:       root,
 		TimestampUnixN: 1_234,
+		NodeID:         "node-a",
+		LogID:          "log-a",
 	}
 }
 
@@ -65,8 +69,42 @@ func TestFileSinkPublishAppendsJSONL(t *testing.T) {
 	if entry.TreeSize != sth.TreeSize || entry.RootHashHex != hex.EncodeToString(sth.RootHash) {
 		t.Fatalf("entry = %+v", entry)
 	}
+	if entry.SchemaVersion != "trustdb.anchor-file-entry.v2" ||
+		entry.CryptoSuite != string(sth.CryptoSuite) ||
+		entry.NodeID != sth.NodeID ||
+		entry.LogID != sth.LogID {
+		t.Fatalf("entry identity = %+v", entry)
+	}
 	if scanner.Scan() {
 		t.Fatalf("second line written unexpectedly: %q", scanner.Text())
+	}
+}
+
+func TestNativeAnchorIDsBindFullSTHIdentityAndSuite(t *testing.T) {
+	t.Parallel()
+
+	base := fileSinkSTH(9)
+	for name, mutate := range map[string]func(*model.SignedTreeHead){
+		"suite": func(sth *model.SignedTreeHead) {
+			sth.CryptoSuite = cryptosuite.CNSMV1
+			sth.TreeAlg = cryptosuite.MerkleRFC6962SM3
+		},
+		"node":      func(sth *model.SignedTreeHead) { sth.NodeID = "node-b" },
+		"log":       func(sth *model.SignedTreeHead) { sth.LogID = "log-b" },
+		"tree_size": func(sth *model.SignedTreeHead) { sth.TreeSize++ },
+		"root":      func(sth *model.SignedTreeHead) { sth.RootHash[0] ^= 0xff },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			changed.RootHash = append([]byte(nil), base.RootHash...)
+			mutate(&changed)
+			if got, want := DeterministicFileAnchorID(changed), DeterministicFileAnchorID(base); got == "" || got == want {
+				t.Fatalf("file anchor id = %q, base = %q", got, want)
+			}
+			if got, want := DeterministicNoopAnchorID(changed), DeterministicNoopAnchorID(base); got == "" || got == want {
+				t.Fatalf("noop anchor id = %q, base = %q", got, want)
+			}
+		})
 	}
 }
 

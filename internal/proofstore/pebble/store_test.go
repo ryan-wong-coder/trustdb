@@ -32,7 +32,12 @@ func TestPebbleSuiteBindingConformance(t *testing.T) {
 		}
 		return proofstoremetatest.Harness{
 			Open: func(suiteID cryptosuite.ID) (cryptosuite.ID, error) {
-				store, err := pebblestore.OpenWithOptions(path, pebblestore.Options{CryptoSuite: suiteID})
+				store, err := pebblestore.OpenWithOptions(path, pebblestore.Options{
+					CryptoSuite: suiteID,
+					NodeID:      "node-1",
+					LogID:       "log-1",
+					NamespaceID: "test",
+				})
 				if err != nil {
 					return "", err
 				}
@@ -53,7 +58,7 @@ func TestPebbleSuiteBindingConformance(t *testing.T) {
 func TestPebbleStoreConformance(t *testing.T) {
 	t.Parallel()
 	proofstoretest.RunConformance(t, func(t *testing.T) (proofstore.Store, func()) {
-		store, err := pebblestore.Open(t.TempDir())
+		store, err := openPebbleTestStore(t.TempDir())
 		if err != nil {
 			t.Fatalf("pebble Open: %v", err)
 		}
@@ -63,13 +68,49 @@ func TestPebbleStoreConformance(t *testing.T) {
 
 func TestPebbleEnablesPruningAfterDurableRestartIdempotency(t *testing.T) {
 	t.Parallel()
-	store, err := pebblestore.Open(t.TempDir())
+	store, err := openPebbleTestStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("pebble Open: %v", err)
 	}
 	defer store.Close()
 	if !proofstore.WALCheckpointPruneSafe(store) {
 		t.Fatal("Pebble store did not enable pruning after durable restart idempotency became ready")
+	}
+}
+
+func TestPebbleV2AnchorKeyspaceDoesNotReadV1Schedule(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+	store, err := openPebbleTestStore(path)
+	if err != nil {
+		t.Fatalf("initialize v5 proofstore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close initialized store: %v", err)
+	}
+	db, err := pdb.Open(path, &pdb.Options{})
+	if err != nil {
+		t.Fatalf("open raw Pebble: %v", err)
+	}
+	if err := db.Set([]byte("anchor/schedule/v1/legacy"), []byte{0xa0}, pdb.Sync); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed v1 schedule key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw Pebble: %v", err)
+	}
+	store, err = openPebbleTestStore(path)
+	if err != nil {
+		t.Fatalf("reopen v5 proofstore: %v", err)
+	}
+	defer store.Close()
+	schedules, err := proofstore.STHAnchorScheduleStore(store).ListSTHAnchorSchedules(context.Background())
+	if err != nil {
+		t.Fatalf("list v2 schedules: %v", err)
+	}
+	if len(schedules) != 0 {
+		t.Fatalf("v2 keyspace exposed v1 schedule: %+v", schedules)
 	}
 }
 
@@ -80,7 +121,7 @@ func TestPebbleSTHAnchorScheduleSurvivesRestartAndPreservesResult(t *testing.T) 
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	sth := pebbleScheduleSTH(key, 3, 0x33)
 
-	store, err := pebblestore.Open(dir)
+	store, err := openPebbleTestStore(dir)
 	if err != nil {
 		t.Fatalf("pebble Open: %v", err)
 	}
@@ -104,7 +145,7 @@ func TestPebbleSTHAnchorScheduleSurvivesRestartAndPreservesResult(t *testing.T) 
 		t.Fatalf("Close: %v", err)
 	}
 
-	store, err = pebblestore.Open(dir)
+	store, err = openPebbleTestStore(dir)
 	if err != nil {
 		t.Fatalf("pebble reopen: %v", err)
 	}
@@ -118,7 +159,7 @@ func TestPebbleSTHAnchorScheduleSurvivesRestartAndPreservesResult(t *testing.T) 
 	if err != nil || !claimed {
 		t.Fatalf("ClaimSTHAnchorAttempt retry claimed=%v err=%v", claimed, err)
 	}
-	result := model.STHAnchorResult{
+	result := model.STHAnchorResult{CryptoSuite: "INTL_V1",
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           key.NodeID,
 		LogID:            key.LogID,
@@ -182,7 +223,7 @@ func TestPebbleL5CoverageCheckpointSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
-	store, err := pebblestore.Open(dir)
+	store, err := openPebbleTestStore(dir)
 	if err != nil {
 		t.Fatalf("pebble Open: %v", err)
 	}
@@ -193,7 +234,7 @@ func TestPebbleL5CoverageCheckpointSurvivesRestart(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	store, err = pebblestore.Open(dir)
+	store, err = openPebbleTestStore(dir)
 	if err != nil {
 		t.Fatalf("pebble reopen: %v", err)
 	}
@@ -207,7 +248,7 @@ func TestPebbleL5CoverageCheckpointSurvivesRestart(t *testing.T) {
 func TestPebbleClaimReconcilesResultBeforeSubmittingPendingWork(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, err := pebblestore.Open(t.TempDir())
+	store, err := openPebbleTestStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("pebble Open: %v", err)
 	}
@@ -225,7 +266,7 @@ func TestPebbleClaimReconcilesResultBeforeSubmittingPendingWork(t *testing.T) {
 	if _, err := scheduler.UpsertSTHAnchorCandidate(ctx, model.STHAnchorCandidate{Key: key, STH: sth5, ObservedAtUnixN: 110, DueAtUnixN: 200}); err != nil {
 		t.Fatalf("UpsertSTHAnchorCandidate(5): %v", err)
 	}
-	result := model.STHAnchorResult{
+	result := model.STHAnchorResult{CryptoSuite: "INTL_V1",
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           key.NodeID,
 		LogID:            key.LogID,
@@ -250,8 +291,17 @@ func TestPebbleClaimReconcilesResultBeforeSubmittingPendingWork(t *testing.T) {
 	}
 }
 
+func openPebbleTestStore(path string) (*pebblestore.Store, error) {
+	return pebblestore.OpenWithOptions(path, pebblestore.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "test-node",
+		LogID:       "test-log",
+		NamespaceID: "test-pebble",
+	})
+}
+
 func pebbleScheduleSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byte) model.SignedTreeHead {
-	return model.SignedTreeHead{
+	return model.SignedTreeHead{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,

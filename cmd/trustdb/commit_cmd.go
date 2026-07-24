@@ -15,6 +15,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/prooflevel"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
+	"github.com/wowtrust/trustdb/internal/wal"
 )
 
 func newCommitCommand(rt *runtimeConfig) *cobra.Command {
@@ -59,13 +60,23 @@ func newCommitCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			writer, _, err := openWALWriter(walPath, 0)
+			walID, err := filepath.Abs(filepath.Clean(walPath))
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "resolve wal identity", err)
+			}
+			writer, _, err := openWALWriterWithOptions(walPath, wal.Options{
+				CryptoSuite: serverKey.CryptoSuite,
+				NodeID:      serverID,
+				LogID:       serverID,
+				NamespaceID: "wal:" + walID,
+			})
 			if err != nil {
 				return err
 			}
 			defer writer.Close()
 			engine := app.LocalEngine{
 				ServerID:        serverID,
+				LogID:           serverID,
 				ServerKeyID:     serverKeyID,
 				ClientPublicKey: clientPub,
 				ClientKeys:      clientKeys,
@@ -155,13 +166,23 @@ func newCommitBatchCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			writer, _, err := openWALWriter(walPath, 0)
+			walID, err := filepath.Abs(filepath.Clean(walPath))
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "resolve wal identity", err)
+			}
+			writer, _, err := openWALWriterWithOptions(walPath, wal.Options{
+				CryptoSuite: serverKey.CryptoSuite,
+				NodeID:      serverID,
+				LogID:       serverID,
+				NamespaceID: "wal:" + walID,
+			})
 			if err != nil {
 				return err
 			}
 			defer writer.Close()
 			engine := app.LocalEngine{
 				ServerID:        serverID,
+				LogID:           serverID,
 				ServerKeyID:     serverKeyID,
 				ClientPublicKey: clientPub,
 				ClientKeys:      clientKeys,

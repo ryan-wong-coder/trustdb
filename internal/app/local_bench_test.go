@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
@@ -65,8 +66,10 @@ func syntheticCommitBatchInputs(n int) ([]model.SignedClaim, []model.ServerRecor
 		claimHash := bytes.Repeat([]byte{byte((i + 1) % 251)}, 32)
 		signed[i] = model.SignedClaim{
 			SchemaVersion: model.SchemaSignedClaim,
+			CryptoSuite:   cryptosuite.INTLV1,
 			Claim: model.ClientClaim{
 				SchemaVersion:   model.SchemaClientClaim,
+				CryptoSuite:     cryptosuite.INTLV1,
 				TenantID:        "bench-tenant",
 				ClientID:        "bench-client",
 				KeyID:           "bench-client-key",
@@ -89,6 +92,7 @@ func syntheticCommitBatchInputs(n int) ([]model.SignedClaim, []model.ServerRecor
 		}
 		records[i] = model.ServerRecord{
 			SchemaVersion:       model.SchemaServerRecord,
+			CryptoSuite:         cryptosuite.INTLV1,
 			RecordID:            recordID,
 			TenantID:            "bench-tenant",
 			ClientID:            "bench-client",
@@ -106,6 +110,7 @@ func syntheticCommitBatchInputs(n int) ([]model.SignedClaim, []model.ServerRecor
 		}
 		accepted[i] = model.AcceptedReceipt{
 			SchemaVersion:   model.SchemaAcceptedReceipt,
+			CryptoSuite:     cryptosuite.INTLV1,
 			RecordID:        recordID,
 			Status:          "accepted",
 			ServerID:        "bench-server",

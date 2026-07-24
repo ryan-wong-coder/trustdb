@@ -3,7 +3,6 @@ package proofstore
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -16,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
@@ -23,6 +23,8 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/l5coverage"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
+	"github.com/wowtrust/trustdb/internal/proofstoremeta"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -31,7 +33,7 @@ const (
 	encodedFileNamePrefix     = "~"
 	localPositionWidth        = 20
 	localAnchorScheduleSuffix = ".tdsth-anchor-schedule"
-	localAnchorSchedulePrefix = "v1_"
+	localAnchorSchedulePrefix = "v2_"
 	localAnchorResultSuffix   = ".tdsth-anchor-result"
 	localAnchorResultPrefix   = "v2_"
 	localAnchorTreeRefSuffix  = ".tdsth-anchor-tree-ref"
@@ -39,19 +41,201 @@ const (
 	localAnchorTreeRootSuffix = ".tdsth-anchor-tree-root"
 	localL5CoverageSuffix     = ".tdl5-coverage"
 	localAnchorPublishSuffix  = ".tdanchor-publish-journal"
-	localAnchorPublishSchema  = "trustdb.local-anchor-publish-journal.v1"
+	localAnchorPublishSchema  = "trustdb.local-anchor-publish-journal.v2"
+	localNamespaceLockFile    = ".trustdb-proofstore.lock"
 )
 
 type LocalStore struct {
-	Root    string
-	SuiteID cryptosuite.ID
+	directory string
+	binding   proofstoremeta.Marker
+	lock      *localNamespaceLock
+}
+
+func (s LocalStore) RootPath() string {
+	return s.directory
 }
 
 func (s LocalStore) CryptoSuite() cryptosuite.ID {
-	if s.SuiteID == "" {
-		return cryptosuite.INTLV1
+	return s.binding.CryptoSuite
+}
+
+func (s LocalStore) requireSuite(value any) error {
+	if err := proofstoremeta.ValidateBinding(
+		s.binding,
+		s.binding.CryptoSuite,
+		s.binding.NodeID,
+		s.binding.LogID,
+		s.binding.NamespaceID,
+	); err != nil {
+		return trusterr.Wrap(trusterr.CodeFailedPrecondition, "proofstore namespace binding", err)
 	}
-	return s.SuiteID
+	if err := modelsuite.Require(s.CryptoSuite(), value); err != nil {
+		return trusterr.Wrap(trusterr.CodeInvalidArgument, "proofstore crypto_suite", err)
+	}
+	return nil
+}
+
+func newBoundLocalStore(root string, binding proofstoremeta.Marker, lock *localNamespaceLock) *LocalStore {
+	return &LocalStore{directory: root, binding: binding, lock: lock}
+}
+
+type localNamespaceLock struct {
+	lifecycle sync.RWMutex
+	dir       *os.File
+	file      *os.File
+	closing   atomic.Bool
+	closed    bool
+}
+
+func acquireLocalNamespaceLock(root string) (*localNamespaceLock, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "create file proofstore directory", err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "inspect file proofstore directory", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore root must be a real directory, not a symlink")
+	}
+	if !validateLocalRootPermissions(rootInfo) {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore root must not be group- or other-writable")
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open file proofstore directory", err)
+	}
+	dirInfo, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "stat opened file proofstore directory", err)
+	}
+	if !os.SameFile(rootInfo, dirInfo) {
+		_ = dir.Close()
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore directory changed while opening")
+	}
+
+	path := filepath.Join(root, localNamespaceLockFile)
+	file, err := openSecureLocalNamespaceLockFile(path)
+	if err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	if err := lockLocalNamespaceFile(file); err != nil {
+		_ = file.Close()
+		_ = dir.Close()
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "file proofstore namespace is already open by another process", err)
+	}
+	return &localNamespaceLock{dir: dir, file: file}, nil
+}
+
+func openSecureLocalNamespaceLockFile(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		file, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if createErr == nil {
+			info, err = os.Lstat(path)
+			if err != nil {
+				_ = file.Close()
+				return nil, trusterr.Wrap(trusterr.CodeDataLoss, "inspect created file proofstore namespace lock", err)
+			}
+			fileInfo, statErr := file.Stat()
+			if statErr != nil {
+				_ = file.Close()
+				return nil, trusterr.Wrap(trusterr.CodeDataLoss, "stat created file proofstore namespace lock", statErr)
+			}
+			if err := validateLocalNamespaceLockFile(info, fileInfo); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			return file, nil
+		}
+		if !errors.Is(createErr, os.ErrExist) {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "create file proofstore namespace lock", createErr)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "inspect file proofstore namespace lock", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock must be a regular file, not a symlink")
+	}
+	if !validateLocalLockPermissions(info) {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock permissions must be 0600")
+	}
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open file proofstore namespace lock", err)
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "stat opened file proofstore namespace lock", err)
+	}
+	if err := validateLocalNamespaceLockFile(info, fileInfo); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func validateLocalNamespaceLockFile(pathInfo, fileInfo os.FileInfo) error {
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !fileInfo.Mode().IsRegular() {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock must be a regular file, not a symlink")
+	}
+	if !validateLocalLockPermissions(pathInfo) || !validateLocalLockPermissions(fileInfo) {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock permissions must be 0600")
+	}
+	if !os.SameFile(pathInfo, fileInfo) {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock changed while opening")
+	}
+	return nil
+}
+
+func (l *localNamespaceLock) close() error {
+	if l == nil {
+		return nil
+	}
+	l.closing.Store(true)
+	l.lifecycle.Lock()
+	defer l.lifecycle.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	unlockErr := unlockLocalNamespaceFile(l.file)
+	closeErr := l.file.Close()
+	dirCloseErr := l.dir.Close()
+	if unlockErr != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "unlock file proofstore namespace", unlockErr)
+	}
+	if closeErr != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "close file proofstore namespace lock", closeErr)
+	}
+	if dirCloseErr != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "close file proofstore directory", dirCloseErr)
+	}
+	return nil
+}
+
+func (l *localNamespaceLock) beginOperation() (func(), error) {
+	if l == nil {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore is not bound to an open namespace")
+	}
+	if l.closing.Load() {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore is closing or closed")
+	}
+	l.lifecycle.RLock()
+	if l.closing.Load() || l.closed {
+		l.lifecycle.RUnlock()
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore is closing or closed")
+	}
+	return l.lifecycle.RUnlock, nil
+}
+
+func (s LocalStore) beginOperation() (func(), error) {
+	return s.lock.beginOperation()
 }
 
 type localFileOps struct {
@@ -108,8 +292,16 @@ func defaultLocalFileOps() localFileOps {
 }
 
 func (s LocalStore) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put bundle canceled", err)
+	}
+	if err := s.requireSuite(bundle); err != nil {
+		return err
 	}
 	if bundle.RecordID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
@@ -117,22 +309,34 @@ func (s LocalStore) PutBundle(ctx context.Context, bundle model.ProofBundle) err
 	if err := writeCBORAtomic(s.bundlePath(bundle.RecordID), bundle); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "write proof bundle", err)
 	}
-	if err := s.PutRecordIndex(ctx, model.RecordIndexFromBundle(bundle)); err != nil {
+	if err := s.putRecordIndex(ctx, model.RecordIndexFromBundle(bundle)); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "write record index", err)
 	}
 	return nil
 }
 
 func (s LocalStore) PutRecordIndex(ctx context.Context, idx model.RecordIndex) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.putRecordIndex(ctx, idx)
+}
+
+func (s LocalStore) putRecordIndex(ctx context.Context, idx model.RecordIndex) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put record index canceled", err)
+	}
+	if err := s.requireSuite(idx); err != nil {
+		return err
 	}
 	if idx.RecordID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "record index record_id is required")
 	}
 	var old model.RecordIndex
 	oldFound := false
-	if existing, ok, err := s.GetRecordIndex(ctx, idx.RecordID); err != nil {
+	if existing, ok, err := s.getRecordIndex(ctx, idx.RecordID); err != nil {
 		return err
 	} else if ok {
 		old = existing
@@ -149,6 +353,11 @@ func (s LocalStore) PutRecordIndex(ctx context.Context, idx model.RecordIndex) e
 }
 
 func (s LocalStore) GetBundle(ctx context.Context, recordID string) (model.ProofBundle, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.ProofBundle{}, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.ProofBundle{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get bundle canceled", err)
 	}
@@ -170,6 +379,15 @@ func (s LocalStore) GetBundle(ctx context.Context, recordID string) (model.Proof
 }
 
 func (s LocalStore) GetRecordIndex(ctx context.Context, recordID string) (model.RecordIndex, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.RecordIndex{}, false, err
+	}
+	defer release()
+	return s.getRecordIndex(ctx, recordID)
+}
+
+func (s LocalStore) getRecordIndex(ctx context.Context, recordID string) (model.RecordIndex, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.RecordIndex{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get record index canceled", err)
 	}
@@ -191,6 +409,11 @@ func (s LocalStore) GetRecordIndex(ctx context.Context, recordID string) (model.
 }
 
 func (s LocalStore) ListRecordIndexes(ctx context.Context, opts model.RecordListOptions) ([]model.RecordIndex, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list record indexes canceled", err)
 	}
@@ -210,7 +433,7 @@ func (s LocalStore) ListRecordIndexes(ctx context.Context, opts model.RecordList
 	case opts.ClientID != "":
 		dir = filepath.Join("records", "by-client", safeFileName(opts.ClientID))
 	}
-	root, err := os.OpenRoot(s.root())
+	root, err := os.OpenRoot(s.directoryPath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -264,8 +487,16 @@ func (s LocalStore) ListRecordIndexes(ctx context.Context, opts model.RecordList
 }
 
 func (s LocalStore) PutRoot(ctx context.Context, root model.BatchRoot) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put root canceled", err)
+	}
+	if err := s.requireSuite(root); err != nil {
+		return err
 	}
 	if root.BatchID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "batch root batch_id is required")
@@ -289,6 +520,11 @@ func (s LocalStore) PutRoot(ctx context.Context, root model.BatchRoot) error {
 }
 
 func (s LocalStore) ListRoots(ctx context.Context, limit int) ([]model.BatchRoot, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list roots canceled", err)
 	}
@@ -329,6 +565,11 @@ func (s LocalStore) ListRoots(ctx context.Context, limit int) ([]model.BatchRoot
 }
 
 func (s LocalStore) ListRootsAfter(ctx context.Context, afterClosedAtUnixN int64, limit int) ([]model.BatchRoot, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list roots after canceled", err)
 	}
@@ -372,6 +613,11 @@ func (s LocalStore) ListRootsAfter(ctx context.Context, afterClosedAtUnixN int64
 }
 
 func (s LocalStore) ListRootsPage(ctx context.Context, opts model.RootListOptions) ([]model.BatchRoot, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list roots page canceled", err)
 	}
@@ -414,6 +660,11 @@ func (s LocalStore) ListRootsPage(ctx context.Context, opts model.RootListOption
 }
 
 func (s LocalStore) LatestRoot(ctx context.Context) (model.BatchRoot, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.BatchRoot{}, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.BatchRoot{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore latest root canceled", err)
 	}
@@ -591,8 +842,23 @@ func compareLocalRootReferencePosition(left, right localRootReferencePosition) i
 }
 
 func (s LocalStore) PutBatchTreeArtifacts(ctx context.Context, leaves []model.BatchTreeLeaf, nodes []model.BatchTreeNode) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch tree artifacts canceled", err)
+	}
+	for i := range leaves {
+		if err := s.requireSuite(leaves[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("batch tree leaf %d", i), err)
+		}
+	}
+	for i := range nodes {
+		if err := s.requireSuite(nodes[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("batch tree node %d", i), err)
+		}
 	}
 	if len(leaves) == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "batch tree artifacts require at least one leaf")
@@ -658,6 +924,15 @@ func (s LocalStore) PutBatchTreeArtifacts(ctx context.Context, leaves []model.Ba
 }
 
 func (s LocalStore) ListBatchTreeLeaves(ctx context.Context, opts model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return s.listBatchTreeLeaves(ctx, opts)
+}
+
+func (s LocalStore) listBatchTreeLeaves(ctx context.Context, opts model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree leaves canceled", err)
 	}
@@ -700,6 +975,11 @@ func (s LocalStore) ListBatchTreeLeaves(ctx context.Context, opts model.BatchTre
 }
 
 func (s LocalStore) ListBatchTreeNodes(ctx context.Context, opts model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list batch tree nodes canceled", err)
 	}
@@ -714,7 +994,7 @@ func (s LocalStore) ListBatchTreeNodes(ctx context.Context, opts model.BatchTree
 			after = opts.StartIndex - 1
 			hasAfter = true
 		}
-		leaves, err := s.ListBatchTreeLeaves(ctx, model.BatchTreeLeafListOptions{BatchID: opts.BatchID, Limit: limit, AfterLeafIndex: after, HasAfter: hasAfter})
+		leaves, err := s.listBatchTreeLeaves(ctx, model.BatchTreeLeafListOptions{BatchID: opts.BatchID, Limit: limit, AfterLeafIndex: after, HasAfter: hasAfter})
 		if err != nil {
 			return nil, err
 		}
@@ -762,8 +1042,16 @@ func (s LocalStore) ListBatchTreeNodes(ctx context.Context, opts model.BatchTree
 }
 
 func (s LocalStore) PutManifest(ctx context.Context, manifest model.BatchManifest) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put manifest canceled", err)
+	}
+	if err := s.requireSuite(manifest); err != nil {
+		return err
 	}
 	if manifest.BatchID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "batch manifest batch_id is required")
@@ -781,6 +1069,11 @@ func (s LocalStore) PutManifest(ctx context.Context, manifest model.BatchManifes
 }
 
 func (s LocalStore) GetManifest(ctx context.Context, batchID string) (model.BatchManifest, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.BatchManifest{}, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.BatchManifest{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get manifest canceled", err)
 	}
@@ -802,6 +1095,11 @@ func (s LocalStore) GetManifest(ctx context.Context, batchID string) (model.Batc
 }
 
 func (s LocalStore) ListManifests(ctx context.Context) ([]model.BatchManifest, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list manifests canceled", err)
 	}
@@ -838,6 +1136,11 @@ func (s LocalStore) ListManifests(ctx context.Context) ([]model.BatchManifest, e
 }
 
 func (s LocalStore) ListManifestsAfter(ctx context.Context, afterBatchID string, limit int) ([]model.BatchManifest, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list manifests after canceled", err)
 	}
@@ -887,8 +1190,16 @@ func (s LocalStore) ListManifestsAfter(ctx context.Context, afterBatchID string,
 // batch.Service.advanceCheckpoint) but the store itself does not enforce
 // ordering, which keeps this method a simple idempotent write.
 func (s LocalStore) PutCheckpoint(ctx context.Context, cp model.WALCheckpoint) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put checkpoint canceled", err)
+	}
+	if err := s.requireSuite(cp); err != nil {
+		return err
 	}
 	if cp.SchemaVersion == "" {
 		cp.SchemaVersion = model.SchemaWALCheckpoint
@@ -907,6 +1218,11 @@ func (s LocalStore) PutCheckpoint(ctx context.Context, cp model.WALCheckpoint) e
 // to scanning the full WAL in that case. A missing checkpoint is never an
 // error because replay correctness does not depend on it.
 func (s LocalStore) GetCheckpoint(ctx context.Context) (model.WALCheckpoint, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.WALCheckpoint{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.WALCheckpoint{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get checkpoint canceled", err)
 	}
@@ -924,12 +1240,10 @@ func (s LocalStore) GetCheckpoint(ctx context.Context) (model.WALCheckpoint, boo
 	return cp, true, nil
 }
 
-// Close is a no-op for the file-backed store because it owns only a
-// directory handle via stdlib os calls, but the method exists so
-// LocalStore can satisfy the Store interface alongside backends (e.g.
-// Pebble) that require explicit teardown.
+// Close releases the process-wide exclusive namespace lock. LocalStore values
+// may be copied, so the shared lock handle makes repeated Close calls safe.
 func (s LocalStore) Close() error {
-	return nil
+	return s.lock.close()
 }
 
 // WALCheckpointPruneSafe remains false because durable file publication alone
@@ -939,8 +1253,20 @@ func (s LocalStore) Close() error {
 func (LocalStore) WALCheckpointPruneSafe() bool { return false }
 
 func (s LocalStore) PutGlobalLeaf(ctx context.Context, leaf model.GlobalLogLeaf) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.putGlobalLeaf(ctx, leaf)
+}
+
+func (s LocalStore) putGlobalLeaf(ctx context.Context, leaf model.GlobalLogLeaf) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global leaf canceled", err)
+	}
+	if err := s.requireSuite(leaf); err != nil {
+		return err
 	}
 	if leaf.BatchID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log leaf batch_id is required")
@@ -961,6 +1287,15 @@ func (s LocalStore) PutGlobalLeaf(ctx context.Context, leaf model.GlobalLogLeaf)
 }
 
 func (s LocalStore) GetGlobalLeaf(ctx context.Context, index uint64) (model.GlobalLogLeaf, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.GlobalLogLeaf{}, false, err
+	}
+	defer release()
+	return s.getGlobalLeaf(ctx, index)
+}
+
+func (s LocalStore) getGlobalLeaf(ctx context.Context, index uint64) (model.GlobalLogLeaf, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.GlobalLogLeaf{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get global leaf canceled", err)
 	}
@@ -979,6 +1314,11 @@ func (s LocalStore) GetGlobalLeaf(ctx context.Context, index uint64) (model.Glob
 }
 
 func (s LocalStore) GetGlobalLeafByBatchID(ctx context.Context, batchID string) (model.GlobalLogLeaf, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.GlobalLogLeaf{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.GlobalLogLeaf{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get global leaf by batch canceled", err)
 	}
@@ -1000,8 +1340,20 @@ func (s LocalStore) GetGlobalLeafByBatchID(ctx context.Context, batchID string) 
 }
 
 func (s LocalStore) PutGlobalLogNode(ctx context.Context, node model.GlobalLogNode) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.putGlobalLogNode(ctx, node)
+}
+
+func (s LocalStore) putGlobalLogNode(ctx context.Context, node model.GlobalLogNode) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global node canceled", err)
+	}
+	if err := s.requireSuite(node); err != nil {
+		return err
 	}
 	if node.Width == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log node width is required")
@@ -1019,6 +1371,11 @@ func (s LocalStore) PutGlobalLogNode(ctx context.Context, node model.GlobalLogNo
 }
 
 func (s LocalStore) GetGlobalLogNode(ctx context.Context, level, startIndex uint64) (model.GlobalLogNode, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.GlobalLogNode{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.GlobalLogNode{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get global node canceled", err)
 	}
@@ -1037,6 +1394,11 @@ func (s LocalStore) GetGlobalLogNode(ctx context.Context, level, startIndex uint
 }
 
 func (s LocalStore) ListGlobalLogNodesAfter(ctx context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogNode, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global nodes after canceled", err)
 	}
@@ -1084,8 +1446,20 @@ func (s LocalStore) ListGlobalLogNodesAfter(ctx context.Context, afterLevel, aft
 }
 
 func (s LocalStore) PutGlobalLogState(ctx context.Context, state model.GlobalLogState) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.putGlobalLogState(ctx, state)
+}
+
+func (s LocalStore) putGlobalLogState(ctx context.Context, state model.GlobalLogState) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global state canceled", err)
+	}
+	if err := s.requireSuite(state); err != nil {
+		return err
 	}
 	if state.SchemaVersion == "" {
 		state.SchemaVersion = model.SchemaGlobalLogState
@@ -1100,6 +1474,15 @@ func (s LocalStore) PutGlobalLogState(ctx context.Context, state model.GlobalLog
 }
 
 func (s LocalStore) GetGlobalLogState(ctx context.Context) (model.GlobalLogState, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.GlobalLogState{}, false, err
+	}
+	defer release()
+	return s.getGlobalLogState(ctx)
+}
+
+func (s LocalStore) getGlobalLogState(ctx context.Context) (model.GlobalLogState, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.GlobalLogState{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get global state canceled", err)
 	}
@@ -1118,6 +1501,11 @@ func (s LocalStore) GetGlobalLogState(ctx context.Context) (model.GlobalLogState
 }
 
 func (s LocalStore) ListGlobalLeaves(ctx context.Context) ([]model.GlobalLogLeaf, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global leaves canceled", err)
 	}
@@ -1147,6 +1535,11 @@ func (s LocalStore) ListGlobalLeaves(ctx context.Context) ([]model.GlobalLogLeaf
 }
 
 func (s LocalStore) ListGlobalLeavesRange(ctx context.Context, startIndex uint64, limit int) ([]model.GlobalLogLeaf, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global leaves range canceled", err)
 	}
@@ -1155,7 +1548,7 @@ func (s LocalStore) ListGlobalLeavesRange(ctx context.Context, startIndex uint64
 	}
 	leaves := make([]model.GlobalLogLeaf, 0, limit)
 	for i := startIndex; len(leaves) < limit; i++ {
-		leaf, ok, err := s.GetGlobalLeaf(ctx, i)
+		leaf, ok, err := s.getGlobalLeaf(ctx, i)
 		if err != nil {
 			return nil, err
 		}
@@ -1168,11 +1561,16 @@ func (s LocalStore) ListGlobalLeavesRange(ctx context.Context, startIndex uint64
 }
 
 func (s LocalStore) ListGlobalLeavesPage(ctx context.Context, opts model.GlobalLeafListOptions) ([]model.GlobalLogLeaf, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global leaves page canceled", err)
 	}
 	limit := normaliseRecordLimit(opts.Limit)
-	state, ok, err := s.GetGlobalLogState(ctx)
+	state, ok, err := s.getGlobalLogState(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1223,7 +1621,7 @@ func (s LocalStore) listCommittedGlobalLeavesPage(ctx context.Context, treeSize 
 }
 
 func (s LocalStore) readCommittedGlobalLeaf(ctx context.Context, index uint64) (model.GlobalLogLeaf, error) {
-	leaf, ok, err := s.GetGlobalLeaf(ctx, index)
+	leaf, ok, err := s.getGlobalLeaf(ctx, index)
 	if err != nil {
 		return model.GlobalLogLeaf{}, err
 	}
@@ -1271,8 +1669,20 @@ func (s LocalStore) listGlobalLeavesPageFromDirectory(ctx context.Context, opts 
 }
 
 func (s LocalStore) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeHead) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.putSignedTreeHead(ctx, sth)
+}
+
+func (s LocalStore) putSignedTreeHead(ctx context.Context, sth model.SignedTreeHead) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put sth canceled", err)
+	}
+	if err := s.requireSuite(sth); err != nil {
+		return err
 	}
 	if sth.TreeSize == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "sth tree_size is required")
@@ -1296,8 +1706,16 @@ func (s LocalStore) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeH
 }
 
 func (s LocalStore) CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore commit global log append canceled", err)
+	}
+	if err := s.requireSuite(entry); err != nil {
+		return err
 	}
 	if entry.Leaf.BatchID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log append leaf batch_id is required")
@@ -1316,21 +1734,30 @@ func (s LocalStore) CommitGlobalLogAppend(ctx context.Context, entry model.Globa
 			return trusterr.New(trusterr.CodeInvalidArgument, "global log append node width is required")
 		}
 	}
-	if err := s.PutGlobalLeaf(ctx, entry.Leaf); err != nil {
+	if err := s.putGlobalLeaf(ctx, entry.Leaf); err != nil {
 		return err
 	}
 	for _, node := range entry.Nodes {
-		if err := s.PutGlobalLogNode(ctx, node); err != nil {
+		if err := s.putGlobalLogNode(ctx, node); err != nil {
 			return err
 		}
 	}
-	if err := s.PutGlobalLogState(ctx, entry.State); err != nil {
+	if err := s.putGlobalLogState(ctx, entry.State); err != nil {
 		return err
 	}
-	return s.PutSignedTreeHead(ctx, entry.STH)
+	return s.putSignedTreeHead(ctx, entry.STH)
 }
 
 func (s LocalStore) GetSignedTreeHead(ctx context.Context, treeSize uint64) (model.SignedTreeHead, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.SignedTreeHead{}, false, err
+	}
+	defer release()
+	return s.getSignedTreeHead(ctx, treeSize)
+}
+
+func (s LocalStore) getSignedTreeHead(ctx context.Context, treeSize uint64) (model.SignedTreeHead, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.SignedTreeHead{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get sth canceled", err)
 	}
@@ -1352,6 +1779,11 @@ func (s LocalStore) GetSignedTreeHead(ctx context.Context, treeSize uint64) (mod
 }
 
 func (s LocalStore) ListSignedTreeHeadsAfter(ctx context.Context, afterTreeSize uint64, limit int) ([]model.SignedTreeHead, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth after canceled", err)
 	}
@@ -1360,7 +1792,7 @@ func (s LocalStore) ListSignedTreeHeadsAfter(ctx context.Context, afterTreeSize 
 	}
 	out := make([]model.SignedTreeHead, 0, limit)
 	for size := afterTreeSize + 1; len(out) < limit; size++ {
-		sth, ok, err := s.GetSignedTreeHead(ctx, size)
+		sth, ok, err := s.getSignedTreeHead(ctx, size)
 		if err != nil {
 			return nil, err
 		}
@@ -1373,6 +1805,11 @@ func (s LocalStore) ListSignedTreeHeadsAfter(ctx context.Context, afterTreeSize 
 }
 
 func (s LocalStore) ListSignedTreeHeadsPage(ctx context.Context, opts model.TreeHeadListOptions) ([]model.SignedTreeHead, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list signed tree heads page canceled", err)
 	}
@@ -1411,12 +1848,17 @@ func (s LocalStore) ListSignedTreeHeadsPage(ctx context.Context, opts model.Tree
 }
 
 func (s LocalStore) LatestSignedTreeHead(ctx context.Context) (model.SignedTreeHead, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.SignedTreeHead{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.SignedTreeHead{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore latest sth canceled", err)
 	}
 	treeSize, ok, refErr := s.readLatestSignedTreeHeadReference()
 	if refErr == nil && ok {
-		sth, found, err := s.GetSignedTreeHead(ctx, treeSize)
+		sth, found, err := s.getSignedTreeHead(ctx, treeSize)
 		if err != nil {
 			return model.SignedTreeHead{}, false, err
 		}
@@ -1424,14 +1866,14 @@ func (s LocalStore) LatestSignedTreeHead(ctx context.Context) (model.SignedTreeH
 			if sth.TreeSize != treeSize {
 				return model.SignedTreeHead{}, false, trusterr.New(trusterr.CodeDataLoss, "latest signed tree head reference does not match item")
 			}
-			state, stateFound, err := s.GetGlobalLogState(ctx)
+			state, stateFound, err := s.getGlobalLogState(ctx)
 			if err != nil {
 				return model.SignedTreeHead{}, false, err
 			}
 			if !stateFound || state.TreeSize <= treeSize {
 				return sth, true, nil
 			}
-			newer, newerFound, err := s.GetSignedTreeHead(ctx, state.TreeSize)
+			newer, newerFound, err := s.getSignedTreeHead(ctx, state.TreeSize)
 			if err != nil {
 				return model.SignedTreeHead{}, false, err
 			}
@@ -1490,7 +1932,7 @@ func (s LocalStore) rebuildLatestSignedTreeHeadReference(ctx context.Context) (m
 	defer lock.Unlock()
 
 	if treeSize, ok, err := s.readLatestSignedTreeHeadReference(); err == nil && ok {
-		sth, found, getErr := s.GetSignedTreeHead(ctx, treeSize)
+		sth, found, getErr := s.getSignedTreeHead(ctx, treeSize)
 		if getErr != nil {
 			return model.SignedTreeHead{}, false, getErr
 		}
@@ -1531,7 +1973,7 @@ func (s LocalStore) latestSignedTreeHeadFromHistory(ctx context.Context) (uint64
 		if err != nil || treeSize == 0 {
 			return 0, model.SignedTreeHead{}, false, trusterr.New(trusterr.CodeDataLoss, "invalid signed tree head filename")
 		}
-		sth, found, err := s.GetSignedTreeHead(ctx, treeSize)
+		sth, found, err := s.getSignedTreeHead(ctx, treeSize)
 		if err != nil {
 			return 0, model.SignedTreeHead{}, false, err
 		}
@@ -1562,27 +2004,27 @@ func (s LocalStore) readLatestSignedTreeHeadReference() (uint64, bool, error) {
 }
 
 func (s LocalStore) latestSignedTreeHeadLock() *sync.Mutex {
-	return localStoreStripedLock(s.root(), &localLatestSTHLocks)
+	return localStoreStripedLock(s.directoryPath(), &localLatestSTHLocks)
 }
 
 func (s LocalStore) latestRootLock() *sync.Mutex {
-	return localStoreStripedLock(s.root(), &localLatestRootLocks)
+	return localStoreStripedLock(s.directoryPath(), &localLatestRootLocks)
 }
 
 func (s LocalStore) latestSTHAnchorLock() *sync.Mutex {
-	return localStoreStripedLock(s.root(), &localLatestAnchorLocks)
+	return localStoreStripedLock(s.directoryPath(), &localLatestAnchorLocks)
 }
 
 func (s LocalStore) sthAnchorScheduleLock(key model.STHAnchorScheduleKey) *sync.Mutex {
-	return localStoreStripedLock(s.root()+"\x00"+encodeLocalSTHAnchorScheduleFilename(key), &localSTHAnchorScheduleLocks)
+	return localStoreStripedLock(s.directoryPath()+"\x00"+encodeLocalSTHAnchorScheduleFilename(key), &localSTHAnchorScheduleLocks)
 }
 
 func (s LocalStore) sthAnchorTreeRootLock(nodeID, logID string, treeSize uint64) *sync.Mutex {
-	return localStoreStripedLock(s.root()+"\x00"+encodeLocalSTHAnchorTreeRootFilename(nodeID, logID, treeSize), &localSTHAnchorTreeRootLocks)
+	return localStoreStripedLock(s.directoryPath()+"\x00"+encodeLocalSTHAnchorTreeRootFilename(nodeID, logID, treeSize), &localSTHAnchorTreeRootLocks)
 }
 
 func (s LocalStore) l5CoverageLock(key model.STHAnchorScheduleKey) *sync.Mutex {
-	return localStoreStripedLock(s.root()+"\x00"+encodeLocalL5CoverageFilename(key), &localL5CoverageLocks)
+	return localStoreStripedLock(s.directoryPath()+"\x00"+encodeLocalL5CoverageFilename(key), &localL5CoverageLocks)
 }
 
 func localStoreStripedLock(value string, locks *[64]sync.Mutex) *sync.Mutex {
@@ -1595,8 +2037,16 @@ func localStoreStripedLock(value string, locks *[64]sync.Mutex) *sync.Mutex {
 }
 
 func (s LocalStore) PutGlobalLogTile(ctx context.Context, tile model.GlobalLogTile) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global tile canceled", err)
+	}
+	if err := s.requireSuite(tile); err != nil {
+		return err
 	}
 	if tile.SchemaVersion == "" {
 		tile.SchemaVersion = model.SchemaGlobalLogTile
@@ -1614,6 +2064,11 @@ func (s LocalStore) PutGlobalLogTile(ctx context.Context, tile model.GlobalLogTi
 }
 
 func (s LocalStore) ListGlobalLogTiles(ctx context.Context) ([]model.GlobalLogTile, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global tiles canceled", err)
 	}
@@ -1643,6 +2098,11 @@ func (s LocalStore) ListGlobalLogTiles(ctx context.Context) ([]model.GlobalLogTi
 }
 
 func (s LocalStore) ListGlobalLogTilesAfter(ctx context.Context, afterLevel, afterStartIndex uint64, limit int) ([]model.GlobalLogTile, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global tiles after canceled", err)
 	}
@@ -1685,8 +2145,16 @@ func (s LocalStore) ListGlobalLogTilesAfter(ctx context.Context, afterLevel, aft
 }
 
 func (s LocalStore) EnqueueGlobalLog(ctx context.Context, item model.GlobalLogOutboxItem) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore enqueue global log canceled", err)
+	}
+	if err := s.requireSuite(item); err != nil {
+		return err
 	}
 	if item.BatchID == "" {
 		item.BatchID = item.BatchRoot.BatchID
@@ -1721,12 +2189,22 @@ func (s LocalStore) EnqueueGlobalLog(ctx context.Context, item model.GlobalLogOu
 }
 
 func (s LocalStore) ListPendingGlobalLog(ctx context.Context, nowUnixN int64, limit int) ([]model.GlobalLogOutboxItem, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.listGlobalLogOutbox(ctx, model.AnchorStatePending, limit, func(item model.GlobalLogOutboxItem) bool {
 		return item.Status == model.AnchorStatePending && item.NextAttemptUnixN <= nowUnixN
 	})
 }
 
 func (s LocalStore) ListPendingGlobalLogForStream(ctx context.Context, nodeID, logID string, nowUnixN int64, limit int) ([]model.GlobalLogOutboxItem, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.listGlobalLogOutbox(ctx, model.AnchorStatePending, limit, func(item model.GlobalLogOutboxItem) bool {
 		return item.Status == model.AnchorStatePending &&
 			item.NextAttemptUnixN <= nowUnixN &&
@@ -1736,6 +2214,11 @@ func (s LocalStore) ListPendingGlobalLogForStream(ctx context.Context, nodeID, l
 }
 
 func (s LocalStore) ListGlobalLogOutboxItemsAfter(ctx context.Context, afterBatchID string, limit int) ([]model.GlobalLogOutboxItem, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list global log outbox after canceled", err)
 	}
@@ -1774,6 +2257,15 @@ func (s LocalStore) ListGlobalLogOutboxItemsAfter(ctx context.Context, afterBatc
 }
 
 func (s LocalStore) GetGlobalLogOutboxItem(ctx context.Context, batchID string) (model.GlobalLogOutboxItem, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.GlobalLogOutboxItem{}, false, err
+	}
+	defer release()
+	return s.getGlobalLogOutboxItem(ctx, batchID)
+}
+
+func (s LocalStore) getGlobalLogOutboxItem(ctx context.Context, batchID string) (model.GlobalLogOutboxItem, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.GlobalLogOutboxItem{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get global log outbox canceled", err)
 	}
@@ -1793,7 +2285,15 @@ func (s LocalStore) GetGlobalLogOutboxItem(ctx context.Context, batchID string) 
 }
 
 func (s LocalStore) MarkGlobalLogPublished(ctx context.Context, batchID string, sth model.SignedTreeHead) error {
-	item, ok, err := s.GetGlobalLogOutboxItem(ctx, batchID)
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := s.requireSuite(sth); err != nil {
+		return err
+	}
+	item, ok, err := s.getGlobalLogOutboxItem(ctx, batchID)
 	if err != nil {
 		return err
 	}
@@ -1820,11 +2320,24 @@ func (s LocalStore) MarkGlobalLogPublished(ctx context.Context, batchID string, 
 }
 
 func (s LocalStore) MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx context.Context, batchIDs []string, sths []model.SignedTreeHead, candidate model.STHAnchorCandidate) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore mark global log batch published with anchor candidate canceled", err)
 	}
 	if len(batchIDs) == 0 || len(batchIDs) != len(sths) {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log published batch inputs are inconsistent")
+	}
+	for i := range sths {
+		if err := s.requireSuite(sths[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("published STH %d", i), err)
+		}
+	}
+	if err := s.requireSuite(candidate); err != nil {
+		return err
 	}
 	if err := anchorschedule.ValidateCandidate(candidate); err != nil {
 		return err
@@ -1848,7 +2361,7 @@ func (s LocalStore) MarkGlobalLogPublishedBatchWithAnchorCandidate(ctx context.C
 		if batchIDs[i] == "" || sths[i].TreeSize == 0 {
 			return trusterr.New(trusterr.CodeInvalidArgument, "global log published batch item is invalid")
 		}
-		globalItem, ok, err := s.GetGlobalLogOutboxItem(ctx, batchIDs[i])
+		globalItem, ok, err := s.getGlobalLogOutboxItem(ctx, batchIDs[i])
 		if err != nil {
 			return err
 		}
@@ -1918,7 +2431,7 @@ func (s LocalStore) applyLocalAnchorPublicationLocked(expectedKey model.STHAncho
 	}
 	ctx := context.Background()
 	for i := range journal.BatchIDs {
-		item, ok, err := s.GetGlobalLogOutboxItem(ctx, journal.BatchIDs[i])
+		item, ok, err := s.getGlobalLogOutboxItem(ctx, journal.BatchIDs[i])
 		if err != nil {
 			return err
 		}
@@ -1974,6 +2487,11 @@ func sameLocalSignedTreeHead(left, right model.SignedTreeHead) bool {
 }
 
 func (s LocalStore) RescheduleGlobalLog(ctx context.Context, batchID string, attempts int, nextAttemptUnixN int64, lastErrorMessage string) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore reschedule global log canceled", err)
 	}
@@ -2118,6 +2636,11 @@ func (s LocalStore) globalOutboxEntries(ctx context.Context) ([]localGlobalOutbo
 }
 
 func (s LocalStore) GetSTHAnchorResult(ctx context.Context, treeSize uint64) (model.STHAnchorResult, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.STHAnchorResult{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get sth anchor result canceled", err)
 	}
@@ -2135,8 +2658,16 @@ func (s LocalStore) GetSTHAnchorResult(ctx context.Context, treeSize uint64) (mo
 // an idempotent retry may carry older proof metadata, but it must never replace
 // proof bytes that may already have been enriched by a sink-specific upgrader.
 func (s LocalStore) PutSTHAnchorResult(ctx context.Context, result model.STHAnchorResult) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put sth anchor result canceled", err)
+	}
+	if err := s.requireSuite(result); err != nil {
+		return err
 	}
 	key := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
 	if err := anchorschedule.ValidateResult(key, result); err != nil {
@@ -2152,8 +2683,19 @@ func (s LocalStore) PutSTHAnchorResult(ctx context.Context, result model.STHAnch
 }
 
 func (s LocalStore) UpdateSTHAnchorResult(ctx context.Context, expected, result model.STHAnchorResult) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore update sth anchor result canceled", err)
+	}
+	if err := s.requireSuite(expected); err != nil {
+		return trusterr.Wrap(trusterr.CodeInvalidArgument, "expected anchor result", err)
+	}
+	if err := s.requireSuite(result); err != nil {
+		return err
 	}
 	key := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
 	if err := anchorschedule.ValidateResult(key, result); err != nil {
@@ -2307,6 +2849,11 @@ func (s LocalStore) rebuildSTHAnchorTreeReferenceLocked(treeSize uint64) (model.
 }
 
 func (s LocalStore) GetSTHAnchorResultForKey(ctx context.Context, key model.STHAnchorResultKey) (model.STHAnchorResult, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.STHAnchorResult{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get keyed sth anchor result canceled", err)
 	}
@@ -2387,7 +2934,7 @@ func (s LocalStore) validateOrStoreSTHAnchorTreeRootLocked(nodeID, logID string,
 		return trusterr.Wrap(trusterr.CodeDataLoss, "read canonical sth anchor tree root", err)
 	}
 	var stored []byte
-	if err := cborx.UnmarshalLimit(data, &stored, maxStoredObjectBytes); err != nil || len(stored) != sha256.Size {
+	if err := cborx.UnmarshalLimit(data, &stored, maxStoredObjectBytes); err != nil || len(stored) != cryptosuite.DigestSize {
 		return trusterr.New(trusterr.CodeDataLoss, "canonical sth anchor tree root is invalid")
 	}
 	if !bytes.Equal(stored, rootHash) {
@@ -2397,13 +2944,27 @@ func (s LocalStore) validateOrStoreSTHAnchorTreeRootLocked(nodeID, logID string,
 }
 
 func (s LocalStore) ListSTHAnchorResultsAfter(ctx context.Context, after model.STHAnchorResultKey, limit int) ([]model.STHAnchorResult, error) {
-	return s.ListSTHAnchorResultsPage(ctx, model.AnchorListOptions{
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return s.listSTHAnchorResultsPage(ctx, model.AnchorListOptions{
 		Limit: limit, Direction: model.RecordListDirectionAsc,
 		AfterResultKey: after, HasAfter: after.TreeSize != 0,
 	})
 }
 
 func (s LocalStore) ListSTHAnchorResultsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorResult, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return s.listSTHAnchorResultsPage(ctx, opts)
+}
+
+func (s LocalStore) listSTHAnchorResultsPage(ctx context.Context, opts model.AnchorListOptions) ([]model.STHAnchorResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor result page canceled", err)
 	}
@@ -2451,8 +3012,16 @@ func (s LocalStore) ListSTHAnchorResultsPage(ctx context.Context, opts model.Anc
 }
 
 func (s LocalStore) UpsertSTHAnchorCandidate(ctx context.Context, candidate model.STHAnchorCandidate) (model.STHAnchorSchedule, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.STHAnchorSchedule{}, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorSchedule{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore upsert sth anchor candidate canceled", err)
+	}
+	if err := s.requireSuite(candidate); err != nil {
+		return model.STHAnchorSchedule{}, err
 	}
 	if err := anchorschedule.ValidateCandidate(candidate); err != nil {
 		return model.STHAnchorSchedule{}, err
@@ -2517,6 +3086,15 @@ func (s LocalStore) mergeSTHAnchorCandidateLocked(ctx context.Context, candidate
 }
 
 func (s LocalStore) GetSTHAnchorSchedule(ctx context.Context, key model.STHAnchorScheduleKey) (model.STHAnchorSchedule, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.STHAnchorSchedule{}, false, err
+	}
+	defer release()
+	return s.getSTHAnchorScheduleOperation(ctx, key)
+}
+
+func (s LocalStore) getSTHAnchorScheduleOperation(ctx context.Context, key model.STHAnchorScheduleKey) (model.STHAnchorSchedule, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorSchedule{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get sth anchor schedule canceled", err)
 	}
@@ -2554,6 +3132,11 @@ func (s LocalStore) getSTHAnchorSchedule(key model.STHAnchorScheduleKey) (model.
 }
 
 func (s LocalStore) ListSTHAnchorSchedules(ctx context.Context) ([]model.STHAnchorSchedule, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor schedules canceled", err)
 	}
@@ -2569,6 +3152,9 @@ func (s LocalStore) ListSTHAnchorSchedules(ctx context.Context) ([]model.STHAnch
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), localAnchorScheduleSuffix) {
 			continue
 		}
+		if strings.HasPrefix(entry.Name(), "v1_") {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore list sth anchor schedules canceled", err)
 		}
@@ -2576,7 +3162,7 @@ func (s LocalStore) ListSTHAnchorSchedules(ctx context.Context) ([]model.STHAnch
 		if err != nil {
 			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "decode sth anchor schedule filename", err)
 		}
-		schedule, found, err := s.GetSTHAnchorSchedule(ctx, key)
+		schedule, found, err := s.getSTHAnchorScheduleOperation(ctx, key)
 		if err != nil {
 			return nil, err
 		}
@@ -2590,6 +3176,11 @@ func (s LocalStore) ListSTHAnchorSchedules(ctx context.Context) ([]model.STHAnch
 }
 
 func (s LocalStore) ClaimSTHAnchorAttempt(ctx context.Context, key model.STHAnchorScheduleKey, nowUnixN, leaseUntilUnixN int64, leaseOwner, leaseToken string) (model.STHAnchorAttempt, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.STHAnchorAttempt{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorAttempt{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore claim sth anchor attempt canceled", err)
 	}
@@ -2632,6 +3223,11 @@ func (s LocalStore) ClaimSTHAnchorAttempt(ctx context.Context, key model.STHAnch
 }
 
 func (s LocalStore) RescheduleSTHAnchorAttempt(ctx context.Context, key model.STHAnchorScheduleKey, generation uint64, leaseToken string, attempts int, nextAttemptUnixN int64, lastError string) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore reschedule sth anchor attempt canceled", err)
 	}
@@ -2659,6 +3255,11 @@ func (s LocalStore) RescheduleSTHAnchorAttempt(ctx context.Context, key model.ST
 }
 
 func (s LocalStore) FailSTHAnchorAttempt(ctx context.Context, key model.STHAnchorScheduleKey, generation uint64, leaseToken string, attempts int, lastError string) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore fail sth anchor attempt canceled", err)
 	}
@@ -2686,8 +3287,16 @@ func (s LocalStore) FailSTHAnchorAttempt(ctx context.Context, key model.STHAncho
 }
 
 func (s LocalStore) CompleteSTHAnchorAttempt(ctx context.Context, key model.STHAnchorScheduleKey, generation uint64, leaseToken string, result model.STHAnchorResult) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore complete sth anchor attempt canceled", err)
+	}
+	if err := s.requireSuite(result); err != nil {
+		return err
 	}
 	if err := anchorschedule.ValidateResult(key, result); err != nil {
 		return err
@@ -2751,16 +3360,29 @@ func (s LocalStore) CompleteSTHAnchorAttempt(ctx context.Context, key model.STHA
 }
 
 func (s LocalStore) PutSTHAnchorSchedule(ctx context.Context, schedule model.STHAnchorSchedule) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	return s.restoreSTHAnchorSchedule(ctx, schedule, false)
 }
 
 func (s LocalStore) ReplaceSTHAnchorSchedule(ctx context.Context, schedule model.STHAnchorSchedule) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	return s.restoreSTHAnchorSchedule(ctx, schedule, true)
 }
 
 func (s LocalStore) restoreSTHAnchorSchedule(ctx context.Context, schedule model.STHAnchorSchedule, replace bool) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put sth anchor schedule canceled", err)
+	}
+	if err := s.requireSuite(schedule); err != nil {
+		return err
 	}
 	if err := anchorschedule.ValidateSchedule(schedule); err != nil {
 		return err
@@ -2855,6 +3477,11 @@ func (s LocalStore) writeSTHAnchorSchedule(schedule model.STHAnchorSchedule) err
 }
 
 func (s LocalStore) GetL5CoverageCheckpoint(ctx context.Context, key model.STHAnchorScheduleKey) (model.L5CoverageCheckpoint, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.L5CoverageCheckpoint{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.L5CoverageCheckpoint{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore get L5 coverage checkpoint canceled", err)
 	}
@@ -2868,6 +3495,11 @@ func (s LocalStore) GetL5CoverageCheckpoint(ctx context.Context, key model.STHAn
 }
 
 func (s LocalStore) AdvanceL5CoverageCheckpoint(ctx context.Context, key model.STHAnchorScheduleKey, coveredTreeSize uint64, updatedAtUnixN int64) (model.L5CoverageCheckpoint, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.L5CoverageCheckpoint{}, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.L5CoverageCheckpoint{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore advance L5 coverage checkpoint canceled", err)
 	}
@@ -2878,7 +3510,7 @@ func (s LocalStore) AdvanceL5CoverageCheckpoint(ctx context.Context, key model.S
 	if err != nil {
 		return model.L5CoverageCheckpoint{}, err
 	}
-	next, changed, err := l5coverage.Advance(current, found, key, coveredTreeSize, updatedAtUnixN)
+	next, changed, err := l5coverage.Advance(current, found, s.CryptoSuite(), key, coveredTreeSize, updatedAtUnixN)
 	if err != nil {
 		return model.L5CoverageCheckpoint{}, err
 	}
@@ -2923,6 +3555,11 @@ func (s LocalStore) latestSTHAnchorResultForKey(ctx context.Context, key model.S
 }
 
 func (s LocalStore) LatestSTHAnchorResultForKey(ctx context.Context, key model.STHAnchorScheduleKey) (model.STHAnchorResult, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.STHAnchorResult{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore latest keyed sth anchor result canceled", err)
 	}
@@ -2930,6 +3567,11 @@ func (s LocalStore) LatestSTHAnchorResultForKey(ctx context.Context, key model.S
 }
 
 func (s LocalStore) LatestSTHAnchorResult(ctx context.Context) (model.STHAnchorResult, bool, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return model.STHAnchorResult{}, false, err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorResult{}, false, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore latest sth anchor result canceled", err)
 	}
@@ -3069,35 +3711,35 @@ func (s LocalStore) sthAnchorResultFromLatestReference(ref localLatestAnchorRefe
 }
 
 func (s LocalStore) globalLeafDir() string {
-	return filepath.Join(s.root(), "global", "leaves")
+	return filepath.Join(s.directoryPath(), "global", "leaves")
 }
 
 func (s LocalStore) globalLeafByBatchDir() string {
-	return filepath.Join(s.root(), "global", "leaf-by-batch")
+	return filepath.Join(s.directoryPath(), "global", "leaf-by-batch")
 }
 
 func (s LocalStore) globalNodeDir() string {
-	return filepath.Join(s.root(), "global", "nodes")
+	return filepath.Join(s.directoryPath(), "global", "nodes")
 }
 
 func (s LocalStore) globalStatePath() string {
-	return filepath.Join(s.root(), "global", "state.tdgstate")
+	return filepath.Join(s.directoryPath(), "global", "state.tdgstate")
 }
 
 func (s LocalStore) sthDir() string {
-	return filepath.Join(s.root(), "global", "sth")
+	return filepath.Join(s.directoryPath(), "global", "sth")
 }
 
 func (s LocalStore) latestSignedTreeHeadReferencePath() string {
-	return filepath.Join(s.root(), "global", "latest-sth.tdref")
+	return filepath.Join(s.directoryPath(), "global", "latest-sth.tdref")
 }
 
 func (s LocalStore) globalTileDir() string {
-	return filepath.Join(s.root(), "global", "tiles")
+	return filepath.Join(s.directoryPath(), "global", "tiles")
 }
 
 func (s LocalStore) globalOutboxDir() string {
-	return filepath.Join(s.root(), "global", "outbox")
+	return filepath.Join(s.directoryPath(), "global", "outbox")
 }
 
 func (s LocalStore) globalOutboxStatusDir(status string) string {
@@ -3105,15 +3747,15 @@ func (s LocalStore) globalOutboxStatusDir(status string) string {
 }
 
 func (s LocalStore) sthAnchorResultDir() string {
-	return filepath.Join(s.root(), "anchor", "sth-result")
+	return filepath.Join(s.directoryPath(), "anchor", "sth-result")
 }
 
 func (s LocalStore) sthAnchorResultTreeReferenceDir() string {
-	return filepath.Join(s.root(), "anchor", "sth-result-by-tree")
+	return filepath.Join(s.directoryPath(), "anchor", "sth-result-by-tree")
 }
 
 func (s LocalStore) sthAnchorScheduleDir() string {
-	return filepath.Join(s.root(), "anchor", "sth-schedule")
+	return filepath.Join(s.directoryPath(), "anchor", "sth-schedule")
 }
 
 func (s LocalStore) globalLeafPath(index uint64) string {
@@ -3129,7 +3771,7 @@ func (s LocalStore) globalNodePath(level, start uint64) string {
 }
 
 func (s LocalStore) batchTreeLeafDir(batchID string) string {
-	return filepath.Join(s.root(), "batch-trees", safeFileName(batchID), "leaves")
+	return filepath.Join(s.directoryPath(), "batch-trees", safeFileName(batchID), "leaves")
 }
 
 func (s LocalStore) batchTreeLeafPath(batchID string, index uint64) string {
@@ -3137,7 +3779,7 @@ func (s LocalStore) batchTreeLeafPath(batchID string, index uint64) string {
 }
 
 func (s LocalStore) batchTreeNodeLevelDir(batchID string, level uint64) string {
-	return filepath.Join(s.root(), "batch-trees", safeFileName(batchID), "nodes", fmt.Sprintf("%020d", level))
+	return filepath.Join(s.directoryPath(), "batch-trees", safeFileName(batchID), "nodes", fmt.Sprintf("%020d", level))
 }
 
 func (s LocalStore) batchTreeNodePath(batchID string, level, start uint64) string {
@@ -3174,28 +3816,28 @@ func (s LocalStore) sthAnchorPublicationJournalPath(key model.STHAnchorScheduleK
 }
 
 func (s LocalStore) sthAnchorTreeRootPath(nodeID, logID string, treeSize uint64) string {
-	return filepath.Join(s.root(), "anchor", "sth-tree-root", encodeLocalSTHAnchorTreeRootFilename(nodeID, logID, treeSize))
+	return filepath.Join(s.directoryPath(), "anchor", "sth-tree-root", encodeLocalSTHAnchorTreeRootFilename(nodeID, logID, treeSize))
 }
 
 func (s LocalStore) l5CoverageCheckpointPath(key model.STHAnchorScheduleKey) string {
-	return filepath.Join(s.root(), "anchor", "l5-coverage", encodeLocalL5CoverageFilename(key))
+	return filepath.Join(s.directoryPath(), "anchor", "l5-coverage", encodeLocalL5CoverageFilename(key))
 }
 
 func (s LocalStore) latestSTHAnchorReferencePath() string {
-	return filepath.Join(s.root(), "anchor", "latest-sth-anchor.tdref")
+	return filepath.Join(s.directoryPath(), "anchor", "latest-sth-anchor.tdref")
 }
 
 func (s LocalStore) latestSTHAnchorReferencePathForKey(key model.STHAnchorScheduleKey) string {
 	name := strings.TrimSuffix(encodeLocalSTHAnchorScheduleFilename(key), localAnchorScheduleSuffix) + localAnchorLatestSuffix
-	return filepath.Join(s.root(), "anchor", "latest-sth-anchor", name)
+	return filepath.Join(s.directoryPath(), "anchor", "latest-sth-anchor", name)
 }
 
 func (s LocalStore) checkpointPath() string {
-	return filepath.Join(s.root(), "wal-checkpoint.tdckpt")
+	return filepath.Join(s.directoryPath(), "wal-checkpoint.tdckpt")
 }
 
 func (s LocalStore) bundleDir() string {
-	return filepath.Join(s.root(), "bundles")
+	return filepath.Join(s.directoryPath(), "bundles")
 }
 
 func (s LocalStore) bundlePath(recordID string) string {
@@ -3203,35 +3845,35 @@ func (s LocalStore) bundlePath(recordID string) string {
 }
 
 func (s LocalStore) recordByIDDir() string {
-	return filepath.Join(s.root(), "records", "by-id")
+	return filepath.Join(s.directoryPath(), "records", "by-id")
 }
 
 func (s LocalStore) recordByTimeDir() string {
-	return filepath.Join(s.root(), "records", "by-time")
+	return filepath.Join(s.directoryPath(), "records", "by-time")
 }
 
 func (s LocalStore) recordByBatchDir(batchID string) string {
-	return filepath.Join(s.root(), "records", "by-batch", safeFileName(batchID))
+	return filepath.Join(s.directoryPath(), "records", "by-batch", safeFileName(batchID))
 }
 
 func (s LocalStore) recordByProofLevelDir(level string) string {
-	return filepath.Join(s.root(), "records", "by-proof-level", safeFileName(level))
+	return filepath.Join(s.directoryPath(), "records", "by-proof-level", safeFileName(level))
 }
 
 func (s LocalStore) recordByTenantDir(tenantID string) string {
-	return filepath.Join(s.root(), "records", "by-tenant", safeFileName(tenantID))
+	return filepath.Join(s.directoryPath(), "records", "by-tenant", safeFileName(tenantID))
 }
 
 func (s LocalStore) recordByClientDir(clientID string) string {
-	return filepath.Join(s.root(), "records", "by-client", safeFileName(clientID))
+	return filepath.Join(s.directoryPath(), "records", "by-client", safeFileName(clientID))
 }
 
 func (s LocalStore) recordByContentDir(contentHash []byte) string {
-	return filepath.Join(s.root(), "records", "by-content", hex.EncodeToString(contentHash))
+	return filepath.Join(s.directoryPath(), "records", "by-content", hex.EncodeToString(contentHash))
 }
 
 func (s LocalStore) recordByStorageTokenDir(token string) string {
-	return filepath.Join(s.root(), "records", "by-storage-token", recordTokenPart(token))
+	return filepath.Join(s.directoryPath(), "records", "by-storage-token", recordTokenPart(token))
 }
 
 func (s LocalStore) recordByIDPath(recordID string) string {
@@ -3243,7 +3885,7 @@ func (s LocalStore) recordIndexName(idx model.RecordIndex) string {
 }
 
 func (s LocalStore) rootDir() string {
-	return filepath.Join(s.root(), "roots")
+	return filepath.Join(s.directoryPath(), "roots")
 }
 
 func (s LocalStore) rootPath(closedAtUnixN int64, batchID string) string {
@@ -3256,18 +3898,15 @@ func (s LocalStore) latestRootReferencePath() string {
 }
 
 func (s LocalStore) manifestDir() string {
-	return filepath.Join(s.root(), "manifests")
+	return filepath.Join(s.directoryPath(), "manifests")
 }
 
 func (s LocalStore) manifestPath(batchID string) string {
 	return filepath.Join(s.manifestDir(), safeFileName(batchID)+".tdmanifest")
 }
 
-func (s LocalStore) root() string {
-	if s.Root == "" {
-		return ".trustdb/proofs"
-	}
-	return s.Root
+func (s LocalStore) directoryPath() string {
+	return s.directory
 }
 
 func writeCBORAtomic(path string, value any) error {
@@ -3545,7 +4184,7 @@ func (s LocalStore) promoteBatchRecords(ctx context.Context, batchID, proofLevel
 			continue
 		}
 		idx.ProofLevel = proofLevel
-		if err := s.PutRecordIndex(ctx, idx); err != nil {
+		if err := s.putRecordIndex(ctx, idx); err != nil {
 			return err
 		}
 	}
@@ -3553,6 +4192,11 @@ func (s LocalStore) promoteBatchRecords(ctx context.Context, batchID, proofLevel
 }
 
 func (s LocalStore) PromoteBatchProofLevel(ctx context.Context, batchID, proofLevel string) error {
+	release, err := s.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	proofLevel = model.NormalizedProofLevel(proofLevel)
 	if batchID == "" || proofLevel == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "batch_id and valid proof level are required")

@@ -297,7 +297,7 @@ export function ServerDocsPage({ route }) {
         <section className="doc-section">
           <h2>{server.localTitle}</h2><p>{server.localBody}</p>
           <CodeBlock>{`./bin/trustdb serve \\\n  --server-private-key .trustdb-dev/server.key \\\n  --client-public-key .trustdb-dev/client.pub \\\n  --wal .trustdb-dev/server/wal \\\n  --metastore pebble \\\n  --metastore-path .trustdb-dev/server/pebble \\\n  --proof-dir .trustdb-dev/server/proofs \\\n  --listen 127.0.0.1:8080`}</CodeBlock>
-          <CodeBlock label="health / read-only diagnostics">{`curl --fail --silent http://127.0.0.1:8080/healthz\ncurl --fail --silent 'http://127.0.0.1:8080/v1/records?limit=10&direction=desc'\ncurl --fail --silent http://127.0.0.1:8080/metrics`}</CodeBlock>
+          <CodeBlock label="health / read-only diagnostics">{`curl --fail --silent http://127.0.0.1:8080/healthz\ncurl --fail --silent 'http://127.0.0.1:8080/v2/records?limit=10&direction=desc'\ncurl --fail --silent http://127.0.0.1:8080/metrics`}</CodeBlock>
           <ExpectedResult label={ui.expected}>{server.localExpected}</ExpectedResult>
         </section>
         <section className="doc-section">
@@ -327,7 +327,7 @@ export function ServerDocsPage({ route }) {
         <section className="doc-section">
           <h2>{server.checklistTitle}</h2><ul className="doc-checklist">{server.checklist.map((item) => <li key={item}>{item}</li>)}</ul>
         </section>
-        <section className="doc-section"><h2>{server.apiTitle}</h2><p>{server.apiBody}</p><CodeBlock label="read endpoints">{`GET  /healthz\nGET  /v1/records\nGET  /v1/proofs/{record_id}\nGET  /v1/global-log/evidence/{batch_id}\nGET  /v1/anchors/sth/{tree_size}\nGET  /metrics`}</CodeBlock></section>
+        <section className="doc-section"><h2>{server.apiTitle}</h2><p>{server.apiBody}</p><CodeBlock label="read endpoints">{`GET  /healthz\nGET  /v2/records\nGET  /v2/proofs/{record_id}\nGET  /v2/global-log/evidence/{batch_id}\nGET  /v2/anchors/sth/{tree_size}\nGET  /metrics`}</CodeBlock></section>
         <div className="doc-next"><span>{ui.next}</span><Link href="/docs/troubleshooting">{troubleshooting.title} <ArrowRight /></Link></div>
       </div>
     </DocsShell>

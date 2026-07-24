@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -184,6 +185,64 @@ func TestWorkerProcessPersistsMalformedDeliveryBeforeTerm(t *testing.T) {
 	}
 	if got, want := sequence.snapshot(), []string{"store", "term"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+func TestWorkerRejectsRetiredV1TransportMetadata(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*workerTestMessage)
+		want   string
+	}{
+		{
+			name: "subject",
+			mutate: func(message *workerTestMessage) {
+				message.subject = "trustdb.ingress.v1.claims"
+			},
+			want: "unexpected NATS ingress subject",
+		},
+		{
+			name: "content type",
+			mutate: func(message *workerTestMessage) {
+				message.headers.Set(HeaderContentType, "application/vnd.trustdb.nats-ingress.v1+cbor")
+			},
+			want: "unexpected NATS ingress content type",
+		},
+		{
+			name: "schema header",
+			mutate: func(message *workerTestMessage) {
+				message.headers.Set(HeaderSchemaVersion, "trustdb.nats-ingress-request.v1")
+			},
+			want: "unexpected NATS ingress schema header",
+		},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			message := newWorkerTestMessage(t, mustRequest(t), 1)
+			testCase.mutate(message)
+			worker := testWorker(
+				submitterFunc(func(context.Context, model.SignedClaim) (submission.Outcome, error) {
+					t.Fatal("retired v1 delivery reached submitter")
+					return submission.Outcome{}, nil
+				}),
+				sinkFunc(func(_ context.Context, outcome DeliveryOutcome) error {
+					if outcome.Rejection == nil || !strings.Contains(outcome.Rejection.Message, testCase.want) {
+						t.Fatalf("rejection = %+v, want message containing %q", outcome.Rejection, testCase.want)
+					}
+					return nil
+				}),
+			)
+
+			if err := worker.Process(context.Background(), message); err != nil {
+				t.Fatalf("Process() error = %v", err)
+			}
+			if got := message.events.snapshot(); !reflect.DeepEqual(got, []string{"term"}) {
+				t.Fatalf("events = %v, want terminal rejection", got)
+			}
+		})
 	}
 }
 

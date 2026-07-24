@@ -26,8 +26,8 @@ func TestAnchorPayloadGoldenVectors(t *testing.T) {
 		wantStreamID      string
 		wantAnchorID      string
 	}{
-		{name: "standard", suite: cryptosuite.INTLV1, wantPayloadSHA256: "fb0446bd37ffb9a7523baf39465778e3c5458feb88ccb15c16259067c8203aa6", wantSTHDigest: "f2c6a2023939504c86c16eea603704393b8b82f39e4bde39f285c9e4f57b7c37", wantStreamID: "5fae452509ee4290e834a64502d815cacb76928cf9371809daccd6e0e365687e", wantAnchorID: "884235e6556a8599c5bef2040a3c6eb1c08eb32de1ade016d9f97bd56bfb56f1"},
-		{name: "cn-sm", suite: cryptosuite.CNSMV1, wantPayloadSHA256: "29cbc06142ef6799b93d6fb01c847e5dbe131a3aa5ba6689663ee6ff8104d28d", wantSTHDigest: "4894932d6296ae98007025853a6ab373f208427a7f638c19aca0b1a45cbb106f", wantStreamID: "41aea4cb28ac7183cdeede08da326b50a28d1589b48b33976c37d681b6e53d8d", wantAnchorID: "dd5faa68ee9f0ac9dd235788789c7d705ddfbc1deb4280f5518859a0d8630c8f"},
+		{name: "standard", suite: cryptosuite.INTLV1, wantPayloadSHA256: "ed69775dcfeac2bc756fe7ff3c035dacedcf8f3906615dcdc87b5d4ad1199733", wantSTHDigest: "8a5f4fde3339f606453489c1e4be138d1415c908284461cf166aebb3721ba0de", wantStreamID: "5fae452509ee4290e834a64502d815cacb76928cf9371809daccd6e0e365687e", wantAnchorID: "4eb7b800ae3ddeaab852923ccb860dbe07413dc9797e13e60a828cf789328271"},
+		{name: "cn-sm", suite: cryptosuite.CNSMV1, wantPayloadSHA256: "e1b6aa24589c25f96687e0d2cf661767fc455ade3be799fe1a95c28f8446aa5e", wantSTHDigest: "e11951fc0d59d2e980510b9866db40d141c0d94d9ebdf2ffb68d137841b05d8e", wantStreamID: "41aea4cb28ac7183cdeede08da326b50a28d1589b48b33976c37d681b6e53d8d", wantAnchorID: "29efbb254846b8808c2db4b7856c4c4d3d0dc7f47e7a07a13679e18c492aa03f"},
 	}
 	for _, tc := range tests {
 		tc := tc
@@ -359,6 +359,7 @@ func testSTH(suiteID cryptosuite.ID) model.SignedTreeHead {
 	}
 	return model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    suiteID,
 		TreeAlg:        treeAlg,
 		TreeSize:       0x0102030405060708,
 		RootHash:       sequenceBytes(0x10, 32),

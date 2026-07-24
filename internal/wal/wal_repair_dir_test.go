@@ -17,7 +17,8 @@ func TestRepairDirNoOpWhenClean(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	writeTestDirBinding(t, dir, Options{})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -30,7 +31,7 @@ func TestRepairDirNoOpWhenClean(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	idsBefore, err := ListSegments(dir)
+	idsBefore, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -38,7 +39,7 @@ func TestRepairDirNoOpWhenClean(t *testing.T) {
 		t.Fatalf("expected at least 2 segments, got %d", len(idsBefore))
 	}
 
-	result, err := RepairDir(dir)
+	result, err := RepairDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("RepairDir() error = %v", err)
 	}
@@ -63,7 +64,7 @@ func TestRepairDirTruncatesTailGarbage(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -76,7 +77,7 @@ func TestRepairDirTruncatesTailGarbage(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	ids, err := ListSegments(dir)
+	ids, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -107,7 +108,7 @@ func TestRepairDirTruncatesTailGarbage(t *testing.T) {
 		t.Fatalf("close tail: %v", err)
 	}
 
-	result, err := RepairDir(dir)
+	result, err := RepairDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("RepairDir() error = %v", err)
 	}
@@ -132,7 +133,7 @@ func TestRepairDirTruncatesTailGarbage(t *testing.T) {
 
 	// The writer should be able to reopen the directory and continue with
 	// a contiguous sequence.
-	w2, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w2, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() after repair error = %v", err)
 	}
@@ -155,7 +156,7 @@ func TestRepairDirRejectsNonTailCorruption(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -168,7 +169,7 @@ func TestRepairDirRejectsNonTailCorruption(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	ids, err := ListSegments(dir)
+	ids, err := ListSegments(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("ListSegments() error = %v", err)
 	}
@@ -201,7 +202,7 @@ func TestRepairDirRejectsNonTailCorruption(t *testing.T) {
 	}
 	snapshots[midID] = data
 
-	_, err = RepairDir(dir)
+	_, err = RepairDir(dir, testWALOptions(Options{}))
 	if err == nil {
 		t.Fatalf("RepairDir() = nil, want error")
 	}
@@ -226,7 +227,8 @@ func TestRepairDirEmptyDir(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	result, err := RepairDir(dir)
+	writeTestDirBinding(t, dir, Options{})
+	result, err := RepairDir(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("RepairDir() error = %v", err)
 	}
@@ -248,11 +250,7 @@ func TestRepairDirMissingDir(t *testing.T) {
 	t.Parallel()
 
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
-	result, err := RepairDir(dir)
-	if err != nil {
-		t.Fatalf("RepairDir() error = %v", err)
-	}
-	if len(result.Segments) != 0 || result.ActiveSegmentID != 0 {
-		t.Fatalf("expected empty result, got %+v", result)
+	if _, err := RepairDir(dir, testWALOptions(Options{})); err == nil {
+		t.Fatal("RepairDir() accepted a namespace without a durable V2 binding")
 	}
 }

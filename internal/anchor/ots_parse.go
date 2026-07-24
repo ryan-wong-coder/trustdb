@@ -143,10 +143,10 @@ func (p *OtsParsedTimestamp) HasPending() bool {
 // give us 6+ orders of magnitude of headroom while still rejecting
 // adversarial blobs that try to make us allocate gigabytes.
 const (
-	otsMaxVarbytesLen        = 1 << 20 // 1 MiB
-	otsMaxAttestPayloadLen   = 1 << 16 // 64 KiB
-	otsMaxRecursionDepth     = 1024    // path depth, not breadth
-	otsMaxAttestationsPerProof = 1024  // breadth — guards against DoS via 0xff spam
+	otsMaxVarbytesLen          = 1 << 20 // 1 MiB
+	otsMaxAttestPayloadLen     = 1 << 16 // 64 KiB
+	otsMaxRecursionDepth       = 1024    // path depth, not breadth
+	otsMaxAttestationsPerProof = 1024    // breadth — guards against DoS via 0xff spam
 )
 
 // ParseOtsTimestamp walks the binary tree starting from initialDigest

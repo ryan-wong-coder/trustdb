@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"container/heap"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -26,16 +26,21 @@ import (
 )
 
 const (
+	subscriptionIDDomain        = "trustdb.status-subscription-id.v2"
+	subscriptionIDPrefix        = "tss2"
 	defaultFlushInterval        = 50 * time.Millisecond
 	defaultTTL                  = 24 * time.Hour
 	maxTTL                      = 7 * 24 * time.Hour
 	maxRecordIDs                = 1000
 	maxSubscriptions            = 10000
 	maxSubscriptionsPerUpstream = 64
+	maxPersistedStateBytes      = 128 << 20
 	defaultWorkers              = 8
 	defaultQueueSize            = 4096
 	defaultWebhookTimeout       = 5 * time.Second
 )
+
+const persistedStateSchema = "trustdb.status-subscriptions.v2"
 
 type RouteResolver interface {
 	LookupNotificationRoute(tenantID, clientID, keyID string) (model.UpstreamNotificationRoute, bool)
@@ -48,6 +53,9 @@ type NATSPublisher interface {
 
 type Config struct {
 	StatePath     string
+	NodeID        string
+	LogID         string
+	NamespaceID   string
 	Routes        RouteResolver
 	Signer        trustcrypto.Signer
 	CryptoSuite   cryptosuite.ID
@@ -56,7 +64,20 @@ type Config struct {
 	Workers       int
 	QueueSize     int
 	Clock         func() time.Time
+	stateFileOps  *statusStateFileOps
 }
+
+type statusStateFileOps struct {
+	replace func(string, string) error
+	syncDir func(string) error
+}
+
+type installedStateError struct {
+	err error
+}
+
+func (e *installedStateError) Error() string { return e.err.Error() }
+func (e *installedStateError) Unwrap() error { return e.err }
 
 type Channels struct {
 	Webhook bool `cbor:"webhook" json:"webhook"`
@@ -102,6 +123,11 @@ type deliveryJob struct {
 }
 
 type persistedState struct {
+	SchemaVersion string         `json:"schema_version"`
+	CryptoSuite   cryptosuite.ID `json:"crypto_suite"`
+	NodeID        string         `json:"node_id"`
+	LogID         string         `json:"log_id"`
+	NamespaceID   string         `json:"namespace_id"`
 	Subscriptions []Subscription `json:"subscriptions"`
 }
 
@@ -127,20 +153,21 @@ func (h *subscriptionExpiryHeap) Pop() any {
 // slow or disconnected receiver can therefore increase notification latency
 // but can never create an event-per-status unbounded queue.
 type Hub struct {
-	mu             sync.RWMutex
-	byID           map[string]*state
-	byRecord       map[string]map[string]struct{}
-	dirty          map[string]struct{}
-	expiries       subscriptionExpiryHeap
-	upstreamCounts map[string]int
-	cfg            Config
-	jobs           chan deliveryJob
-	stop           chan struct{}
-	done           chan struct{}
-	natsMu         sync.RWMutex
-	nats           NATSPublisher
-	stopOnce       sync.Once
-	workers        sync.WaitGroup
+	mu                 sync.RWMutex
+	byID               map[string]*state
+	byRecord           map[string]map[string]struct{}
+	dirty              map[string]struct{}
+	expiries           subscriptionExpiryHeap
+	upstreamCounts     map[string]int
+	cfg                Config
+	jobs               chan deliveryJob
+	stop               chan struct{}
+	done               chan struct{}
+	natsMu             sync.RWMutex
+	nats               NATSPublisher
+	stopOnce           sync.Once
+	workers            sync.WaitGroup
+	persistencePending bool
 }
 
 func New(cfg Config) (*Hub, error) {
@@ -150,8 +177,16 @@ func New(cfg Config) (*Hub, error) {
 	if cfg.Signer == nil {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "status notification signer is required")
 	}
-	if cfg.CryptoSuite == "" {
-		cfg.CryptoSuite = cryptosuite.INTLV1
+	suiteID, err := cryptosuite.RequireAvailable(cfg.CryptoSuite)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "status notification crypto_suite", err)
+	}
+	cfg.CryptoSuite = suiteID.ID
+	cfg.NodeID = strings.TrimSpace(cfg.NodeID)
+	cfg.LogID = strings.TrimSpace(cfg.LogID)
+	cfg.NamespaceID = strings.TrimSpace(cfg.NamespaceID)
+	if strings.TrimSpace(cfg.StatePath) != "" && (cfg.NodeID == "" || cfg.LogID == "" || cfg.NamespaceID == "") {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "status notification node_id, log_id, and namespace_id are required with persistent state")
 	}
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = defaultFlushInterval
@@ -167,6 +202,12 @@ func New(cfg Config) (*Hub, error) {
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: defaultWebhookTimeout}
+	}
+	if cfg.stateFileOps == nil {
+		cfg.stateFileOps = &statusStateFileOps{
+			replace: replaceStatusStateFile,
+			syncDir: syncStatusStateDirectory,
+		}
 	}
 	h := &Hub{
 		byID:           make(map[string]*state),
@@ -253,6 +294,9 @@ func (h *Hub) Create(_ context.Context, request CreateRequest) (Subscription, er
 	if err != nil {
 		return Subscription{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "upstream key is not currently valid", err)
 	}
+	if err := cryptosuite.RequireSame(h.cfg.CryptoSuite, clientKey.CryptoSuite); err != nil {
+		return Subscription{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "status subscription key crypto_suite", err)
+	}
 	if err := VerifyCreateRequest(request, clientKey, h.cfg.Clock().UTC()); err != nil {
 		return Subscription{}, err
 	}
@@ -279,7 +323,7 @@ func (h *Hub) Create(_ context.Context, request CreateRequest) (Subscription, er
 	if request.TTLSeconds > 0 {
 		ttl = time.Duration(request.TTLSeconds) * time.Second
 	}
-	id, err := subscriptionID(request)
+	id, err := subscriptionID(h.cfg.CryptoSuite, request)
 	if err != nil {
 		return Subscription{}, trusterr.Wrap(trusterr.CodeInternal, "derive subscription id", err)
 	}
@@ -297,6 +341,13 @@ func (h *Hub) Create(_ context.Context, request CreateRequest) (Subscription, er
 	h.mu.Lock()
 	if existing := h.byID[subscription.ID]; existing != nil {
 		result := cloneSubscription(existing.subscription)
+		if h.persistencePending {
+			if err := h.persistLocked(); err != nil {
+				h.mu.Unlock()
+				return Subscription{}, err
+			}
+			h.persistencePending = false
+		}
 		h.mu.Unlock()
 		return result, nil
 	}
@@ -310,10 +361,15 @@ func (h *Hub) Create(_ context.Context, request CreateRequest) (Subscription, er
 	}
 	h.addLocked(subscription, true)
 	if err := h.persistLocked(); err != nil {
-		h.removeLocked(subscription.ID)
+		h.persistencePending = true
+		var installed *installedStateError
+		if !errors.As(err, &installed) {
+			h.removeLocked(subscription.ID)
+		}
 		h.mu.Unlock()
 		return Subscription{}, err
 	}
+	h.persistencePending = false
 	h.mu.Unlock()
 	return cloneSubscription(subscription), nil
 }
@@ -330,12 +386,23 @@ func (h *Hub) Get(id string) (Subscription, bool) {
 
 func (h *Hub) Delete(_ context.Context, id string) error {
 	h.mu.Lock()
-	if _, found := h.byID[id]; !found {
+	item, found := h.byID[id]
+	if !found {
 		h.mu.Unlock()
 		return trusterr.New(trusterr.CodeNotFound, "status subscription not found")
 	}
+	removed := cloneSubscription(item.subscription)
 	h.removeLocked(id)
 	err := h.persistLocked()
+	if err != nil {
+		h.persistencePending = true
+		var installed *installedStateError
+		if !errors.As(err, &installed) {
+			h.addLocked(removed, true)
+		}
+	} else {
+		h.persistencePending = false
+	}
 	h.mu.Unlock()
 	return err
 }
@@ -451,8 +518,12 @@ func (h *Hub) flush() {
 		route, _ := h.cfg.Routes.LookupNotificationRoute(item.subscription.TenantID, item.subscription.ClientID, item.subscription.KeyID)
 		jobs = append(jobs, deliveryJob{subscription: cloneSubscription(item.subscription), route: route})
 	}
-	if removed {
-		_ = h.persistLocked()
+	if removed || h.persistencePending {
+		if err := h.persistLocked(); err != nil {
+			h.persistencePending = true
+		} else {
+			h.persistencePending = false
+		}
 	}
 	h.mu.Unlock()
 	for _, job := range jobs {
@@ -480,6 +551,7 @@ func (h *Hub) deliveryWorker() {
 func (h *Hub) deliver(job deliveryJob) error {
 	notification := model.StatusRefresh{
 		SchemaVersion:   model.SchemaStatusRefresh,
+		CryptoSuite:     h.cfg.CryptoSuite,
 		SubscriptionID:  job.subscription.ID,
 		TenantID:        job.subscription.TenantID,
 		ClientID:        job.subscription.ClientID,
@@ -638,19 +710,64 @@ func (h *Hub) load() error {
 	if strings.TrimSpace(h.cfg.StatePath) == "" {
 		return nil
 	}
-	data, err := os.ReadFile(h.cfg.StatePath)
+	file, err := os.Open(h.cfg.StatePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "read status subscriptions", err)
 	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxPersistedStateBytes+1))
+	if err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "read status subscriptions", err)
+	}
+	if len(data) > maxPersistedStateBytes {
+		return trusterr.New(trusterr.CodeDataLoss, "status subscription state exceeds the size limit")
+	}
 	var persisted persistedState
-	if err := json.Unmarshal(data, &persisted); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&persisted); err != nil {
 		return trusterr.Wrap(trusterr.CodeDataLoss, "decode status subscriptions", err)
 	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "decode status subscriptions", err)
+	}
+	if persisted.SchemaVersion != persistedStateSchema {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "unsupported status subscription state schema")
+	}
+	if err := cryptosuite.RequireSame(h.cfg.CryptoSuite, persisted.CryptoSuite); err != nil {
+		return trusterr.Wrap(trusterr.CodeFailedPrecondition, "status subscription state crypto_suite", err)
+	}
+	if persisted.NodeID != h.cfg.NodeID ||
+		persisted.LogID != h.cfg.LogID ||
+		persisted.NamespaceID != h.cfg.NamespaceID {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "status subscription state namespace binding does not match the server")
+	}
+	if len(persisted.Subscriptions) > maxSubscriptions {
+		return trusterr.New(trusterr.CodeDataLoss, "status subscription state exceeds the subscription limit")
+	}
 	now := h.cfg.Clock().UTC().UnixNano()
-	for _, subscription := range persisted.Subscriptions {
+	seen := make(map[string]struct{}, len(persisted.Subscriptions))
+	upstreamCounts := make(map[string]int)
+	for index, subscription := range persisted.Subscriptions {
+		if err := validatePersistedSubscription(subscription); err != nil {
+			return trusterr.Wrap(
+				trusterr.CodeDataLoss,
+				fmt.Sprintf("status subscription state item %d", index),
+				err,
+			)
+		}
+		if _, duplicate := seen[subscription.ID]; duplicate {
+			return trusterr.New(trusterr.CodeDataLoss, "status subscription state contains a duplicate subscription_id")
+		}
+		seen[subscription.ID] = struct{}{}
+		upstream := upstreamIdentity(subscription.TenantID, subscription.ClientID)
+		upstreamCounts[upstream]++
+		if upstreamCounts[upstream] > maxSubscriptionsPerUpstream {
+			return trusterr.New(trusterr.CodeDataLoss, "status subscription state exceeds the per-upstream limit")
+		}
 		if subscription.ExpiresAtUnixN > now {
 			h.addLocked(subscription, true)
 		}
@@ -667,19 +784,80 @@ func (h *Hub) persistLocked() error {
 		items = append(items, cloneSubscription(item.subscription))
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
-	data, err := json.Marshal(persistedState{Subscriptions: items})
+	data, err := json.Marshal(persistedState{
+		SchemaVersion: persistedStateSchema,
+		CryptoSuite:   h.cfg.CryptoSuite,
+		NodeID:        h.cfg.NodeID,
+		LogID:         h.cfg.LogID,
+		NamespaceID:   h.cfg.NamespaceID,
+		Subscriptions: items,
+	})
 	if err != nil {
 		return trusterr.Wrap(trusterr.CodeInternal, "encode status subscriptions", err)
+	}
+	if len(data) > maxPersistedStateBytes {
+		return trusterr.New(trusterr.CodeResourceExhausted, "status subscription state exceeds the size limit")
 	}
 	if err := os.MkdirAll(filepath.Dir(h.cfg.StatePath), 0o700); err != nil {
 		return trusterr.Wrap(trusterr.CodeInternal, "create status subscription directory", err)
 	}
 	tmp := h.cfg.StatePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return trusterr.Wrap(trusterr.CodeInternal, "write status subscriptions", err)
 	}
-	if err := os.Rename(tmp, h.cfg.StatePath); err != nil {
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return trusterr.Wrap(trusterr.CodeInternal, "write status subscriptions", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return trusterr.Wrap(trusterr.CodeInternal, "sync status subscriptions", err)
+	}
+	if err := file.Close(); err != nil {
+		return trusterr.Wrap(trusterr.CodeInternal, "close status subscriptions", err)
+	}
+	if err := h.cfg.stateFileOps.replace(tmp, h.cfg.StatePath); err != nil {
 		return trusterr.Wrap(trusterr.CodeInternal, "replace status subscriptions", err)
+	}
+	cleanup = false
+	if err := h.cfg.stateFileOps.syncDir(filepath.Dir(h.cfg.StatePath)); err != nil {
+		return &installedStateError{
+			err: trusterr.Wrap(trusterr.CodeInternal, "sync status subscription directory", err),
+		}
+	}
+	return nil
+}
+
+func validatePersistedSubscription(subscription Subscription) error {
+	if !strings.HasPrefix(subscription.ID, subscriptionIDPrefix) {
+		return errors.New("subscription_id has an unsupported generation")
+	}
+	encodedID := strings.TrimPrefix(subscription.ID, subscriptionIDPrefix)
+	decodedID, err := base64.RawURLEncoding.DecodeString(encodedID)
+	if err != nil || len(decodedID) != 18 {
+		return errors.New("subscription_id is malformed")
+	}
+	if subscription.TenantID == "" || strings.TrimSpace(subscription.TenantID) != subscription.TenantID ||
+		subscription.ClientID == "" || strings.TrimSpace(subscription.ClientID) != subscription.ClientID ||
+		subscription.KeyID == "" || strings.TrimSpace(subscription.KeyID) != subscription.KeyID {
+		return errors.New("subscription identity is empty or non-canonical")
+	}
+	recordIDs, err := normalizeRecordIDs(subscription.RecordIDs)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(recordIDs, subscription.RecordIDs) {
+		return errors.New("record_ids are duplicate or non-canonical")
+	}
+	if subscription.CreatedAtUnixN <= 0 || subscription.ExpiresAtUnixN <= subscription.CreatedAtUnixN {
+		return errors.New("subscription timestamps are invalid")
 	}
 	return nil
 }
@@ -758,7 +936,7 @@ func VerifyCreateRequest(request CreateRequest, clientKey model.ClientKey, now t
 	if request.Signature.KeyID != request.KeyID || request.Signature.KeyID != clientKey.KeyID {
 		return trusterr.New(trusterr.CodeInvalidArgument, "status subscription signature key_id does not match the registered key")
 	}
-	suite, err := cryptosuite.RequireAvailable(cryptosuite.INTLV1)
+	suite, err := cryptosuite.RequireAvailable(clientKey.CryptoSuite)
 	if err != nil {
 		return err
 	}
@@ -782,13 +960,24 @@ func VerifyCreateRequest(request CreateRequest, clientKey model.ClientKey, now t
 	return nil
 }
 
-func subscriptionID(request CreateRequest) (string, error) {
+func subscriptionID(suiteID cryptosuite.ID, request CreateRequest) (string, error) {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return "", err
+	}
 	encoded, err := cborx.Marshal(request)
 	if err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256(encoded)
-	return "tss1" + base64.RawURLEncoding.EncodeToString(digest[:18]), nil
+	input := make([]byte, 0, len(subscriptionIDDomain)+1+len(encoded))
+	input = append(input, subscriptionIDDomain...)
+	input = append(input, 0)
+	input = append(input, encoded...)
+	digest, err := trustcrypto.HashBytesForSuite(suite.ID, suite.RecordIDHash.Algorithm, input)
+	if err != nil {
+		return "", err
+	}
+	return subscriptionIDPrefix + base64.RawURLEncoding.EncodeToString(digest[:18]), nil
 }
 
 func cloneSubscription(subscription Subscription) Subscription {

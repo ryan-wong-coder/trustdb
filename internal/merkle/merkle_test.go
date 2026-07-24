@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -250,6 +251,7 @@ func TestBuildRejectsEmptyRecords(t *testing.T) {
 func record(id string) model.ServerRecord {
 	return model.ServerRecord{
 		SchemaVersion:       model.SchemaServerRecord,
+		CryptoSuite:         cryptosuite.INTLV1,
 		RecordID:            id,
 		TenantID:            "tenant",
 		ClientID:            "client",

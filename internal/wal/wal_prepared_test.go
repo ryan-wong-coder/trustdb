@@ -16,7 +16,7 @@ import (
 func TestAppendPreparedAtDoesNotPersistWhenPreparationFails(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	writer, err := OpenWriter(path, 1)
+	writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestAppendPreparedAtDoesNotPersistWhenPreparationFails(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	records, err := ReadAll(path)
+	records, err := ReadAll(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestAppendPreparedAtDoesNotPersistWhenPreparationFails(t *testing.T) {
 func TestAppendPreparedAtReservesFIFOWhilePreparingConcurrently(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	writer, err := OpenWriter(path, 1)
+	writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestAppendPreparedAtReservesFIFOWhilePreparingConcurrently(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	records, err := ReadAll(path)
+	records, err := ReadAll(path, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestAppendPreparedAtReservesFIFOWhilePreparingConcurrently(t *testing.T) {
 func TestAppendPreparedAtNWayConcurrencyPreparesOncePerReservation(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	writer, err := OpenWriter(path, 1)
+	writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestAppendPreparedAtNWayConcurrencyPreparesOncePerReservation(t *testing.T)
 func TestAppendPreparedAtFailureInvalidatesAndCancelsSuccessors(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	writer, err := OpenWriter(path, 1)
+	writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestAppendPreparedAtFailureInvalidatesAndCancelsSuccessors(t *testing.T) {
 func TestAppendPreparedAtMiddleFailureReplansFromValidPrefix(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	writer, err := OpenWriter(path, 1)
+	writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestAppendPreparedAtMiddleFailureReplansFromValidPrefix(t *testing.T) {
 func TestAppendPreparedAtCloseInvalidatesPendingReservation(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	writer, err := OpenWriter(path, 1)
+	writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}

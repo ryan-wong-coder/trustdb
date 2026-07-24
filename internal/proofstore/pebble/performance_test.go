@@ -13,13 +13,13 @@ import (
 )
 
 func TestBatchTreeSnapshotUsesFortyTiles(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	const leafCount = 8192
-	snapshot := model.BatchTreeSnapshot{
+	snapshot := model.BatchTreeSnapshot{CryptoSuite: "INTL_V1",
 		BatchID:        "batch-8192",
 		CreatedAtUnixN: time.Now().UnixNano(),
 		RecordIDs:      make([]string, leafCount),
@@ -67,7 +67,7 @@ func TestOpenRejectsLegacySchema(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err := Open(dir)
+	store, err := OpenWithOptions(dir, testStoreOptions(Options{}))
 	if store != nil {
 		_ = store.Close()
 	}
@@ -85,7 +85,7 @@ func BenchmarkMaterializedArtifactsTimeOnly8192(b *testing.B) {
 }
 
 func benchmarkMaterializedArtifactsTimeOnly(b *testing.B, count int) {
-	store, err := OpenWithOptions(b.TempDir(), Options{RecordIndexMode: RecordIndexModeTimeOnly, ArtifactSyncMode: ArtifactSyncModeBatch})
+	store, err := OpenWithOptions(b.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeTimeOnly, ArtifactSyncMode: ArtifactSyncModeBatch}))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func benchmarkMaterializedArtifactsTimeOnly(b *testing.B, count int) {
 		indexes[i] = model.RecordIndexFromBundle(bundles[i])
 		indexes[i].ProofLevel = "L2"
 	}
-	root := model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: bundles[0].CommittedReceipt.BatchID, BatchRoot: bundles[0].CommittedReceipt.BatchRoot, TreeSize: uint64(len(bundles)), ClosedAtUnixN: bundles[0].CommittedReceipt.ClosedAtUnixN}
+	root := model.BatchRoot{CryptoSuite: "INTL_V1", SchemaVersion: model.SchemaBatchRoot, BatchID: bundles[0].CommittedReceipt.BatchID, BatchRoot: bundles[0].CommittedReceipt.BatchRoot, TreeSize: uint64(len(bundles)), ClosedAtUnixN: bundles[0].CommittedReceipt.ClosedAtUnixN}
 	if err := store.PutPreparedBatchIndexesAndRoot(context.Background(), indexes, root); err != nil {
 		b.Fatal(err)
 	}

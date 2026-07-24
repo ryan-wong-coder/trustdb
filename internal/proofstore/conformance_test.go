@@ -3,6 +3,7 @@ package proofstore_test
 import (
 	"testing"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/proofstore/proofstoretest"
 )
@@ -13,7 +14,10 @@ import (
 func TestLocalStoreConformance(t *testing.T) {
 	t.Parallel()
 	proofstoretest.RunConformance(t, func(t *testing.T) (proofstore.Store, func()) {
-		store := &proofstore.LocalStore{Root: t.TempDir()}
+		store, err := proofstore.OpenLocalStore(t.TempDir(), cryptosuite.INTLV1, "test-node", "test-log", "test-local")
+		if err != nil {
+			t.Fatalf("open local proofstore: %v", err)
+		}
 		return store, func() { _ = store.Close() }
 	})
 }

@@ -38,10 +38,10 @@ func (b *otsBuilder) writeVarbytes(p []byte) {
 // this one". The LAST sibling at any node must NOT be preceded by it.
 func (b *otsBuilder) sibling() { b.buf.WriteByte(0xff) }
 
-func (b *otsBuilder) opSHA256()        { b.buf.WriteByte(0x08) }
-func (b *otsBuilder) opSHA1()          { b.buf.WriteByte(0x02) }
-func (b *otsBuilder) opRIPEMD160()     { b.buf.WriteByte(0x03) }
-func (b *otsBuilder) opKECCAK256()     { b.buf.WriteByte(0x67) }
+func (b *otsBuilder) opSHA256()    { b.buf.WriteByte(0x08) }
+func (b *otsBuilder) opSHA1()      { b.buf.WriteByte(0x02) }
+func (b *otsBuilder) opRIPEMD160() { b.buf.WriteByte(0x03) }
+func (b *otsBuilder) opKECCAK256() { b.buf.WriteByte(0x67) }
 func (b *otsBuilder) opAppend(p []byte) {
 	b.buf.WriteByte(0xf0)
 	b.writeVarbytes(p)

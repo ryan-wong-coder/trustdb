@@ -137,13 +137,16 @@ TrustDB 默认按单节点服务运行。多个计算节点可以共享同一个
 - Anchor path：STH/global roots 按 `(node_id, log_id, sink)` 合并进常数空间的 Pending/InFlight 调度状态，再由 anchor worker 按固定窗口发布。
 - Storage path：proof 数据可落到 file、Pebble 或 TiKV proofstore。
 - Backup path：proofstore 数据可导出为 `.tdbackup`，支持 verify 与可断点续传的 restore 状态；便携备份不包含节点本地 WAL checkpoint。
+- 密码敏捷切换边界：`.tdbackup v4` 当前仅允许 `INTL_V1`。`CN_SM_V1` 存储会在 backup/restore 入口 fail closed，待 [#473](https://github.com/wowtrust/trustdb/issues/473) 交付带认证、使用 SM4 保护的 backup v5；逻辑备份子系统本身不会被删除。
 - Observability path：`/metrics` 暴露 ingest、batch、global log、anchor、WAL、backup、storage 等指标。
+
+file、Pebble 和每个 TiKV namespace 使用 proofstore storage schema v5。旧版或无版本标记的非空存储会明确失败；当前版本不扫描、不迁移、也不双读旧键布局。部署 V5 时应使用空 namespace 和新的 LogID。
 
 `wal.fsync_mode=strict` 会在每条 accepted record 的 WAL 文件完成 fsync 后才返回。`group` 通过 `wal.group_commit_interval` 限制异步未刷盘窗口；`batch` 会把 accepted record 数据的 fsync 延后到 segment 轮转或关闭。Writer 启动，以及 WAL 目录创建、文件发布、轮转与裁剪所需的命名空间屏障，不受该追加策略影响。在 Windows 上，如果底层文件系统拒绝当前可用的最强目录刷新操作，TrustDB 会直接失败而不会静默降级。回执契约要求逐条 fsync 时应选择 `strict`；端到端崩溃耐久性仍取决于文件系统与存储设备保证。
 
 只有当 proofstore 能在 checkpoint 之前持久化排序 committed artifacts 与重启幂等决策，并把 checkpoint 限定到同一份节点本地 WAL 时，TrustDB 才会自动跳过 checkpoint 覆盖的记录并裁剪 WAL segment。Pebble 会把带幂等键的重启幂等决策与 committed manifest 原子发布，并仅在该投影就绪时启用 checkpoint 跳过与裁剪。TiKV 只有在显式绑定当前计算节点和本地 WAL 的绝对路径身份后才启用同一能力。开发用 file 后端缺少完整的幂等投影耐久屏障，因此仍保留并重放 WAL。
 
-升级时，旧版 v1 checkpoint 只能基于从 sequence 1 开始的完整保留 WAL 重建。如果旧部署已经裁掉该前缀，启动会以 `DataLoss` 失败关闭；应从可信备份恢复完整 WAL，而不是删除 checkpoint 标记，因为删除标记无法证明缺失记录已经提交。
+恢复只接受绑定到当前 crypto suite、NodeID、LogID 与 storage namespace 的 V2 WAL/checkpoint 代际。旧版或未绑定的恢复数据会失败关闭；当前版本不迁移，也不会回退读取更早的 WAL/checkpoint 格式。
 
 ## 快速开始
 
@@ -238,24 +241,24 @@ unset TRUSTDB_DEV_KEY_PASSPHRASE_NEW
 | Endpoint | 用途 |
 | --- | --- |
 | `GET /healthz` | 健康检查。 |
-| `POST /v1/claims` | 提交 signed claim。 |
-| `POST /v1/claims/batch` | 提交 CBOR signed claim 批量。 |
-| `GET /v1/records` | 分页 record 列表和搜索。 |
-| `GET /v1/records/{record_id}` | 读取 record index 详情。 |
-| `GET /v1/proofs/{record_id}` | 获取 L3 proof bundle。 |
-| `GET /v1/roots` | 列出 batch roots。 |
-| `GET /v1/roots/latest` | 获取最新 batch root。 |
-| `GET /v1/sth/latest` | 获取最新 SignedTreeHead。 |
-| `GET /v1/sth/{tree_size}` | 获取指定 tree size 的 STH。 |
-| `GET /v1/global-log/inclusion/{batch_id}` | 获取 batch 的 global-log inclusion proof。 |
-| `GET /v1/global-log/evidence/{batch_id}` | 获取覆盖该 batch 的 Global Log 组合证据，并在可用时返回精确匹配的已发布 anchor result。 |
-| `GET /v1/global-log/consistency?from=&to=` | 获取 global-log consistency proof。 |
-| `GET /v1/anchors/sth/{tree_size}` | 获取已发布的 immutable STH anchor result。 |
-| `GET /v1/anchor-systems` | 列出配置的下游锚系统、种类、可信属性和 capabilities。 |
-| `GET /v1/anchor-systems/{system_id}` | 获取一个锚系统的稳定语义描述。 |
-| `GET /v1/anchor-systems/{system_id}/status` | 获取 provider 实时状态快照。 |
-| `GET /v1/anchor-systems/{system_id}/resources` | 按 capability 分页查看节点、区块、交易、账户或合约。 |
-| `GET /v1/anchor-systems/{system_id}/resources/{kind}/{resource_id}` | 获取一项 provider 资源详情。 |
+| `POST /v2/claims` | 提交 signed claim。 |
+| `POST /v2/claims/batch` | 提交 CBOR signed claim 批量。 |
+| `GET /v2/records` | 分页 record 列表和搜索。 |
+| `GET /v2/records/{record_id}` | 读取 record index 详情。 |
+| `GET /v2/proofs/{record_id}` | 获取 L3 proof bundle。 |
+| `GET /v2/roots` | 列出 batch roots。 |
+| `GET /v2/roots/latest` | 获取最新 batch root。 |
+| `GET /v2/sth/latest` | 获取最新 SignedTreeHead。 |
+| `GET /v2/sth/{tree_size}` | 获取指定 tree size 的 STH。 |
+| `GET /v2/global-log/inclusion/{batch_id}` | 获取 batch 的 global-log inclusion proof。 |
+| `GET /v2/global-log/evidence/{batch_id}` | 获取覆盖该 batch 的 Global Log 组合证据，并在可用时返回精确匹配的已发布 anchor result。 |
+| `GET /v2/global-log/consistency?from=&to=` | 获取 global-log consistency proof。 |
+| `GET /v2/anchors/sth/{tree_size}` | 获取已发布的 immutable STH anchor result。 |
+| `GET /v2/anchor-systems` | 列出配置的下游锚系统、种类、可信属性和 capabilities。 |
+| `GET /v2/anchor-systems/{system_id}` | 获取一个锚系统的稳定语义描述。 |
+| `GET /v2/anchor-systems/{system_id}/status` | 获取 provider 实时状态快照。 |
+| `GET /v2/anchor-systems/{system_id}/resources` | 按 capability 分页查看节点、区块、交易、账户或合约。 |
+| `GET /v2/anchor-systems/{system_id}/resources/{kind}/{resource_id}` | 获取一项 provider 资源详情。 |
 | `GET /metrics` | Prometheus metrics。 |
 
 可选 gRPC listener 通过 `--grpc-listen` 或 `server.grpc_listen` 开启。gRPC 复用 TrustDB 确定性 CBOR payload model，因此 HTTP 和 gRPC transport 不改变证明语义。

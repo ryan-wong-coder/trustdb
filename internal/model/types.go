@@ -3,47 +3,42 @@ package model
 import "github.com/wowtrust/trustdb/internal/cryptosuite"
 
 const (
-	SchemaClientClaim          = "trustdb.claim.v1"
-	SchemaSignedClaim          = "trustdb.signed-claim.v1"
-	SchemaServerRecord         = "trustdb.server-record.v1"
-	SchemaAcceptedReceipt      = "trustdb.accepted-receipt.v1"
-	SchemaCommittedReceipt     = "trustdb.committed-receipt.v1"
-	SchemaProofBundle          = "trustdb.proof-bundle.v1"
+	SchemaClientClaim          = "trustdb.claim.v2"
+	SchemaSignedClaim          = "trustdb.signed-claim.v2"
+	SchemaServerRecord         = "trustdb.server-record.v2"
+	SchemaAcceptedReceipt      = "trustdb.accepted-receipt.v2"
+	SchemaCommittedReceipt     = "trustdb.committed-receipt.v2"
+	SchemaProofBundle          = "trustdb.proof-bundle.v2"
 	SchemaSingleProof          = "trustdb.sproof.v1"
-	SchemaRecordIndex          = "trustdb.record-index.v1"
-	SchemaRecordStatus         = "trustdb.record-status.v1"
-	SchemaStatusRefresh        = "trustdb.status-refresh.v1"
-	SchemaBatchRoot            = "trustdb.batch-root.v1"
-	SchemaBatchManifest        = "trustdb.batch-manifest.v1"
-	SchemaBatchTreeLeaf        = "trustdb.batch-tree-leaf.v1"
-	SchemaBatchTreeNode        = "trustdb.batch-tree-node.v1"
-	SchemaWALCheckpoint        = "trustdb.wal-checkpoint.v1"
-	SchemaKeyEvent             = "trustdb.key-event.v2"
-	SchemaGlobalLogLeaf        = "trustdb.global-log-leaf.v1"
-	SchemaGlobalLogNode        = "trustdb.global-log-node.v1"
-	SchemaGlobalLogState       = "trustdb.global-log-state.v1"
-	SchemaSignedTreeHead       = "trustdb.signed-tree-head.v1"
-	SchemaGlobalLogProof       = "trustdb.global-log-proof.v1"
-	SchemaGlobalLogTile        = "trustdb.global-log-tile.v1"
-	SchemaGlobalLogOutbox      = "trustdb.global-log-outbox.v1"
-	SchemaSTHAnchorResult      = "trustdb.sth-anchor-result.v1"
-	SchemaSTHAnchorSchedule    = "trustdb.sth-anchor-schedule.v1"
-	SchemaSTHAnchorLatest      = "trustdb.sth-anchor-latest.v1"
-	SchemaSTHAnchorLatestEmpty = "trustdb.sth-anchor-latest-empty.v1"
-	SchemaL5Coverage           = "trustdb.l5-coverage-checkpoint.v1"
+	SchemaRecordIndex          = "trustdb.record-index.v2"
+	SchemaRecordStatus         = "trustdb.record-status.v2"
+	SchemaStatusRefresh        = "trustdb.status-refresh.v2"
+	SchemaBatchRoot            = "trustdb.batch-root.v2"
+	SchemaBatchManifest        = "trustdb.batch-manifest.v2"
+	SchemaBatchTreeLeaf        = "trustdb.batch-tree-leaf.v2"
+	SchemaBatchTreeNode        = "trustdb.batch-tree-node.v2"
+	SchemaWALCheckpoint        = "trustdb.wal-checkpoint.v3"
+	SchemaKeyEvent             = "trustdb.key-event.v3"
+	SchemaGlobalLogLeaf        = "trustdb.global-log-leaf.v2"
+	SchemaGlobalLogNode        = "trustdb.global-log-node.v2"
+	SchemaGlobalLogState       = "trustdb.global-log-state.v2"
+	SchemaSignedTreeHead       = "trustdb.signed-tree-head.v2"
+	SchemaGlobalLogProof       = "trustdb.global-log-proof.v2"
+	SchemaGlobalLogTile        = "trustdb.global-log-tile.v2"
+	SchemaGlobalLogOutbox      = "trustdb.global-log-outbox.v2"
+	SchemaSTHAnchorResult      = "trustdb.sth-anchor-result.v2"
+	SchemaSTHAnchorSchedule    = "trustdb.sth-anchor-schedule.v2"
+	SchemaSTHAnchorLatest      = "trustdb.sth-anchor-latest.v2"
+	SchemaSTHAnchorLatestEmpty = "trustdb.sth-anchor-latest-empty.v2"
+	SchemaL5Coverage           = "trustdb.l5-coverage-checkpoint.v2"
 	DefaultCryptoSuite         = string(cryptosuite.INTLV1)
 	DefaultHashAlg             = cryptosuite.HashSHA256
 	DefaultSignatureAlg        = cryptosuite.SignatureEd25519
 	DefaultMerkleTreeAlg       = cryptosuite.MerkleRFC6962SHA256
-	DefaultValidationPolicy    = "trustdb.policy.v1"
+	DefaultValidationPolicy    = "trustdb.policy.v2"
 )
 
-// SchemaWALCheckpointContiguous uses the same fields as the legacy v1
-// checkpoint, but certifies that LastSequence covers every WAL sequence from
-// one through the stored boundary. Keeping the wire shape unchanged preserves
-// rollback decoding. Generic proofstore writes still default to v1 so they
-// cannot accidentally claim contiguous coverage.
-const SchemaWALCheckpointContiguous = "trustdb.wal-checkpoint.v2"
+const SchemaWALCheckpointContiguous = SchemaWALCheckpoint
 
 const (
 	KeyEventRegister   = "KEY_REGISTERED"
@@ -98,6 +93,7 @@ type TimeAttestation struct {
 
 type ClientClaim struct {
 	SchemaVersion   string          `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite     cryptosuite.ID  `cbor:"crypto_suite" json:"crypto_suite"`
 	TenantID        string          `cbor:"tenant_id" json:"tenant_id"`
 	ClientID        string          `cbor:"client_id" json:"client_id"`
 	KeyID           string          `cbor:"key_id" json:"key_id"`
@@ -116,9 +112,10 @@ type Signature struct {
 }
 
 type SignedClaim struct {
-	SchemaVersion string      `cbor:"schema_version" json:"schema_version"`
-	Claim         ClientClaim `cbor:"claim" json:"claim"`
-	Signature     Signature   `cbor:"signature" json:"signature"`
+	SchemaVersion string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	Claim         ClientClaim    `cbor:"claim" json:"claim"`
+	Signature     Signature      `cbor:"signature" json:"signature"`
 }
 
 type WALPosition struct {
@@ -135,37 +132,40 @@ type Validation struct {
 }
 
 type ServerRecord struct {
-	SchemaVersion       string      `cbor:"schema_version" json:"schema_version"`
-	RecordID            string      `cbor:"record_id" json:"record_id"`
-	TenantID            string      `cbor:"tenant_id" json:"tenant_id"`
-	ClientID            string      `cbor:"client_id" json:"client_id"`
-	KeyID               string      `cbor:"key_id" json:"key_id"`
-	ClaimHash           []byte      `cbor:"claim_hash" json:"claim_hash"`
-	ClientSignatureHash []byte      `cbor:"client_signature_hash" json:"client_signature_hash"`
-	ReceivedAtUnixN     int64       `cbor:"received_at_unix_nano" json:"received_at_unix_nano"`
-	WAL                 WALPosition `cbor:"wal" json:"wal"`
-	Validation          Validation  `cbor:"validation" json:"validation"`
+	SchemaVersion       string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite         cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	RecordID            string         `cbor:"record_id" json:"record_id"`
+	TenantID            string         `cbor:"tenant_id" json:"tenant_id"`
+	ClientID            string         `cbor:"client_id" json:"client_id"`
+	KeyID               string         `cbor:"key_id" json:"key_id"`
+	ClaimHash           []byte         `cbor:"claim_hash" json:"claim_hash"`
+	ClientSignatureHash []byte         `cbor:"client_signature_hash" json:"client_signature_hash"`
+	ReceivedAtUnixN     int64          `cbor:"received_at_unix_nano" json:"received_at_unix_nano"`
+	WAL                 WALPosition    `cbor:"wal" json:"wal"`
+	Validation          Validation     `cbor:"validation" json:"validation"`
 }
 
 type AcceptedReceipt struct {
-	SchemaVersion   string      `cbor:"schema_version" json:"schema_version"`
-	RecordID        string      `cbor:"record_id" json:"record_id"`
-	Status          string      `cbor:"status" json:"status"`
-	ServerID        string      `cbor:"server_id" json:"server_id"`
-	ReceivedAtUnixN int64       `cbor:"server_received_at_unix_nano" json:"server_received_at_unix_nano"`
-	WAL             WALPosition `cbor:"wal" json:"wal"`
-	ServerSig       Signature   `cbor:"server_signature" json:"server_signature"`
+	SchemaVersion   string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite     cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	RecordID        string         `cbor:"record_id" json:"record_id"`
+	Status          string         `cbor:"status" json:"status"`
+	ServerID        string         `cbor:"server_id" json:"server_id"`
+	ReceivedAtUnixN int64          `cbor:"server_received_at_unix_nano" json:"server_received_at_unix_nano"`
+	WAL             WALPosition    `cbor:"wal" json:"wal"`
+	ServerSig       Signature      `cbor:"server_signature" json:"server_signature"`
 }
 
 type CommittedReceipt struct {
-	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
-	RecordID      string `cbor:"record_id" json:"record_id"`
-	Status        string `cbor:"status" json:"status"`
-	BatchID       string `cbor:"batch_id" json:"batch_id"`
-	LeafIndex     uint64 `cbor:"leaf_index" json:"leaf_index"`
-	LeafHash      []byte `cbor:"leaf_hash" json:"leaf_hash"`
-	BatchRoot     []byte `cbor:"batch_root" json:"batch_root"`
-	ClosedAtUnixN int64  `cbor:"batch_closed_at_unix_nano" json:"batch_closed_at_unix_nano"`
+	SchemaVersion string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	RecordID      string         `cbor:"record_id" json:"record_id"`
+	Status        string         `cbor:"status" json:"status"`
+	BatchID       string         `cbor:"batch_id" json:"batch_id"`
+	LeafIndex     uint64         `cbor:"leaf_index" json:"leaf_index"`
+	LeafHash      []byte         `cbor:"leaf_hash" json:"leaf_hash"`
+	BatchRoot     []byte         `cbor:"batch_root" json:"batch_root"`
+	ClosedAtUnixN int64          `cbor:"batch_closed_at_unix_nano" json:"batch_closed_at_unix_nano"`
 	// NodeID identifies the compute node that issued this receipt (same meaning as AcceptedReceipt.ServerID).
 	NodeID string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
 	// LogID scopes batch/STH identifiers to a node-local transparency log.
@@ -181,8 +181,9 @@ type BatchProof struct {
 }
 
 type ProofBundle struct {
-	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
-	RecordID      string `cbor:"record_id" json:"record_id"`
+	SchemaVersion string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	RecordID      string         `cbor:"record_id" json:"record_id"`
 	// NodeID is the compute node identity (mirrors AcceptedReceipt.ServerID when populated).
 	NodeID           string           `cbor:"node_id,omitempty" json:"node_id,omitempty"`
 	LogID            string           `cbor:"log_id,omitempty" json:"log_id,omitempty"`
@@ -215,25 +216,26 @@ type SingleProof struct {
 // committed ProofBundle. It avoids loading full proof bundles when operators
 // or desktop clients need a paginated record list.
 type RecordIndex struct {
-	SchemaVersion      string `cbor:"schema_version" json:"schema_version"`
-	RecordID           string `cbor:"record_id" json:"record_id"`
-	NodeID             string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
-	LogID              string `cbor:"log_id,omitempty" json:"log_id,omitempty"`
-	TenantID           string `cbor:"tenant_id,omitempty" json:"tenant_id,omitempty"`
-	ClientID           string `cbor:"client_id,omitempty" json:"client_id,omitempty"`
-	KeyID              string `cbor:"key_id,omitempty" json:"key_id,omitempty"`
-	ProofLevel         string `cbor:"proof_level,omitempty" json:"proof_level,omitempty"`
-	BatchID            string `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
-	BatchLeafIndex     uint64 `cbor:"batch_leaf_index" json:"batch_leaf_index"`
-	BatchClosedAtUnixN int64  `cbor:"batch_closed_at_unix_nano,omitempty" json:"batch_closed_at_unix_nano,omitempty"`
-	ReceivedAtUnixN    int64  `cbor:"received_at_unix_nano" json:"received_at_unix_nano"`
-	ContentHash        []byte `cbor:"content_hash,omitempty" json:"content_hash,omitempty"`
-	ContentLength      int64  `cbor:"content_length,omitempty" json:"content_length,omitempty"`
-	MediaType          string `cbor:"media_type,omitempty" json:"media_type,omitempty"`
-	StorageURI         string `cbor:"storage_uri,omitempty" json:"storage_uri,omitempty"`
-	FileName           string `cbor:"file_name,omitempty" json:"file_name,omitempty"`
-	EventType          string `cbor:"event_type,omitempty" json:"event_type,omitempty"`
-	Source             string `cbor:"source,omitempty" json:"source,omitempty"`
+	SchemaVersion      string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite        cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	RecordID           string         `cbor:"record_id" json:"record_id"`
+	NodeID             string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID              string         `cbor:"log_id,omitempty" json:"log_id,omitempty"`
+	TenantID           string         `cbor:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	ClientID           string         `cbor:"client_id,omitempty" json:"client_id,omitempty"`
+	KeyID              string         `cbor:"key_id,omitempty" json:"key_id,omitempty"`
+	ProofLevel         string         `cbor:"proof_level,omitempty" json:"proof_level,omitempty"`
+	BatchID            string         `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
+	BatchLeafIndex     uint64         `cbor:"batch_leaf_index" json:"batch_leaf_index"`
+	BatchClosedAtUnixN int64          `cbor:"batch_closed_at_unix_nano,omitempty" json:"batch_closed_at_unix_nano,omitempty"`
+	ReceivedAtUnixN    int64          `cbor:"received_at_unix_nano" json:"received_at_unix_nano"`
+	ContentHash        []byte         `cbor:"content_hash,omitempty" json:"content_hash,omitempty"`
+	ContentLength      int64          `cbor:"content_length,omitempty" json:"content_length,omitempty"`
+	MediaType          string         `cbor:"media_type,omitempty" json:"media_type,omitempty"`
+	StorageURI         string         `cbor:"storage_uri,omitempty" json:"storage_uri,omitempty"`
+	FileName           string         `cbor:"file_name,omitempty" json:"file_name,omitempty"`
+	EventType          string         `cbor:"event_type,omitempty" json:"event_type,omitempty"`
+	Source             string         `cbor:"source,omitempty" json:"source,omitempty"`
 }
 
 // RecordStatus is the lightweight, real-time projection returned to an
@@ -241,19 +243,20 @@ type RecordIndex struct {
 // proof. It deliberately excludes proof material so point and batch lookups
 // remain cheap under high concurrency.
 type RecordStatus struct {
-	SchemaVersion  string `cbor:"schema_version" json:"schema_version"`
-	RecordID       string `cbor:"record_id" json:"record_id"`
-	TenantID       string `cbor:"tenant_id,omitempty" json:"tenant_id,omitempty"`
-	ClientID       string `cbor:"client_id,omitempty" json:"client_id,omitempty"`
-	KeyID          string `cbor:"key_id,omitempty" json:"key_id,omitempty"`
-	Status         string `cbor:"status" json:"status"`
-	ProofLevel     string `cbor:"proof_level" json:"proof_level"`
-	StatusVersion  uint64 `cbor:"status_version" json:"status_version"`
-	BatchID        string `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
-	UpdatedAtUnixN int64  `cbor:"updated_at_unix_nano" json:"updated_at_unix_nano"`
-	Terminal       bool   `cbor:"terminal" json:"terminal"`
-	Retryable      bool   `cbor:"retryable,omitempty" json:"retryable,omitempty"`
-	FailureCode    string `cbor:"failure_code,omitempty" json:"failure_code,omitempty"`
+	SchemaVersion  string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	RecordID       string         `cbor:"record_id" json:"record_id"`
+	TenantID       string         `cbor:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	ClientID       string         `cbor:"client_id,omitempty" json:"client_id,omitempty"`
+	KeyID          string         `cbor:"key_id,omitempty" json:"key_id,omitempty"`
+	Status         string         `cbor:"status" json:"status"`
+	ProofLevel     string         `cbor:"proof_level" json:"proof_level"`
+	StatusVersion  uint64         `cbor:"status_version" json:"status_version"`
+	BatchID        string         `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
+	UpdatedAtUnixN int64          `cbor:"updated_at_unix_nano" json:"updated_at_unix_nano"`
+	Terminal       bool           `cbor:"terminal" json:"terminal"`
+	Retryable      bool           `cbor:"retryable,omitempty" json:"retryable,omitempty"`
+	FailureCode    string         `cbor:"failure_code,omitempty" json:"failure_code,omitempty"`
 }
 
 // UpstreamNotificationRoute is administrator-controlled metadata associated
@@ -274,14 +277,15 @@ func (r UpstreamNotificationRoute) Empty() bool {
 // current status projection after receiving it; therefore repeated or merged
 // notifications are harmless and no historical event queue is required.
 type StatusRefresh struct {
-	SchemaVersion   string    `cbor:"schema_version" json:"schema_version"`
-	SubscriptionID  string    `cbor:"subscription_id" json:"subscription_id"`
-	TenantID        string    `cbor:"tenant_id" json:"tenant_id"`
-	ClientID        string    `cbor:"client_id" json:"client_id"`
-	Version         uint64    `cbor:"version" json:"version"`
-	RefreshRequired bool      `cbor:"refresh_required" json:"refresh_required"`
-	EmittedAtUnixN  int64     `cbor:"emitted_at_unix_nano" json:"emitted_at_unix_nano"`
-	ServerSig       Signature `cbor:"server_signature" json:"server_signature"`
+	SchemaVersion   string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite     cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	SubscriptionID  string         `cbor:"subscription_id" json:"subscription_id"`
+	TenantID        string         `cbor:"tenant_id" json:"tenant_id"`
+	ClientID        string         `cbor:"client_id" json:"client_id"`
+	Version         uint64         `cbor:"version" json:"version"`
+	RefreshRequired bool           `cbor:"refresh_required" json:"refresh_required"`
+	EmittedAtUnixN  int64          `cbor:"emitted_at_unix_nano" json:"emitted_at_unix_nano"`
+	ServerSig       Signature      `cbor:"server_signature" json:"server_signature"`
 }
 
 type RecordListOptions struct {
@@ -351,7 +355,7 @@ func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 	if record.RecordID == "" {
 		record.RecordID = bundle.RecordID
 	}
-	return RecordIndexFromBatchInputs(
+	idx := RecordIndexFromBatchInputs(
 		bundle.SignedClaim,
 		record,
 		bundle.AcceptedReceipt,
@@ -362,6 +366,10 @@ func RecordIndexFromBundle(bundle ProofBundle) RecordIndex {
 		bundle.CommittedReceipt.ClosedAtUnixN,
 		"L3",
 	)
+	if idx.CryptoSuite == "" {
+		idx.CryptoSuite = bundle.CryptoSuite
+	}
+	return idx
 }
 
 func RecordIndexFromBatchInputs(
@@ -401,6 +409,7 @@ func RecordIndexFromBatchInputs(
 	}
 	return RecordIndex{
 		SchemaVersion:      SchemaRecordIndex,
+		CryptoSuite:        signed.CryptoSuite,
 		RecordID:           record.RecordID,
 		NodeID:             nodeID,
 		LogID:              logID,
@@ -423,13 +432,22 @@ func RecordIndexFromBatchInputs(
 }
 
 type BatchRoot struct {
-	SchemaVersion string `cbor:"schema_version" json:"schema_version"`
-	BatchID       string `cbor:"batch_id" json:"batch_id"`
-	NodeID        string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
-	LogID         string `cbor:"log_id,omitempty" json:"log_id,omitempty"`
-	BatchRoot     []byte `cbor:"batch_root" json:"batch_root"`
-	TreeSize      uint64 `cbor:"tree_size" json:"tree_size"`
-	ClosedAtUnixN int64  `cbor:"closed_at_unix_nano" json:"closed_at_unix_nano"`
+	SchemaVersion string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	BatchID       string         `cbor:"batch_id" json:"batch_id"`
+	NodeID        string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID         string         `cbor:"log_id,omitempty" json:"log_id,omitempty"`
+	BatchRoot     []byte         `cbor:"batch_root" json:"batch_root"`
+	TreeSize      uint64         `cbor:"tree_size" json:"tree_size"`
+	ClosedAtUnixN int64          `cbor:"closed_at_unix_nano" json:"closed_at_unix_nano"`
+}
+
+func (r BatchRoot) TreeAlg() string {
+	suite, ok := cryptosuite.Lookup(r.CryptoSuite)
+	if !ok {
+		return ""
+	}
+	return suite.Merkle.Algorithm
 }
 
 // WALRange is the smallest sequence envelope containing a batch's WAL
@@ -447,112 +465,120 @@ type WALRange struct {
 // before they are trusted. Checkpoints remain best-effort metadata: losing one
 // only forces a retained-WAL scan.
 type WALCheckpoint struct {
-	SchemaVersion   string `cbor:"schema_version" json:"schema_version"`
-	NodeID          string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
-	WALID           string `cbor:"wal_id,omitempty" json:"wal_id,omitempty"`
-	SegmentID       uint64 `cbor:"segment_id" json:"segment_id"`
-	LastSequence    uint64 `cbor:"last_sequence" json:"last_sequence"`
-	LastOffset      int64  `cbor:"last_offset" json:"last_offset"`
-	BatchID         string `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
-	RecordedAtUnixN int64  `cbor:"recorded_at_unix_nano" json:"recorded_at_unix_nano"`
+	SchemaVersion   string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite     cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	NodeID          string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	WALID           string         `cbor:"wal_id,omitempty" json:"wal_id,omitempty"`
+	SegmentID       uint64         `cbor:"segment_id" json:"segment_id"`
+	LastSequence    uint64         `cbor:"last_sequence" json:"last_sequence"`
+	LastOffset      int64          `cbor:"last_offset" json:"last_offset"`
+	BatchID         string         `cbor:"batch_id,omitempty" json:"batch_id,omitempty"`
+	RecordedAtUnixN int64          `cbor:"recorded_at_unix_nano" json:"recorded_at_unix_nano"`
 }
 
 type BatchManifest struct {
-	SchemaVersion          string   `cbor:"schema_version" json:"schema_version"`
-	BatchID                string   `cbor:"batch_id" json:"batch_id"`
-	NodeID                 string   `cbor:"node_id,omitempty" json:"node_id,omitempty"`
-	LogID                  string   `cbor:"log_id,omitempty" json:"log_id,omitempty"`
-	State                  string   `cbor:"state" json:"state"`
-	TreeAlg                string   `cbor:"tree_alg" json:"tree_alg"`
-	TreeSize               uint64   `cbor:"tree_size" json:"tree_size"`
-	BatchRoot              []byte   `cbor:"batch_root" json:"batch_root"`
-	RecordIDs              []string `cbor:"record_ids" json:"record_ids"`
-	WALRange               WALRange `cbor:"wal_range" json:"wal_range"`
-	ClosedAtUnixN          int64    `cbor:"closed_at_unix_nano" json:"closed_at_unix_nano"`
-	PreparingAtUnixN       int64    `cbor:"preparing_at_unix_nano,omitempty" json:"preparing_at_unix_nano,omitempty"`
-	PreparedAtUnixN        int64    `cbor:"prepared_at_unix_nano,omitempty" json:"prepared_at_unix_nano,omitempty"`
-	CommittedAtUnixN       int64    `cbor:"committed_at_unix_nano,omitempty" json:"committed_at_unix_nano,omitempty"`
-	MaterializeAttempts    int      `cbor:"materialize_attempts,omitempty" json:"materialize_attempts,omitempty"`
-	MaterializeNextUnixN   int64    `cbor:"materialize_next_unix_nano,omitempty" json:"materialize_next_unix_nano,omitempty"`
-	MaterializeLastError   string   `cbor:"materialize_last_error,omitempty" json:"materialize_last_error,omitempty"`
-	MaterializeFailureCode string   `cbor:"materialize_failure_code,omitempty" json:"materialize_failure_code,omitempty"`
+	SchemaVersion          string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite            cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	BatchID                string         `cbor:"batch_id" json:"batch_id"`
+	NodeID                 string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID                  string         `cbor:"log_id,omitempty" json:"log_id,omitempty"`
+	State                  string         `cbor:"state" json:"state"`
+	TreeAlg                string         `cbor:"tree_alg" json:"tree_alg"`
+	TreeSize               uint64         `cbor:"tree_size" json:"tree_size"`
+	BatchRoot              []byte         `cbor:"batch_root" json:"batch_root"`
+	RecordIDs              []string       `cbor:"record_ids" json:"record_ids"`
+	WALRange               WALRange       `cbor:"wal_range" json:"wal_range"`
+	ClosedAtUnixN          int64          `cbor:"closed_at_unix_nano" json:"closed_at_unix_nano"`
+	PreparingAtUnixN       int64          `cbor:"preparing_at_unix_nano,omitempty" json:"preparing_at_unix_nano,omitempty"`
+	PreparedAtUnixN        int64          `cbor:"prepared_at_unix_nano,omitempty" json:"prepared_at_unix_nano,omitempty"`
+	CommittedAtUnixN       int64          `cbor:"committed_at_unix_nano,omitempty" json:"committed_at_unix_nano,omitempty"`
+	MaterializeAttempts    int            `cbor:"materialize_attempts,omitempty" json:"materialize_attempts,omitempty"`
+	MaterializeNextUnixN   int64          `cbor:"materialize_next_unix_nano,omitempty" json:"materialize_next_unix_nano,omitempty"`
+	MaterializeLastError   string         `cbor:"materialize_last_error,omitempty" json:"materialize_last_error,omitempty"`
+	MaterializeFailureCode string         `cbor:"materialize_failure_code,omitempty" json:"materialize_failure_code,omitempty"`
 }
 
 // BatchTreeLeaf is a lightweight projection for browsing a batch Merkle tree.
 // It intentionally stores only the record binding and leaf hash so API callers
 // can page through huge batches without loading full proof bundles.
 type BatchTreeLeaf struct {
-	SchemaVersion  string `cbor:"schema_version" json:"schema_version"`
-	BatchID        string `cbor:"batch_id" json:"batch_id"`
-	RecordID       string `cbor:"record_id" json:"record_id"`
-	LeafIndex      uint64 `cbor:"leaf_index" json:"leaf_index"`
-	LeafHash       []byte `cbor:"leaf_hash" json:"leaf_hash"`
-	CreatedAtUnixN int64  `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
+	SchemaVersion  string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	BatchID        string         `cbor:"batch_id" json:"batch_id"`
+	RecordID       string         `cbor:"record_id" json:"record_id"`
+	LeafIndex      uint64         `cbor:"leaf_index" json:"leaf_index"`
+	LeafHash       []byte         `cbor:"leaf_hash" json:"leaf_hash"`
+	CreatedAtUnixN int64          `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
 }
 
 // BatchTreeNode stores complete Merkle subtrees for one batch. The pair
 // (level,start_index) is ordered for range scans; width is usually 2^level
 // except for right-edge RFC6962 subtrees in non-power-of-two batches.
 type BatchTreeNode struct {
-	SchemaVersion  string `cbor:"schema_version" json:"schema_version"`
-	BatchID        string `cbor:"batch_id" json:"batch_id"`
-	Level          uint64 `cbor:"level" json:"level"`
-	StartIndex     uint64 `cbor:"start_index" json:"start_index"`
-	Width          uint64 `cbor:"width" json:"width"`
-	Hash           []byte `cbor:"hash" json:"hash"`
-	CreatedAtUnixN int64  `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
+	SchemaVersion  string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	BatchID        string         `cbor:"batch_id" json:"batch_id"`
+	Level          uint64         `cbor:"level" json:"level"`
+	StartIndex     uint64         `cbor:"start_index" json:"start_index"`
+	Width          uint64         `cbor:"width" json:"width"`
+	Hash           []byte         `cbor:"hash" json:"hash"`
+	CreatedAtUnixN int64          `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
 }
 
 // GlobalLogLeaf is the append-only global transparency log item for one
 // committed batch. L4 proofs show that a batch leaf is included in a
 // SignedTreeHead.
 type GlobalLogLeaf struct {
-	SchemaVersion      string `cbor:"schema_version" json:"schema_version"`
-	NodeID             string `cbor:"node_id,omitempty" json:"node_id,omitempty"`
-	LogID              string `cbor:"log_id,omitempty" json:"log_id,omitempty"`
-	BatchID            string `cbor:"batch_id" json:"batch_id"`
-	BatchRoot          []byte `cbor:"batch_root" json:"batch_root"`
-	BatchTreeSize      uint64 `cbor:"batch_tree_size" json:"batch_tree_size"`
-	BatchClosedAtUnixN int64  `cbor:"batch_closed_at_unix_nano" json:"batch_closed_at_unix_nano"`
-	LeafIndex          uint64 `cbor:"leaf_index" json:"leaf_index"`
-	LeafHash           []byte `cbor:"leaf_hash" json:"leaf_hash"`
-	AppendedAtUnixN    int64  `cbor:"appended_at_unix_nano" json:"appended_at_unix_nano"`
+	SchemaVersion      string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite        cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	NodeID             string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID              string         `cbor:"log_id,omitempty" json:"log_id,omitempty"`
+	BatchID            string         `cbor:"batch_id" json:"batch_id"`
+	BatchRoot          []byte         `cbor:"batch_root" json:"batch_root"`
+	BatchTreeSize      uint64         `cbor:"batch_tree_size" json:"batch_tree_size"`
+	BatchClosedAtUnixN int64          `cbor:"batch_closed_at_unix_nano" json:"batch_closed_at_unix_nano"`
+	LeafIndex          uint64         `cbor:"leaf_index" json:"leaf_index"`
+	LeafHash           []byte         `cbor:"leaf_hash" json:"leaf_hash"`
+	AppendedAtUnixN    int64          `cbor:"appended_at_unix_nano" json:"appended_at_unix_nano"`
 }
 
 // GlobalLogNode stores the hash for a complete, power-of-two sized subtree
 // in the global log. Nodes make STH append/proof generation read O(log N)
 // indexed hashes instead of rebuilding from every historical leaf.
 type GlobalLogNode struct {
-	SchemaVersion  string `cbor:"schema_version" json:"schema_version"`
-	Level          uint64 `cbor:"level" json:"level"`
-	StartIndex     uint64 `cbor:"start_index" json:"start_index"`
-	Width          uint64 `cbor:"width" json:"width"`
-	Hash           []byte `cbor:"hash" json:"hash"`
-	CreatedAtUnixN int64  `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
+	SchemaVersion  string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	Level          uint64         `cbor:"level" json:"level"`
+	StartIndex     uint64         `cbor:"start_index" json:"start_index"`
+	Width          uint64         `cbor:"width" json:"width"`
+	Hash           []byte         `cbor:"hash" json:"hash"`
+	CreatedAtUnixN int64          `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
 }
 
 // GlobalLogState is the latest append frontier for the global transparency
 // log. Frontier[level] is the root of the rightmost complete subtree of
 // width 2^level when that level is present in TreeSize's binary form.
 type GlobalLogState struct {
-	SchemaVersion  string   `cbor:"schema_version" json:"schema_version"`
-	TreeSize       uint64   `cbor:"tree_size" json:"tree_size"`
-	RootHash       []byte   `cbor:"root_hash,omitempty" json:"root_hash,omitempty"`
-	Frontier       [][]byte `cbor:"frontier" json:"frontier"`
-	UpdatedAtUnixN int64    `cbor:"updated_at_unix_nano" json:"updated_at_unix_nano"`
+	SchemaVersion  string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	TreeSize       uint64         `cbor:"tree_size" json:"tree_size"`
+	RootHash       []byte         `cbor:"root_hash,omitempty" json:"root_hash,omitempty"`
+	Frontier       [][]byte       `cbor:"frontier" json:"frontier"`
+	UpdatedAtUnixN int64          `cbor:"updated_at_unix_nano" json:"updated_at_unix_nano"`
 }
 
 // SignedTreeHead is the global log root after TreeSize leaves. L5 anchors
 // publish this structure's RootHash, never a per-batch root.
 type SignedTreeHead struct {
-	SchemaVersion  string    `cbor:"schema_version" json:"schema_version"`
-	TreeAlg        string    `cbor:"tree_alg" json:"tree_alg"`
-	TreeSize       uint64    `cbor:"tree_size" json:"tree_size"`
-	RootHash       []byte    `cbor:"root_hash" json:"root_hash"`
-	TimestampUnixN int64     `cbor:"timestamp_unix_nano" json:"timestamp_unix_nano"`
-	NodeID         string    `cbor:"node_id,omitempty" json:"node_id,omitempty"`
-	LogID          string    `cbor:"log_id,omitempty" json:"log_id,omitempty"`
-	Signature      Signature `cbor:"signature" json:"signature"`
+	SchemaVersion  string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	TreeAlg        string         `cbor:"tree_alg" json:"tree_alg"`
+	TreeSize       uint64         `cbor:"tree_size" json:"tree_size"`
+	RootHash       []byte         `cbor:"root_hash" json:"root_hash"`
+	TimestampUnixN int64          `cbor:"timestamp_unix_nano" json:"timestamp_unix_nano"`
+	NodeID         string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
+	LogID          string         `cbor:"log_id,omitempty" json:"log_id,omitempty"`
+	Signature      Signature      `cbor:"signature" json:"signature"`
 }
 
 // GlobalLogAppend is the atomic persistence unit for one Global Log append.
@@ -577,6 +603,7 @@ type GlobalConsistencyProof struct {
 // the target STH when callers request historical continuity.
 type GlobalLogProof struct {
 	SchemaVersion string                 `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID         `cbor:"crypto_suite" json:"crypto_suite"`
 	NodeID        string                 `cbor:"node_id,omitempty" json:"node_id,omitempty"`
 	LogID         string                 `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	BatchID       string                 `cbor:"batch_id" json:"batch_id"`
@@ -602,13 +629,14 @@ type GlobalLogEvidence struct {
 // The first implementation stores deterministic CBOR tiles so old proofs can
 // be restored without keeping every hot in-memory node forever.
 type GlobalLogTile struct {
-	SchemaVersion  string   `cbor:"schema_version" json:"schema_version"`
-	Level          uint64   `cbor:"level" json:"level"`
-	StartIndex     uint64   `cbor:"start_index" json:"start_index"`
-	Width          uint64   `cbor:"width" json:"width"`
-	Hashes         [][]byte `cbor:"hashes" json:"hashes"`
-	Compressed     bool     `cbor:"compressed" json:"compressed"`
-	CreatedAtUnixN int64    `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
+	SchemaVersion  string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	Level          uint64         `cbor:"level" json:"level"`
+	StartIndex     uint64         `cbor:"start_index" json:"start_index"`
+	Width          uint64         `cbor:"width" json:"width"`
+	Hashes         [][]byte       `cbor:"hashes" json:"hashes"`
+	Compressed     bool           `cbor:"compressed" json:"compressed"`
+	CreatedAtUnixN int64          `cbor:"created_at_unix_nano" json:"created_at_unix_nano"`
 }
 
 // GlobalLogOutboxItem decouples batch commit from global-log append. A batch
@@ -616,6 +644,7 @@ type GlobalLogTile struct {
 // creates the STH, and coalesces the batch's final STH into anchor state.
 type GlobalLogOutboxItem struct {
 	SchemaVersion    string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite      cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
 	BatchID          string         `cbor:"batch_id" json:"batch_id"`
 	BatchRoot        BatchRoot      `cbor:"batch_root" json:"batch_root"`
 	Status           string         `cbor:"status" json:"status"`
@@ -651,6 +680,7 @@ type ClientKey struct {
 // root. AnchorID identifies the external artefact and Proof is sink-specific.
 type STHAnchorResult struct {
 	SchemaVersion    string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite      cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
 	NodeID           string         `cbor:"node_id,omitempty" json:"node_id,omitempty"`
 	LogID            string         `cbor:"log_id,omitempty" json:"log_id,omitempty"`
 	TreeSize         uint64         `cbor:"tree_size" json:"tree_size"`
@@ -677,6 +707,7 @@ type STHAnchorResultKey struct {
 // different immutable result at the same key.
 type STHAnchorLatestReference struct {
 	SchemaVersion string             `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID     `cbor:"crypto_suite" json:"crypto_suite"`
 	Key           STHAnchorResultKey `cbor:"key" json:"key"`
 	RootHash      []byte             `cbor:"root_hash" json:"root_hash"`
 	AnchorID      string             `cbor:"anchor_id" json:"anchor_id"`
@@ -729,6 +760,7 @@ type STHAnchorAttempt struct {
 // Generation identifies work even while Pending changes concurrently.
 type STHAnchorSchedule struct {
 	SchemaVersion  string               `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite    cryptosuite.ID       `cbor:"crypto_suite" json:"crypto_suite"`
 	Key            STHAnchorScheduleKey `cbor:"key" json:"key"`
 	Revision       uint64               `cbor:"revision" json:"revision"`
 	NextGeneration uint64               `cbor:"next_generation" json:"next_generation"`
@@ -741,6 +773,7 @@ type STHAnchorSchedule struct {
 // record indexes durably promoted to L5 for Key's anchor stream.
 type L5CoverageCheckpoint struct {
 	SchemaVersion   string               `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite     cryptosuite.ID       `cbor:"crypto_suite" json:"crypto_suite"`
 	Key             STHAnchorScheduleKey `cbor:"key" json:"key"`
 	CoveredTreeSize uint64               `cbor:"covered_tree_size" json:"covered_tree_size"`
 	Revision        uint64               `cbor:"revision" json:"revision"`

@@ -24,7 +24,7 @@ func TestReadGlobalLogOutboxItemsBatchGetsSnapshot(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, reads := newMockTiKVDB(t, "global-outbox-read-"+strings.ReplaceAll(test.name, " ", "-")+"/")
-			store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+			store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 			batchIDs := seedGlobalLogOutboxItems(t, store, test.count)
 			reads.resetReadRequests()
 
@@ -61,7 +61,7 @@ func TestReadGlobalLogOutboxItemsBatchGetsSnapshot(t *testing.T) {
 
 func TestReadGlobalLogOutboxItemsPreservesDuplicateOrder(t *testing.T) {
 	db, reads := newMockTiKVDB(t, "global-outbox-duplicate-read/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	batchIDs := seedGlobalLogOutboxItems(t, store, 2)
 	input := []string{batchIDs[1], batchIDs[0], batchIDs[1]}
 	reads.resetReadRequests()
@@ -89,7 +89,7 @@ func TestReadGlobalLogOutboxItemsPreservesDuplicateOrder(t *testing.T) {
 func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 	t.Run("empty batch ID", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-empty-id-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 
 		_, err := store.readGlobalLogOutboxItems(context.Background(), []string{""})
 		if trusterr.CodeOf(err) != trusterr.CodeInvalidArgument {
@@ -102,7 +102,7 @@ func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 
 	t.Run("missing item", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-missing-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, 1)
 		reads.resetReadRequests()
 
@@ -117,7 +117,7 @@ func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 
 	t.Run("malformed item", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-malformed-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, 2)
 		if err := db.Set(globalOutboxKey(batchIDs[1]), []byte{0xff}, syncWrite); err != nil {
 			t.Fatalf("seed malformed outbox item: %v", err)
@@ -138,7 +138,7 @@ func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 
 	t.Run("pre-canceled context", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-pre-canceled-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, 1)
 		reads.resetReadRequests()
 		ctx, cancel := context.WithCancel(context.Background())
@@ -155,7 +155,7 @@ func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 
 	t.Run("canceled later batch get", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-canceled-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, globalOutboxReadBatchSize+1)
 		reads.resetReadRequests()
 		ctx, cancel := context.WithCancel(context.Background())
@@ -184,7 +184,7 @@ func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 
 	t.Run("first chunk missing precedes later cancellation", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-ordered-missing-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, globalOutboxReadBatchSize+1)
 		batchIDs[0] = "batch-missing"
 		reads.resetReadRequests()
@@ -211,7 +211,7 @@ func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 
 	t.Run("first chunk malformed precedes later cancellation", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-ordered-malformed-read/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, globalOutboxReadBatchSize+1)
 		if err := db.Set(globalOutboxKey(batchIDs[0]), []byte{0xff}, syncWrite); err != nil {
 			t.Fatalf("seed malformed outbox item: %v", err)
@@ -245,12 +245,12 @@ func TestReadGlobalLogOutboxItemsFailurePaths(t *testing.T) {
 func TestMarkGlobalLogPublishedBatchValidatesBeforePromotion(t *testing.T) {
 	t.Run("missing item", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-missing-before-promote/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, 1)
 		records := seedPromotionReferences(t, store, batchIDs[0], 1, -1)
 		reads.resetReadRequests()
 
-		err := store.MarkGlobalLogPublishedBatch(context.Background(), []string{batchIDs[0], "batch-missing"}, []model.SignedTreeHead{{TreeSize: 1}, {TreeSize: 2}})
+		err := store.MarkGlobalLogPublishedBatch(context.Background(), []string{batchIDs[0], "batch-missing"}, []model.SignedTreeHead{{CryptoSuite: "INTL_V1", TreeSize: 1}, {CryptoSuite: "INTL_V1", TreeSize: 2}})
 		if trusterr.CodeOf(err) != trusterr.CodeNotFound {
 			t.Fatalf("MarkGlobalLogPublishedBatch error code = %s err=%v, want %s", trusterr.CodeOf(err), err, trusterr.CodeNotFound)
 		}
@@ -259,7 +259,7 @@ func TestMarkGlobalLogPublishedBatchValidatesBeforePromotion(t *testing.T) {
 
 	t.Run("malformed item", func(t *testing.T) {
 		db, reads := newMockTiKVDB(t, "global-outbox-malformed-before-promote/")
-		store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+		store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 		batchIDs := seedGlobalLogOutboxItems(t, store, 2)
 		records := seedPromotionReferences(t, store, batchIDs[0], 1, -1)
 		if err := db.Set(globalOutboxKey(batchIDs[1]), []byte{0xff}, syncWrite); err != nil {
@@ -270,7 +270,7 @@ func TestMarkGlobalLogPublishedBatchValidatesBeforePromotion(t *testing.T) {
 		}
 		reads.resetReadRequests()
 
-		err := store.MarkGlobalLogPublishedBatch(context.Background(), batchIDs, []model.SignedTreeHead{{TreeSize: 1}, {TreeSize: 2}})
+		err := store.MarkGlobalLogPublishedBatch(context.Background(), batchIDs, []model.SignedTreeHead{{CryptoSuite: "INTL_V1", TreeSize: 1}, {CryptoSuite: "INTL_V1", TreeSize: 2}})
 		if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 			t.Fatalf("MarkGlobalLogPublishedBatch error code = %s err=%v, want %s", trusterr.CodeOf(err), err, trusterr.CodeDataLoss)
 		}
@@ -280,11 +280,11 @@ func TestMarkGlobalLogPublishedBatchValidatesBeforePromotion(t *testing.T) {
 
 func TestMarkGlobalLogPublishedBatchBatchesDefaultOutboxReads(t *testing.T) {
 	db, reads := newMockTiKVDB(t, "global-outbox-default-mark/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	batchIDs := seedGlobalLogOutboxItems(t, store, 128)
 	sths := make([]model.SignedTreeHead, len(batchIDs))
 	for index := range sths {
-		sths[index] = model.SignedTreeHead{TreeSize: uint64(index + 1), RootHash: []byte(fmt.Sprintf("root-%03d", index))}
+		sths[index] = model.SignedTreeHead{CryptoSuite: "INTL_V1", TreeSize: uint64(index + 1), RootHash: []byte(fmt.Sprintf("root-%03d", index))}
 	}
 	reads.resetReadRequests()
 
@@ -331,12 +331,12 @@ func assertGlobalOutboxReadFailedBeforePromotion(t *testing.T, store *Store, rea
 
 func TestMarkGlobalLogPublishedBatchPreservesDuplicateLastWrite(t *testing.T) {
 	db, reads := newMockTiKVDB(t, "global-outbox-duplicate-mark/")
-	store := &Store{db: db, recordIndexMode: RecordIndexModeFull}
+	store := &Store{binding: testStoreBinding(), db: db, recordIndexMode: RecordIndexModeFull}
 	batchIDs := seedGlobalLogOutboxItems(t, store, 1)
 	reads.resetReadRequests()
-	wantSTH := model.SignedTreeHead{TreeSize: 2, RootHash: []byte("second")}
+	wantSTH := model.SignedTreeHead{CryptoSuite: "INTL_V1", TreeSize: 2, RootHash: []byte("second")}
 
-	if err := store.MarkGlobalLogPublishedBatch(context.Background(), []string{batchIDs[0], batchIDs[0]}, []model.SignedTreeHead{{TreeSize: 1, RootHash: []byte("first")}, wantSTH}); err != nil {
+	if err := store.MarkGlobalLogPublishedBatch(context.Background(), []string{batchIDs[0], batchIDs[0]}, []model.SignedTreeHead{{CryptoSuite: "INTL_V1", TreeSize: 1, RootHash: []byte("first")}, wantSTH}); err != nil {
 		t.Fatalf("MarkGlobalLogPublishedBatch: %v", err)
 	}
 	if gets := reads.getRequests.Load(); gets != 0 {
@@ -362,10 +362,10 @@ func seedGlobalLogOutboxItems(t *testing.T, store *Store, count int) []string {
 	for index := range count {
 		batchID := fmt.Sprintf("batch-outbox-%06d", index)
 		batchIDs[index] = batchID
-		item := model.GlobalLogOutboxItem{
+		item := model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 			SchemaVersion:   model.SchemaGlobalLogOutbox,
 			BatchID:         batchID,
-			BatchRoot:       model.BatchRoot{BatchID: batchID, TreeSize: uint64(index + 1)},
+			BatchRoot:       model.BatchRoot{CryptoSuite: "INTL_V1", BatchID: batchID, TreeSize: uint64(index + 1)},
 			Status:          model.AnchorStatePending,
 			EnqueuedAtUnixN: int64(index + 1),
 		}

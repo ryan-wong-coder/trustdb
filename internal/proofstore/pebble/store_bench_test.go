@@ -47,13 +47,13 @@ func BenchmarkRecordIndexModeTimeOnly8192(b *testing.B) {
 }
 
 func benchmarkPebblePutBatchArtifacts(b *testing.B, n int, opts Options) {
-	store, err := OpenWithOptions(b.TempDir(), opts)
+	store, err := OpenWithOptions(b.TempDir(), testStoreOptions(opts))
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Close() })
 	bundles := syntheticProofBundles(n)
-	root := model.BatchRoot{
+	root := model.BatchRoot{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "bench-batch",
 		BatchRoot:     bytes.Repeat([]byte{1}, 32),
@@ -91,7 +91,7 @@ func BenchmarkRecordIndexKeyBuild(b *testing.B) {
 }
 
 func BenchmarkPebbleGetBundleV2(b *testing.B) {
-	store, err := Open(b.TempDir())
+	store, err := OpenWithOptions(b.TempDir(), testStoreOptions(Options{}))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func BenchmarkPebbleGetBundleV2(b *testing.B) {
 }
 
 func BenchmarkPebbleEmptyOutboxPoll128(b *testing.B) {
-	store, err := Open(b.TempDir())
+	store, err := OpenWithOptions(b.TempDir(), testStoreOptions(Options{}))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -149,14 +149,14 @@ func BenchmarkPebbleEmptyOutboxPoll128(b *testing.B) {
 }
 
 func BenchmarkPebblePendingGlobalLog128(b *testing.B) {
-	store, err := Open(b.TempDir())
+	store, err := OpenWithOptions(b.TempDir(), testStoreOptions(Options{}))
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
 	for index := range 128 {
-		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{CryptoSuite: "INTL_V1",
 			BatchID:         fmt.Sprintf("batch-%03d", index),
 			EnqueuedAtUnixN: int64(index + 1),
 		}); err != nil {
@@ -180,7 +180,7 @@ func BenchmarkPebblePendingGlobalLog128(b *testing.B) {
 func TestStageSetRecordKeyMatchesKeyBuilders(t *testing.T) {
 	t.Parallel()
 
-	store, err := Open(t.TempDir())
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestEncodeBatchArtifactIntoMatchesWrapper(t *testing.T) {
 func TestStorePutBundleWritesCompressedV2AndRoundTrips(t *testing.T) {
 	t.Parallel()
 
-	store, err := Open(t.TempDir())
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{}))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestDecodeStoredProofBundleRejectsInvalidEnvelopePayloads(t *testing.T) {
 func TestStoreSecondaryRecordIndexesUseRefs(t *testing.T) {
 	t.Parallel()
 
-	store, err := Open(t.TempDir())
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{}))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestStoreSecondaryRecordIndexesUseRefs(t *testing.T) {
 func TestStoreCanDisableStorageTokenIndexes(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeNoStorageTokens})
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeNoStorageTokens}))
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestStoreCanDisableStorageTokenIndexes(t *testing.T) {
 func TestStoreDisablingStorageTokenIndexesRemovesOldTokenKeys(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeFull}))
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestStoreDisablingStorageTokenIndexesRemovesOldTokenKeys(t *testing.T) {
 func TestStoreRecordIndexModeTimeOnlyScansAndFilters(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeTimeOnly})
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeTimeOnly}))
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestStoreRecordIndexModeTimeOnlyScansAndFilters(t *testing.T) {
 func TestStoreBatchArtifactsReplaceOldSecondaryIndexes(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeFull}))
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestStoreBatchArtifactsReplaceOldSecondaryIndexes(t *testing.T) {
 	bundles := syntheticProofBundles(1)
 	bundles[0].SignedClaim.Claim.Content.StorageURI = "bench://tenant/batch-toggle-file-0001"
 	bundles[0].SignedClaim.Claim.Metadata.Custom = map[string]string{"file_name": "batch-toggle-file-0001.txt"}
-	root := model.BatchRoot{
+	root := model.BatchRoot{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       bundles[0].CommittedReceipt.BatchID,
 		BatchRoot:     bundles[0].CommittedReceipt.BatchRoot,
@@ -497,7 +497,7 @@ func TestStoreBatchArtifactsReplaceOldSecondaryIndexes(t *testing.T) {
 func TestStoreBatchIndexesReplaceOldStorageTokenIndexes(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenWithOptions(t.TempDir(), Options{RecordIndexMode: RecordIndexModeFull})
+	store, err := OpenWithOptions(t.TempDir(), testStoreOptions(Options{RecordIndexMode: RecordIndexModeFull}))
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestStoreBatchIndexesReplaceOldStorageTokenIndexes(t *testing.T) {
 	bundle.SignedClaim.Claim.Content.StorageURI = "bench://tenant/batch-index-toggle-file-0001"
 	bundle.SignedClaim.Claim.Metadata.Custom = map[string]string{"file_name": "batch-index-toggle-file-0001.txt"}
 	idx := model.RecordIndexFromBundle(bundle)
-	root := model.BatchRoot{
+	root := model.BatchRoot{CryptoSuite: "INTL_V1",
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       idx.BatchID,
 		BatchRoot:     bundle.CommittedReceipt.BatchRoot,
@@ -558,12 +558,12 @@ func syntheticProofBundles(n int) []model.ProofBundle {
 	bundles := make([]model.ProofBundle, n)
 	for i := range bundles {
 		recordID := fmt.Sprintf("bench-record-%04d", i)
-		bundles[i] = model.ProofBundle{
+		bundles[i] = model.ProofBundle{CryptoSuite: "INTL_V1",
 			SchemaVersion: model.SchemaProofBundle,
 			RecordID:      recordID,
-			SignedClaim: model.SignedClaim{
+			SignedClaim: model.SignedClaim{CryptoSuite: "INTL_V1",
 				SchemaVersion: model.SchemaSignedClaim,
-				Claim: model.ClientClaim{
+				Claim: model.ClientClaim{CryptoSuite: "INTL_V1",
 					SchemaVersion: model.SchemaClientClaim,
 					TenantID:      "bench-tenant",
 					ClientID:      "bench-client",
@@ -577,7 +577,7 @@ func syntheticProofBundles(n int) []model.ProofBundle {
 					Metadata: model.Metadata{EventType: "bench.synthetic"},
 				},
 			},
-			ServerRecord: model.ServerRecord{
+			ServerRecord: model.ServerRecord{CryptoSuite: "INTL_V1",
 				SchemaVersion:   model.SchemaServerRecord,
 				RecordID:        recordID,
 				TenantID:        "bench-tenant",
@@ -586,7 +586,7 @@ func syntheticProofBundles(n int) []model.ProofBundle {
 				ReceivedAtUnixN: int64(1_000 + i),
 				WAL:             model.WALPosition{SegmentID: 1, Offset: int64(i * 512), Sequence: uint64(i + 1)},
 			},
-			CommittedReceipt: model.CommittedReceipt{
+			CommittedReceipt: model.CommittedReceipt{CryptoSuite: "INTL_V1",
 				SchemaVersion: model.SchemaCommittedReceipt,
 				RecordID:      recordID,
 				BatchID:       "bench-batch",

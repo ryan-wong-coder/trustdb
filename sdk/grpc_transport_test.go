@@ -216,7 +216,24 @@ func TestGRPCTransportRemoteStreamTerminationClosesLogStream(t *testing.T) {
 	}
 }
 
-func newBufconnClient(t *testing.T, srv grpcapi.TrustDBServiceServer) *Client {
+func TestGRPCV1ServiceIsNotRegistered(t *testing.T) {
+	t.Parallel()
+
+	conn := newBufconnConnection(t, grpcapi.NewServer(nil, grpcTestBatch{}, nil, nil, nil))
+	var out grpcapi.HealthResponse
+	err := conn.Invoke(
+		context.Background(),
+		"/trustdb.v1.TrustDB/Health",
+		&grpcapi.HealthRequest{},
+		&out,
+		grpc.ForceCodec(grpcapi.Codec()),
+	)
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("legacy service code = %s err=%v, want UNIMPLEMENTED", status.Code(err), err)
+	}
+}
+
+func newBufconnConnection(t *testing.T, srv grpcapi.TrustDBServiceServer) *grpc.ClientConn {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer(
@@ -245,6 +262,12 @@ func newBufconnClient(t *testing.T, srv grpcapi.TrustDBServiceServer) *Client {
 		t.Fatalf("DialContext: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func newBufconnClient(t *testing.T, srv grpcapi.TrustDBServiceServer) *Client {
+	t.Helper()
+	conn := newBufconnConnection(t, srv)
 	client, err := NewClientWithTransport(NewGRPCTransportFromConn("bufnet", conn))
 	if err != nil {
 		t.Fatalf("NewClientWithTransport: %v", err)

@@ -53,6 +53,7 @@ func TestRFC6962SM3BuildProofAndVerifyManySizes(t *testing.T) {
 			records := make([]model.ServerRecord, size)
 			for i := range records {
 				records[i] = record(fmt.Sprintf("sm3-record-%05d", i))
+				records[i].CryptoSuite = cryptosuite.CNSMV1
 			}
 			tree, err := BuildForSuite(cryptosuite.CNSMV1, cryptosuite.MerkleRFC6962SM3, records)
 			if err != nil {
@@ -113,6 +114,7 @@ func TestVerifyForSuiteSM3DoesNotAllocate(t *testing.T) {
 	records := make([]model.ServerRecord, 1024)
 	for i := range records {
 		records[i] = record(fmt.Sprintf("sm3-alloc-%04d", i))
+		records[i].CryptoSuite = cryptosuite.CNSMV1
 	}
 	tree, err := BuildForSuite(cryptosuite.CNSMV1, cryptosuite.MerkleRFC6962SM3, records)
 	if err != nil {
@@ -142,6 +144,9 @@ func TestMerkleProfilesRejectWrongSuiteAndAlgorithm(t *testing.T) {
 	}
 
 	records := []model.ServerRecord{record("suite-a"), record("suite-b"), record("suite-c")}
+	for i := range records {
+		records[i].CryptoSuite = cryptosuite.CNSMV1
+	}
 	tree, err := BuildForSuite(cryptosuite.CNSMV1, cryptosuite.MerkleRFC6962SM3, records)
 	if err != nil {
 		t.Fatal(err)

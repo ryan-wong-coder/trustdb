@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 
-	"github.com/wowtrust/trustdb/internal/globallog"
-	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/spf13/cobra"
+	"github.com/wowtrust/trustdb/internal/globallog"
+	"github.com/wowtrust/trustdb/internal/proofstore"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 func newGlobalLogCommand(rt *runtimeConfig) *cobra.Command {
@@ -35,7 +37,7 @@ func newGlobalLogSTHLatestCommand(rt *runtimeConfig) *cobra.Command {
 		Use:   "latest",
 		Short: "Print the latest global log SignedTreeHead",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -64,7 +66,7 @@ func newGlobalLogSTHGetCommand(rt *runtimeConfig) *cobra.Command {
 			if treeSize == 0 {
 				return usageError("global-log sth get requires --tree-size")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
@@ -104,12 +106,12 @@ func newGlobalLogInclusionCommand(rt *runtimeConfig) *cobra.Command {
 			if batchID == "" {
 				return usageError("global-log proof inclusion requires --batch-id")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
 			defer closeFn()
-			svc, err := globallog.NewReader(store)
+			svc, err := newGlobalLogReaderForStore(store)
 			if err != nil {
 				return err
 			}
@@ -155,12 +157,12 @@ func newGlobalLogConsistencyCommand(rt *runtimeConfig) *cobra.Command {
 			if from == 0 || to == 0 {
 				return usageError("global-log proof consistency requires --from and --to")
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
 			defer closeFn()
-			svc, err := globallog.NewReader(store)
+			svc, err := newGlobalLogReaderForStore(store)
 			if err != nil {
 				return err
 			}
@@ -206,12 +208,12 @@ func newGlobalLogCompactCommand(rt *runtimeConfig) *cobra.Command {
 			if tileSize == 0 {
 				tileSize = rt.cfg.History.TileSize
 			}
-			store, closeFn, err := openProofStoreForCLI(metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
+			store, closeFn, err := openProofStoreForCLI(cmd, rt, metastoreKind, metastorePath, proofDir, rt.cfg.Paths.ProofDir)
 			if err != nil {
 				return err
 			}
 			defer closeFn()
-			svc, err := globallog.NewReader(store)
+			svc, err := newGlobalLogReaderForStore(store)
 			if err != nil {
 				return err
 			}
@@ -228,4 +230,16 @@ func newGlobalLogCompactCommand(rt *runtimeConfig) *cobra.Command {
 	addProofStoreFlags(cmd, &metastoreKind, &metastorePath, &proofDir)
 	cmd.Flags().Uint64Var(&tileSize, "tile-size", 0, "history tile size (default from config)")
 	return cmd
+}
+
+func newGlobalLogReaderForStore(store proofstore.Store) (*globallog.Service, error) {
+	suiteID, err := proofstore.BoundCryptoSuite(store)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := trustcrypto.ProviderForSuite(suiteID)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "open Global Log cryptographic suite", err)
+	}
+	return globallog.NewReaderWithProvider(store, provider)
 }

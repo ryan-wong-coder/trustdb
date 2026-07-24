@@ -43,7 +43,7 @@ onMounted(() => { load(true) })
 
 <template>
   <div class="flex flex-col gap-4 max-w-[1200px] mx-auto">
-    <Card title="存证记录" subtitle="只读列表（经 Admin 代理 GET /v1/records）">
+    <Card title="存证记录" subtitle="只读列表（经 Admin 代理 GET /v2/records）">
       <template #actions>
         <Button size="sm" variant="subtle" :loading="loading" @click="load(true)">
           <RefreshCcw :size="12" /> 刷新

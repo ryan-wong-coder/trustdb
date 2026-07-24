@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/submission"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -79,7 +80,7 @@ func TestRequestCanonicalRoundTripAndGoldenDigest(t *testing.T) {
 		t.Fatal("request encoding is not deterministic")
 	}
 	digest := sha256.Sum256(data)
-	const wantSHA256 = "9e8d6fafd8a56c3e952f13a734c3f7e8a437b10a7cc30a635311c5202259178f"
+	const wantSHA256 = "a6ad82b5e13973dd9fd144e201547f33a39b374681a7b0221a591fe3a5caa062"
 	if gotDigest := hex.EncodeToString(digest[:]); gotDigest != wantSHA256 {
 		t.Fatalf("request CBOR SHA-256 = %s, want %s", gotDigest, wantSHA256)
 	}
@@ -100,7 +101,7 @@ func TestRequestRejectsTamperingUnknownFieldsAndOversize(t *testing.T) {
 	}
 
 	request = mustRequest(t)
-	request.SchemaVersion = "trustdb.nats-ingress-request.v0"
+	request.SchemaVersion = "trustdb.nats-ingress-request.v1"
 	if _, err := EncodeRequest(request); err == nil || !strings.Contains(err.Error(), "unexpected") {
 		t.Fatalf("EncodeRequest schema error = %v", err)
 	}
@@ -206,7 +207,7 @@ func TestResultRejectsWrongSchemaUnknownFieldsAndOversize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result.SchemaVersion = "trustdb.nats-ingress-result.v0"
+	result.SchemaVersion = "trustdb.nats-ingress-result.v1"
 	if _, err := EncodeResult(result); err == nil || !strings.Contains(err.Error(), "unexpected") {
 		t.Fatalf("EncodeResult schema error = %v", err)
 	}
@@ -234,8 +235,10 @@ func TestResultRejectsWrongSchemaUnknownFieldsAndOversize(t *testing.T) {
 func fixtureSignedClaim() model.SignedClaim {
 	return model.SignedClaim{
 		SchemaVersion: model.SchemaSignedClaim,
+		CryptoSuite:   cryptosuite.INTLV1,
 		Claim: model.ClientClaim{
 			SchemaVersion:  model.SchemaClientClaim,
+			CryptoSuite:    cryptosuite.INTLV1,
 			TenantID:       "tenant-a",
 			ClientID:       "client-a",
 			IdempotencyKey: "idem-1",
@@ -275,10 +278,12 @@ func fixtureOutcome() submission.Outcome {
 		BatchEnqueued: true,
 		ServerRecord: model.ServerRecord{
 			SchemaVersion: model.SchemaServerRecord,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      recordID,
 		},
 		AcceptedReceipt: model.AcceptedReceipt{
 			SchemaVersion: model.SchemaAcceptedReceipt,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      recordID,
 			Status:        "accepted",
 		},

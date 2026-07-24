@@ -12,6 +12,7 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -49,7 +50,7 @@ func TestClientSubmitSignedClaim(t *testing.T) {
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/claims" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/claims" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.Header.Get("Content-Type"); got != "application/cbor" {
@@ -107,7 +108,7 @@ func TestLoadBalancedClientFailsOver(t *testing.T) {
 	defer primary.Close()
 
 	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/claims" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/claims" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
 		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
@@ -151,7 +152,7 @@ func TestLoadBalancedClientNilContextDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/claims" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/claims" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
 		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
@@ -193,7 +194,7 @@ func TestClientListRecordsEncodesQuery(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/records" {
+		if r.URL.Path != "/v2/records" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 		query := r.URL.Query()
@@ -243,7 +244,7 @@ func TestClientOperationalEndpoints(t *testing.T) {
 		switch r.URL.Path {
 		case "/healthz":
 			writeJSONForTest(t, w, http.StatusOK, map[string]bool{"ok": true})
-		case "/v1/roots":
+		case "/v2/roots":
 			if r.URL.Query().Get("limit") != "7" || r.URL.Query().Get("direction") != "desc" {
 				t.Fatalf("roots query = %s", r.URL.RawQuery)
 			}
@@ -252,17 +253,17 @@ func TestClientOperationalEndpoints(t *testing.T) {
 				BatchID:       "batch-1",
 				TreeSize:      1,
 			}}, Limit: 7, Direction: "desc", NextCursor: "root-next"})
-		case "/v1/sth":
+		case "/v2/sth":
 			writeJSONForTest(t, w, http.StatusOK, sthsEnvelope{
 				STHs:  []SignedTreeHead{{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 4, RootHash: []byte{4}}},
 				Limit: 5, Direction: "desc", NextCursor: "sth-next",
 			})
-		case "/v1/global-log/leaves":
+		case "/v2/global-log/leaves":
 			writeJSONForTest(t, w, http.StatusOK, globalLeavesEnvelope{
 				Leaves: []model.GlobalLogLeaf{{SchemaVersion: model.SchemaGlobalLogLeaf, BatchID: "batch-1", LeafIndex: 3}},
 				Limit:  5, Direction: "desc", NextCursor: "leaf-next",
 			})
-		case "/v1/anchors/sth":
+		case "/v2/anchors/sth":
 			writeJSONForTest(t, w, http.StatusOK, anchorsEnvelope{
 				Anchors: []anchorEnvelope{{
 					TreeSize:   4,
@@ -272,27 +273,27 @@ func TestClientOperationalEndpoints(t *testing.T) {
 				}},
 				Limit: 5, Direction: "desc", NextCursor: "anchor-next",
 			})
-		case "/v1/anchors/sth/4":
+		case "/v2/anchors/sth/4":
 			writeJSONForTest(t, w, http.StatusOK, anchorEnvelope{
 				TreeSize:   4,
 				Status:     model.AnchorStatePublished,
 				ProofLevel: ProofLevelL5,
 				Result:     &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"},
 			})
-		case "/v1/anchor-systems":
+		case "/v2/anchor-systems":
 			writeJSONForTest(t, w, http.StatusOK, map[string]any{"systems": []model.AnchorSystem{sdkHTTPTestAnchorSystem()}})
-		case "/v1/anchor-systems/chain-a":
+		case "/v2/anchor-systems/chain-a":
 			writeJSONForTest(t, w, http.StatusOK, sdkHTTPTestAnchorSystem())
-		case "/v1/anchor-systems/chain-a/status":
+		case "/v2/anchor-systems/chain-a/status":
 			writeJSONForTest(t, w, http.StatusOK, model.AnchorSystemStatus{SchemaVersion: model.SchemaAnchorSystemStatus, SystemID: "chain-a", State: model.AnchorSystemStateHealthy, ObservedAtUnixN: 1})
-		case "/v1/anchor-systems/chain-a/resources":
+		case "/v2/anchor-systems/chain-a/resources":
 			if r.URL.Query().Get("kind") != model.AnchorResourceKindNode || r.URL.Query().Get("limit") != "5" {
 				t.Fatalf("anchor resources query = %s", r.URL.RawQuery)
 			}
 			writeJSONForTest(t, w, http.StatusOK, model.AnchorSystemResourcePage{Resources: []model.AnchorSystemResource{{SchemaVersion: model.SchemaAnchorSystemResource, SystemID: "chain-a", Kind: model.AnchorResourceKindNode, ResourceID: "node-1", Status: "online"}}, Limit: 5})
-		case "/v1/anchor-systems/chain-a/resources/node/node-1":
+		case "/v2/anchor-systems/chain-a/resources/node/node-1":
 			writeJSONForTest(t, w, http.StatusOK, model.AnchorSystemResource{SchemaVersion: model.SchemaAnchorSystemResource, SystemID: "chain-a", Kind: model.AnchorResourceKindNode, ResourceID: "node-1", Status: "online"})
-		case "/v1/roots/latest":
+		case "/v2/roots/latest":
 			writeJSONForTest(t, w, http.StatusOK, BatchRoot{
 				SchemaVersion: model.SchemaBatchRoot,
 				BatchID:       "batch-latest",
@@ -408,9 +409,9 @@ func TestHTTPTransportRejectsLegacyAnchorQueueEnvelope(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/anchors/sth/4":
+		case "/v2/anchors/sth/4":
 			writeJSONForTest(t, w, http.StatusOK, legacy)
-		case "/v1/anchors/sth":
+		case "/v2/anchors/sth":
 			writeJSONForTest(t, w, http.StatusOK, map[string]any{
 				"anchors": []any{legacy}, "limit": 5, "direction": "desc",
 			})
@@ -502,7 +503,7 @@ func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testi
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/v1/proofs/tr1record":
+		case r.URL.Path == "/v2/proofs/tr1record":
 			writeJSONForTest(t, w, http.StatusOK, proofEnvelope{
 				RecordID:   "tr1record",
 				ProofLevel: ProofLevelL3,
@@ -514,7 +515,7 @@ func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testi
 					},
 				},
 			})
-		case r.URL.Path == "/v1/global-log/evidence/batch-1":
+		case r.URL.Path == "/v2/global-log/evidence/batch-1":
 			writeJSONForTest(t, w, http.StatusNotFound, map[string]string{
 				"code":    string(trusterr.CodeNotFound),
 				"message": "global proof not found",
@@ -529,12 +530,8 @@ func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testi
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	proof, err := client.ExportSingleProof(context.Background(), "tr1record")
-	if err != nil {
-		t.Fatalf("ExportSingleProof: %v", err)
-	}
-	if proof.RecordID != "tr1record" || proof.ProofLevel != ProofLevelL3 || proof.GlobalProof != nil {
-		t.Fatalf("proof = %+v", proof)
+	if _, err := client.ExportSingleProof(context.Background(), "tr1record"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("ExportSingleProof code=%s error=%v, want retired sproof writer rejection", trusterr.CodeOf(err), err)
 	}
 }
 
@@ -542,10 +539,13 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	t.Parallel()
 	bundle := ProofBundle{
 		SchemaVersion: model.SchemaProofBundle,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      "tr1record",
 		NodeID:        "node-1",
 		LogID:         "log-1",
 		CommittedReceipt: CommittedReceipt{
+			SchemaVersion: model.SchemaCommittedReceipt,
+			CryptoSuite:   cryptosuite.INTLV1,
 			BatchID:       "batch-1",
 			BatchRoot:     make([]byte, 32),
 			ClosedAtUnixN: 10,
@@ -554,6 +554,7 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	}
 	leafHash, err := globallog.HashLeaf(model.GlobalLogLeaf{
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		CryptoSuite:        cryptosuite.INTLV1,
 		NodeID:             bundle.NodeID,
 		LogID:              bundle.LogID,
 		BatchID:            bundle.CommittedReceipt.BatchID,
@@ -566,6 +567,7 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	}
 	sth := SignedTreeHead{
 		SchemaVersion: model.SchemaSignedTreeHead,
+		CryptoSuite:   cryptosuite.INTLV1,
 		NodeID:        bundle.NodeID,
 		LogID:         bundle.LogID,
 		TreeSize:      1,
@@ -574,6 +576,7 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	}
 	global := GlobalLogProof{
 		SchemaVersion: model.SchemaGlobalLogProof,
+		CryptoSuite:   cryptosuite.INTLV1,
 		NodeID:        bundle.NodeID,
 		LogID:         bundle.LogID,
 		BatchID:       bundle.CommittedReceipt.BatchID,
@@ -583,6 +586,7 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	}
 	anchored := STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   cryptosuite.INTLV1,
 		NodeID:        bundle.NodeID,
 		LogID:         bundle.LogID,
 		TreeSize:      1,
@@ -596,12 +600,8 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClientWithTransport: %v", err)
 	}
-	proof, err := client.ExportSingleProof(context.Background(), bundle.RecordID)
-	if err != nil {
-		t.Fatalf("ExportSingleProof: %v", err)
-	}
-	if proof.ProofLevel != ProofLevelL5 || proof.GlobalProof == nil || proof.AnchorResult == nil {
-		t.Fatalf("proof=%+v", proof)
+	if _, err := client.ExportSingleProof(context.Background(), bundle.RecordID); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("ExportSingleProof code=%s error=%v, want retired sproof writer rejection", trusterr.CodeOf(err), err)
 	}
 	if transport.bundleCalls.Load() != 1 || transport.evidenceCalls.Load() != 1 {
 		t.Fatalf("calls bundle=%d evidence=%d", transport.bundleCalls.Load(), transport.evidenceCalls.Load())

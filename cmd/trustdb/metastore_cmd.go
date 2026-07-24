@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
@@ -48,7 +49,7 @@ type sthAnchorScheduleLister interface {
 }
 
 func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
-	var fromPath, toPath, toKindStr string
+	var fromPath, toPath, toKindStr, suiteText string
 	var overwrite bool
 	cmd := &cobra.Command{
 		Use:   "migrate",
@@ -64,15 +65,41 @@ func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
 			if toKind == "" {
 				toKind = proofstore.BackendPebble
 			}
+			suiteID := cryptosuite.ID(strings.TrimSpace(suiteText))
+			if suiteID == "" {
+				return usageError("metastore migrate requires --crypto-suite")
+			}
+			if _, err := cryptosuite.RequireKnown(suiteID); err != nil {
+				return trusterr.Wrap(trusterr.CodeInvalidArgument, "validate --crypto-suite", err)
+			}
+			nodeID := strings.TrimSpace(rt.cfg.Server.ID)
+			logID := strings.TrimSpace(rt.cfg.GlobalLog.LogID)
+			if nodeID == "" || logID == "" {
+				return trusterr.New(trusterr.CodeInvalidArgument, "configured server.id and global_log.log_id are required")
+			}
 			ctx := context.Background()
 
-			src, err := proofstore.Open(proofstore.Config{Kind: proofstore.BackendFile, Path: fromPath})
+			src, err := proofstore.Open(proofstore.Config{
+				Kind:        proofstore.BackendFile,
+				Path:        fromPath,
+				CryptoSuite: suiteID,
+				NodeID:      nodeID,
+				LogID:       logID,
+				NamespaceID: proofstoreNamespaceID(string(proofstore.BackendFile), fromPath, "", ""),
+			})
 			if err != nil {
 				return trusterr.Wrap(trusterr.CodeInternal, "open source proofstore", err)
 			}
 			defer func() { _ = src.Close() }()
 
-			dst, err := proofstore.Open(proofstore.Config{Kind: toKind, Path: toPath})
+			dst, err := proofstore.Open(proofstore.Config{
+				Kind:        toKind,
+				Path:        toPath,
+				CryptoSuite: suiteID,
+				NodeID:      nodeID,
+				LogID:       logID,
+				NamespaceID: proofstoreNamespaceID(string(toKind), toPath, "", ""),
+			})
 			if err != nil {
 				return trusterr.Wrap(trusterr.CodeInternal, "open destination proofstore", err)
 			}
@@ -379,6 +406,7 @@ func newMetastoreMigrateCommand(rt *runtimeConfig) *cobra.Command {
 	cmd.Flags().StringVar(&fromPath, "from", "", "source file-backed proof store directory")
 	cmd.Flags().StringVar(&toPath, "to", "", "destination proof store directory")
 	cmd.Flags().StringVar(&toKindStr, "to-kind", "pebble", "destination backend kind: file or pebble (default pebble)")
+	cmd.Flags().StringVar(&suiteText, "crypto-suite", "", "expected source and destination cryptographic suite: INTL_V1 or CN_SM_V1 (required)")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "overwrite existing entries instead of skipping")
 	return cmd
 }

@@ -18,7 +18,7 @@ import (
 func TestLocalStoreSTHAnchorScheduleUsesEncodedTuplePath(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	key := model.STHAnchorScheduleKey{
 		NodeID:   "../node/东京",
 		LogID:    "logs/../../global",
@@ -36,6 +36,9 @@ func TestLocalStoreSTHAnchorScheduleUsesEncodedTuplePath(t *testing.T) {
 	}
 	if strings.HasPrefix(rel, "..") || filepath.Dir(rel) != "." {
 		t.Fatalf("schedule path escaped tuple directory: %q", rel)
+	}
+	if !strings.HasPrefix(filepath.Base(path), "v2_") {
+		t.Fatalf("schedule path %q does not use the v2 key generation", path)
 	}
 	decoded, err := decodeLocalSTHAnchorScheduleFilename(filepath.Base(path))
 	if err != nil {
@@ -58,10 +61,30 @@ func TestLocalStoreSTHAnchorScheduleUsesEncodedTuplePath(t *testing.T) {
 	}
 }
 
+func TestLocalStoreV2ScheduleKeyspaceIgnoresV1Files(t *testing.T) {
+	t.Parallel()
+
+	store := testLocalStore(t.TempDir())
+	if err := os.MkdirAll(store.sthAnchorScheduleDir(), 0o755); err != nil {
+		t.Fatalf("create schedule directory: %v", err)
+	}
+	legacyPath := filepath.Join(store.sthAnchorScheduleDir(), "v1_legacy.tdsth-anchor-schedule")
+	if err := os.WriteFile(legacyPath, []byte{0xa0}, 0o600); err != nil {
+		t.Fatalf("seed v1 schedule: %v", err)
+	}
+	schedules, err := store.ListSTHAnchorSchedules(context.Background())
+	if err != nil {
+		t.Fatalf("ListSTHAnchorSchedules: %v", err)
+	}
+	if len(schedules) != 0 {
+		t.Fatalf("v2 keyspace exposed v1 schedule: %+v", schedules)
+	}
+}
+
 func TestLocalStoreCompleteSTHAnchorAttemptPersistsResultBeforeClear(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	sth := localScheduleSTH(key, 3, 0x33)
 	if _, err := store.UpsertSTHAnchorCandidate(ctx, model.STHAnchorCandidate{
@@ -126,7 +149,7 @@ func TestLocalStorePutSTHAnchorScheduleValidatesRestoreSnapshot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
-	source := LocalStore{Root: filepath.Join(t.TempDir(), "source")}
+	source := testLocalStore(filepath.Join(t.TempDir(), "source"))
 	if _, err := source.UpsertSTHAnchorCandidate(ctx, localScheduleCandidate(key, 1, 0x11, 100, 100)); err != nil {
 		t.Fatalf("UpsertSTHAnchorCandidate: %v", err)
 	}
@@ -138,7 +161,7 @@ func TestLocalStorePutSTHAnchorScheduleValidatesRestoreSnapshot(t *testing.T) {
 		t.Fatalf("GetSTHAnchorSchedule found=%v err=%v", found, err)
 	}
 
-	destination := LocalStore{Root: filepath.Join(t.TempDir(), "destination")}
+	destination := testLocalStore(filepath.Join(t.TempDir(), "destination"))
 	if err := destination.PutSTHAnchorSchedule(ctx, leased); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
 		t.Fatalf("PutSTHAnchorSchedule leased snapshot = %v", err)
 	}
@@ -158,7 +181,7 @@ func TestLocalStorePutSTHAnchorScheduleValidatesRestoreSnapshot(t *testing.T) {
 		t.Fatalf("PutSTHAnchorSchedule conflicting snapshot = %v", err)
 	}
 
-	reconciledDestination := LocalStore{Root: filepath.Join(t.TempDir(), "reconciled-destination")}
+	reconciledDestination := testLocalStore(filepath.Join(t.TempDir(), "reconciled-destination"))
 	result := localScheduleResult(key, restored.InFlight.Target, "anchor-1", 150, []byte("proof"))
 	if err := reconciledDestination.PutSTHAnchorResult(ctx, result); err != nil {
 		t.Fatalf("PutSTHAnchorResult before schedule restore: %v", err)
@@ -175,7 +198,7 @@ func TestLocalStorePutSTHAnchorScheduleValidatesRestoreSnapshot(t *testing.T) {
 func TestLocalStoreSTHAnchorCandidateDoesNotScanResultHistory(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
 	firstSTH := localScheduleSTH(key, 1, 0x11)
 	if err := store.PutSTHAnchorResult(ctx, localScheduleResult(key, firstSTH, "anchor-1", 100, []byte("proof"))); err != nil {
@@ -196,7 +219,7 @@ func TestLocalStoreSTHAnchorCandidateDoesNotScanResultHistory(t *testing.T) {
 func TestLocalStoreSTHAnchorTreeRootRejectsConcurrentSplitViewAcrossSinks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	keys := []model.STHAnchorScheduleKey{
 		{NodeID: "node-1", LogID: "log-1", SinkName: "sink-a"},
 		{NodeID: "node-1", LogID: "log-1", SinkName: "sink-b"},
@@ -239,11 +262,15 @@ func TestLocalStoreL5CoverageCheckpointSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: "file"}
-	first := LocalStore{Root: root}
+	first := testLocalStore(root)
 	if _, err := first.AdvanceL5CoverageCheckpoint(ctx, key, 17, 100); err != nil {
 		t.Fatalf("AdvanceL5CoverageCheckpoint: %v", err)
 	}
-	restarted := LocalStore{Root: root}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+	restarted := testLocalStore(root)
+	defer restarted.Close()
 	checkpoint, found, err := restarted.GetL5CoverageCheckpoint(ctx, key)
 	if err != nil || !found || checkpoint.CoveredTreeSize != 17 || checkpoint.Revision != 1 {
 		t.Fatalf("restarted checkpoint=%+v found=%v err=%v", checkpoint, found, err)
@@ -257,7 +284,7 @@ func localScheduleCandidate(key model.STHAnchorScheduleKey, treeSize uint64, see
 }
 
 func localScheduleSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byte) model.SignedTreeHead {
-	return model.SignedTreeHead{
+	return model.SignedTreeHead{CryptoSuite: "INTL_V1",
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       treeSize,
@@ -274,7 +301,7 @@ func localScheduleSTH(key model.STHAnchorScheduleKey, treeSize uint64, seed byte
 }
 
 func localScheduleResult(key model.STHAnchorScheduleKey, sth model.SignedTreeHead, anchorID string, publishedAt int64, proof []byte) model.STHAnchorResult {
-	return model.STHAnchorResult{
+	return model.STHAnchorResult{CryptoSuite: "INTL_V1",
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           key.NodeID,
 		LogID:            key.LogID,

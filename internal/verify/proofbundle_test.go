@@ -11,9 +11,9 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -57,7 +57,13 @@ func newProofBundleFixture(t *testing.T) proofBundleFixture {
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	w, err := wal.OpenWriter(filepath.Join(t.TempDir(), "000000000001.wal"), 1)
+	walPath := filepath.Join(t.TempDir(), "000000000001.wal")
+	w, err := wal.OpenWriterWithOptions(walPath, 1, wal.Options{
+		CryptoSuite: cryptosuite.INTLV1,
+		NodeID:      "server-a",
+		LogID:       "log-a",
+		NamespaceID: "wal:" + walPath,
+	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
 	}
@@ -100,7 +106,7 @@ func newProofBundleFixture(t *testing.T) proofBundleFixture {
 func globalProofForBundle(t *testing.T, f proofBundleFixture) model.GlobalLogProof {
 	t.Helper()
 	ctx := context.Background()
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc, err := globallog.New(globallog.Options{
 		Store:  store,
 		NodeID: f.bundle.NodeID,
@@ -113,6 +119,7 @@ func globalProofForBundle(t *testing.T, f proofBundleFixture) model.GlobalLogPro
 	}
 	sth, err := svc.AppendBatchRoot(ctx, model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
+		CryptoSuite:   cryptosuite.INTLV1,
 		NodeID:        f.bundle.NodeID,
 		LogID:         f.bundle.LogID,
 		BatchID:       f.bundle.CommittedReceipt.BatchID,

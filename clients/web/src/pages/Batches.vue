@@ -34,7 +34,7 @@ onMounted(() => load(true))
 
 <template>
   <div class="flex flex-col gap-4 max-w-[1200px] mx-auto">
-    <Card title="历史批次" subtitle="GET /v1/batches，按 cursor 分页读取 batch roots">
+    <Card title="历史批次" subtitle="GET /v2/batches，按 cursor 分页读取 batch roots">
       <template #actions>
         <Button size="sm" variant="subtle" :loading="loading" @click="load(true)">
           <RefreshCcw :size="12" /> 刷新

@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/asn1"
 	"encoding/hex"
-	"errors"
 	"math/big"
 	"sync"
 	"testing"
@@ -105,8 +104,12 @@ func TestSM2SoftwareSignerUsesCanonicalSuitePolicy(t *testing.T) {
 	if err := VerifySignatureForSuite(context.Background(), cryptosuite.CNSMV1, descriptor, message, signature); err != nil {
 		t.Fatalf("Verify() generated signature error = %v", err)
 	}
-	if _, err := Sign(context.Background(), cryptosuite.CNSMV1, signer, message); !errors.Is(err, cryptosuite.ErrUnavailableSuite) {
-		t.Fatalf("production Sign() error = %v, want unavailable suite", err)
+	productionSignature, err := Sign(context.Background(), cryptosuite.CNSMV1, signer, message)
+	if err != nil {
+		t.Fatalf("production Sign() error = %v", err)
+	}
+	if err := VerifySignatureForSuite(context.Background(), cryptosuite.CNSMV1, descriptor, message, productionSignature); err != nil {
+		t.Fatalf("Verify() production signature error = %v", err)
 	}
 
 	privateKey, err := sm2.NewPrivateKey(privateBytes)

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
-	"github.com/wowtrust/trustdb/internal/proofstore"
 )
 
 func TestExamplePluginExecutablePublishAndVerify(t *testing.T) {
@@ -40,6 +40,7 @@ func TestExamplePluginExecutablePublishAndVerify(t *testing.T) {
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "log-1", SinkName: sink.Name()}
 	sth := model.SignedTreeHead{
 		SchemaVersion:  model.SchemaSignedTreeHead,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       3,
 		RootHash:       bytes.Repeat([]byte{0x61}, 32),
@@ -50,7 +51,7 @@ func TestExamplePluginExecutablePublishAndVerify(t *testing.T) {
 			Alg: model.DefaultSignatureAlg, KeyID: "server-key", Signature: bytes.Repeat([]byte{0x22}, 64),
 		},
 	}
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	offer(t, store, key, sth, 100, 100)
 	now := time.Unix(0, 100)
 	service := newTestService(t, store, sink, key, &now, nil)

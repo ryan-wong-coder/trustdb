@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
@@ -15,6 +16,7 @@ func TestSignCommittedPreservesDomainEncoding(t *testing.T) {
 	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
 	receipt := model.CommittedReceipt{
 		SchemaVersion: model.SchemaCommittedReceipt,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      "record-1",
 		Status:        "committed",
 		BatchID:       "batch-1",

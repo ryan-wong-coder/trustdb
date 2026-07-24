@@ -561,7 +561,7 @@ func rejectionIdentity(stream string, streamSequence uint64, subject, reply stri
 		parts = append(parts, key)
 		parts = append(parts, headers[key]...)
 	}
-	return digestIdentity("tnj1", "trustdb.nats-rejection.v1", parts...)
+	return digestIdentity(rejectionPrefix, rejectionDomain, parts...)
 }
 
 func cloneHeader(source nats.Header) nats.Header {

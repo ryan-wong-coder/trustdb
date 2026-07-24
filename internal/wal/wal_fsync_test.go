@@ -65,7 +65,7 @@ func openManualGroupWriter(t *testing.T, options Options) (*Writer, *manualTimer
 	if options.GroupCommitInterval == 0 {
 		options.GroupCommitInterval = time.Hour
 	}
-	writer, err := OpenWriterWithOptions(filepath.Join(t.TempDir(), "records.wal"), 1, options)
+	writer, err := OpenWriterWithOptions(filepath.Join(t.TempDir(), "records.wal"), 1, testWALOptions(options))
 	if err != nil {
 		t.Fatalf("OpenWriterWithOptions() error = %v", err)
 	}
@@ -153,10 +153,11 @@ func TestGroupFsyncFlushesIdleTailAndCoalescesAppends(t *testing.T) {
 
 func TestGroupFsyncRotationInvalidatesOldTimer(t *testing.T) {
 	dir := t.TempDir()
-	writer, err := OpenDirWriter(dir, Options{
+	writer, err := OpenDirWriter(dir, testWALOptions(Options{
 		FsyncMode:           FsyncGroup,
 		GroupCommitInterval: time.Hour,
-	})
+	}))
+
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -297,10 +298,11 @@ func TestGroupFsyncBackgroundErrorIsSticky(t *testing.T) {
 
 func TestGroupFsyncRotationOpenFailureClearsClosedFile(t *testing.T) {
 	dir := t.TempDir()
-	writer, err := OpenDirWriter(dir, Options{
+	writer, err := OpenDirWriter(dir, testWALOptions(Options{
 		FsyncMode:           FsyncGroup,
 		GroupCommitInterval: time.Hour,
-	})
+	}))
+
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -351,10 +353,11 @@ func TestGroupFsyncRotationOpenFailureClearsClosedFile(t *testing.T) {
 
 func TestGroupFsyncRotationCloseFailureClearsFileAndStaysSticky(t *testing.T) {
 	sentinel := errors.New("injected close failure")
-	writer, err := OpenDirWriter(t.TempDir(), Options{
+	writer, err := OpenDirWriter(t.TempDir(), testWALOptions(Options{
 		FsyncMode:           FsyncGroup,
 		GroupCommitInterval: time.Hour,
-	})
+	}))
+
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -418,12 +421,13 @@ func TestStrictAndBatchFsyncSemanticsRemainUnchanged(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var observed atomic.Int64
-			writer, err := OpenWriterWithOptions(filepath.Join(t.TempDir(), "records.wal"), 1, Options{
+			writer, err := OpenWriterWithOptions(filepath.Join(t.TempDir(), "records.wal"), 1, testWALOptions(Options{
 				FsyncMode: test.mode,
 				OnFsync: func(string, time.Duration) {
 					observed.Add(1)
 				},
-			})
+			}))
+
 			if err != nil {
 				t.Fatalf("OpenWriterWithOptions() error = %v", err)
 			}
@@ -464,7 +468,7 @@ func TestStrictAndBatchFsyncSemanticsRemainUnchanged(t *testing.T) {
 func TestCloseReportsFinalFsyncFailureOnce(t *testing.T) {
 	sentinel := errors.New("injected final fsync failure")
 	var reported atomic.Int64
-	writer, err := OpenWriterWithOptions(filepath.Join(t.TempDir(), "records.wal"), 1, Options{
+	writer, err := OpenWriterWithOptions(filepath.Join(t.TempDir(), "records.wal"), 1, testWALOptions(Options{
 		FsyncMode: FsyncBatch,
 		OnFsyncError: func(mode string, err error) {
 			if mode != FsyncBatch || !errors.Is(err, sentinel) {
@@ -472,7 +476,8 @@ func TestCloseReportsFinalFsyncFailureOnce(t *testing.T) {
 			}
 			reported.Add(1)
 		},
-	})
+	}))
+
 	if err != nil {
 		t.Fatalf("OpenWriterWithOptions() error = %v", err)
 	}

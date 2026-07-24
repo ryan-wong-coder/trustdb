@@ -155,6 +155,9 @@ func (e LocalEngine) MarkIdempotencyCommitted(identity model.IdempotencyIdentity
 }
 
 func (e LocalEngine) ReplayAccepted(ctx context.Context, record wal.Record) (ReplayedAccepted, error) {
+	if err := cryptosuite.RequireSame(e.cryptoProvider().Suite(), record.CryptoSuite); err != nil {
+		return ReplayedAccepted{}, trusterr.Wrap(trusterr.CodeDataLoss, "WAL record crypto_suite does not match server", err)
+	}
 	var signed model.SignedClaim
 	if err := cborx.UnmarshalLimit(record.Payload, &signed, len(record.Payload)); err != nil {
 		return ReplayedAccepted{}, err
@@ -190,6 +193,9 @@ func (e LocalEngine) validateSigned(ctx context.Context, signed model.SignedClai
 	if err != nil {
 		return claim.Verified{}, "", nil, nil, err
 	}
+	if err := cryptosuite.RequireSame(suite.ID, signed.CryptoSuite, signed.Claim.CryptoSuite); err != nil {
+		return claim.Verified{}, "", nil, nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "signed claim crypto_suite does not match server", err)
+	}
 	clientPub, keyStatus, err := e.resolveClientKey(signed, receivedAt)
 	if err != nil {
 		return claim.Verified{}, "", nil, nil, err
@@ -221,6 +227,7 @@ func (e LocalEngine) buildAccepted(
 ) (model.ServerRecord, model.AcceptedReceipt, error) {
 	record := model.ServerRecord{
 		SchemaVersion:       model.SchemaServerRecord,
+		CryptoSuite:         e.cryptoProvider().Suite(),
 		RecordID:            verified.RecordID,
 		TenantID:            signed.Claim.TenantID,
 		ClientID:            signed.Claim.ClientID,
@@ -238,6 +245,7 @@ func (e LocalEngine) buildAccepted(
 	}
 	accepted := model.AcceptedReceipt{
 		SchemaVersion:   model.SchemaAcceptedReceipt,
+		CryptoSuite:     e.cryptoProvider().Suite(),
 		RecordID:        record.RecordID,
 		Status:          "accepted",
 		ServerID:        e.ServerID,
@@ -313,6 +321,17 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 	if err != nil {
 		return model.BatchCommit{}, err
 	}
+	for i := range records {
+		if err := cryptosuite.RequireSame(
+			suite.ID,
+			signed[i].CryptoSuite,
+			signed[i].Claim.CryptoSuite,
+			records[i].CryptoSuite,
+			accepted[i].CryptoSuite,
+		); err != nil {
+			return model.BatchCommit{}, trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("batch item %d mixes cryptographic suites", i), err)
+		}
+	}
 	tree, err := merkle.BuildForSuite(suite.ID, suite.Merkle.Algorithm, records)
 	if err != nil {
 		return model.BatchCommit{}, err
@@ -326,6 +345,7 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 		TreeAlg: suite.Merkle.Algorithm,
 		Root: model.BatchRoot{
 			SchemaVersion: model.SchemaBatchRoot,
+			CryptoSuite:   suite.ID,
 			BatchID:       batchID,
 			NodeID:        e.ServerID,
 			LogID:         e.LogID,
@@ -347,7 +367,7 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 		)
 	}
 	if opts.IncludeTree {
-		result.Tree = compactBatchTree(batchID, closedAt.UnixNano(), records, tree)
+		result.Tree = compactBatchTree(suite.ID, batchID, closedAt.UnixNano(), records, tree)
 	}
 	if !materialized {
 		return result, nil
@@ -383,6 +403,7 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 				}
 				committed := model.CommittedReceipt{
 					SchemaVersion: model.SchemaCommittedReceipt,
+					CryptoSuite:   suite.ID,
 					RecordID:      records[i].RecordID,
 					Status:        "committed",
 					BatchID:       batchID,
@@ -400,6 +421,7 @@ func (e LocalEngine) ComputeBatch(ctx context.Context, batchID string, closedAt 
 				}
 				result.Bundles[i] = model.ProofBundle{
 					SchemaVersion:    model.SchemaProofBundle,
+					CryptoSuite:      suite.ID,
 					RecordID:         records[i].RecordID,
 					NodeID:           e.ServerID,
 					LogID:            e.LogID,
@@ -453,7 +475,7 @@ func (e LocalEngine) proofWorkerCount(records int) int {
 	return workers
 }
 
-func compactBatchTree(batchID string, createdAtUnixN int64, records []model.ServerRecord, tree merkle.Tree) model.BatchTreeSnapshot {
+func compactBatchTree(suiteID cryptosuite.ID, batchID string, createdAtUnixN int64, records []model.ServerRecord, tree merkle.Tree) model.BatchTreeSnapshot {
 	recordIDs := make([]string, len(records))
 	for i := range records {
 		recordIDs[i] = records[i].RecordID
@@ -476,6 +498,7 @@ func compactBatchTree(batchID string, createdAtUnixN int64, records []model.Serv
 		}
 	}
 	return model.BatchTreeSnapshot{
+		CryptoSuite:    suiteID,
 		BatchID:        batchID,
 		CreatedAtUnixN: createdAtUnixN,
 		RecordIDs:      recordIDs,

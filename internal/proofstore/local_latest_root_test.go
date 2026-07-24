@@ -13,12 +13,12 @@ import (
 func TestLocalStoreLatestRootReferencePreservesMaximum(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
 	for _, root := range []model.BatchRoot{
-		{BatchID: "batch-b", ClosedAtUnixN: 300},
-		{BatchID: "batch-c", ClosedAtUnixN: 200},
-		{BatchID: "batch-a", ClosedAtUnixN: 300},
+		{CryptoSuite: "INTL_V1", BatchID: "batch-b", ClosedAtUnixN: 300},
+		{CryptoSuite: "INTL_V1", BatchID: "batch-c", ClosedAtUnixN: 200},
+		{CryptoSuite: "INTL_V1", BatchID: "batch-a", ClosedAtUnixN: 300},
 	} {
 		if err := store.PutRoot(ctx, root); err != nil {
 			t.Fatalf("PutRoot(%q): %v", root.BatchID, err)
@@ -33,9 +33,9 @@ func TestLocalStoreLatestRootReferencePreservesMaximum(t *testing.T) {
 func TestLocalStoreLatestRootFallsBackAcrossInterruptedPublication(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
-	previous := model.BatchRoot{BatchID: "batch-previous", ClosedAtUnixN: 100}
+	previous := model.BatchRoot{CryptoSuite: "INTL_V1", BatchID: "batch-previous", ClosedAtUnixN: 100}
 	if err := store.PutRoot(ctx, previous); err != nil {
 		t.Fatalf("PutRoot previous: %v", err)
 	}
@@ -59,9 +59,9 @@ func TestLocalStoreLatestRootFallsBackAcrossInterruptedPublication(t *testing.T)
 func TestLocalStoreLatestRootRebuildsMissingAndCorruptReference(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
-	for _, root := range []model.BatchRoot{{BatchID: "batch-1", ClosedAtUnixN: 100}, {BatchID: "batch-2", ClosedAtUnixN: 200}} {
+	for _, root := range []model.BatchRoot{{CryptoSuite: "INTL_V1", BatchID: "batch-1", ClosedAtUnixN: 100}, {CryptoSuite: "INTL_V1", BatchID: "batch-2", ClosedAtUnixN: 200}} {
 		if err := store.PutRoot(ctx, root); err != nil {
 			t.Fatalf("PutRoot(%q): %v", root.BatchID, err)
 		}
@@ -85,9 +85,9 @@ func TestLocalStoreLatestRootRebuildsMissingAndCorruptReference(t *testing.T) {
 func TestLocalStoreLatestRootRejectsCanonicalMismatch(t *testing.T) {
 	t.Parallel()
 
-	store := LocalStore{Root: t.TempDir()}
+	store := testLocalStore(t.TempDir())
 	ctx := context.Background()
-	root := model.BatchRoot{BatchID: "batch-1", ClosedAtUnixN: 100}
+	root := model.BatchRoot{CryptoSuite: "INTL_V1", BatchID: "batch-1", ClosedAtUnixN: 100}
 	if err := store.PutRoot(ctx, root); err != nil {
 		t.Fatalf("PutRoot: %v", err)
 	}

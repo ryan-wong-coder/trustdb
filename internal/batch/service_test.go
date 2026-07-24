@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
@@ -21,8 +22,8 @@ const asyncProofWaitTimeout = 10 * time.Second
 func TestServiceCommitsFullBatch(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
-	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 2, MaxDelay: time.Hour}, nil)
+	store := newBoundTestLocalStore(t, t.TempDir())
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 2, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	if err := svc.Enqueue(context.Background(), signed("tr1a"), record("tr1a"), accepted("tr1a")); err != nil {
@@ -58,12 +59,13 @@ func TestServiceRecordStatusMovesFromProcessingToCommitted(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	changes := make(chan []model.RecordStatus, 8)
 	svc := New(blockingEngine{block: block, entered: entered}, store, Options{
-		QueueSize:  1,
-		MaxRecords: 1,
-		MaxDelay:   time.Hour,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   1,
+		MaxRecords:  1,
+		MaxDelay:    time.Hour,
 		OnRecordStatusesChanged: func(statuses []model.RecordStatus) {
 			changes <- append([]model.RecordStatus(nil), statuses...)
 		},
@@ -110,8 +112,8 @@ func TestServiceRecordStatusMovesFromProcessingToCommitted(t *testing.T) {
 func TestServiceShutdownFlushesPartialBatch(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
-	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 10, MaxDelay: time.Hour}, nil)
+	store := newBoundTestLocalStore(t, t.TempDir())
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 10, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1partial"), record("tr1partial"), accepted("tr1partial")); err != nil {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
@@ -132,7 +134,7 @@ func TestServiceBlocksWhenQueueIsFullUntilCapacityIsAvailable(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	svc := New(blockingEngine{block: block, entered: entered}, proofstore.LocalStore{Root: t.TempDir()}, Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := New(blockingEngine{block: block, entered: entered}, newBoundTestLocalStore(t, t.TempDir()), Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1a"), record("tr1a"), accepted("tr1a")); err != nil {
 		t.Fatalf("Enqueue(a) error = %v", err)
 	}
@@ -170,7 +172,7 @@ func TestServiceFullQueueWaitHonorsCancellation(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	svc := New(blockingEngine{block: block, entered: entered}, proofstore.LocalStore{Root: t.TempDir()}, Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := New(blockingEngine{block: block, entered: entered}, newBoundTestLocalStore(t, t.TempDir()), Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1a"), record("tr1a"), accepted("tr1a")); err != nil {
 		t.Fatalf("Enqueue(a) error = %v", err)
 	}
@@ -210,7 +212,7 @@ func TestServiceShutdownWakesFullQueueWaiters(t *testing.T) {
 
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	svc := New(blockingEngine{block: block, entered: entered}, proofstore.LocalStore{Root: t.TempDir()}, Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := New(blockingEngine{block: block, entered: entered}, newBoundTestLocalStore(t, t.TempDir()), Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed("tr1a"), record("tr1a"), accepted("tr1a")); err != nil {
 		t.Fatalf("Enqueue(a) error = %v", err)
 	}
@@ -257,8 +259,8 @@ func TestServiceShutdownWakesFullQueueWaiters(t *testing.T) {
 func TestServiceAdvancesCheckpointAfterCommit(t *testing.T) {
 	t.Parallel()
 
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
-	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 2, MaxDelay: time.Hour}, nil)
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 2, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	if err := svc.Enqueue(context.Background(), signed("rec-1"), recordWithWAL("rec-1", 1), accepted("rec-1")); err != nil {
@@ -283,9 +285,10 @@ func TestServiceAdvancesCheckpointAfterCommit(t *testing.T) {
 func TestServiceCheckpointMonotonic(t *testing.T) {
 	t.Parallel()
 
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
+		CryptoSuite:   cryptosuite.INTLV1,
 		SegmentID:     1,
 		LastSequence:  98,
 		LastOffset:    98 * 128,
@@ -293,7 +296,7 @@ func TestServiceCheckpointMonotonic(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PutCheckpoint(seed) error = %v", err)
 	}
-	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	if err := svc.Enqueue(context.Background(), signed("rec-high"), recordWithWAL("rec-high", 99), accepted("rec-high")); err != nil {
@@ -329,8 +332,8 @@ func TestServiceCheckpointMonotonic(t *testing.T) {
 func TestServiceSkipsCheckpointOnZeroSequence(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
-	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	store := newBoundTestLocalStore(t, t.TempDir())
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	if err := svc.Enqueue(context.Background(), signed("rec"), record("rec"), accepted("rec")); err != nil {
@@ -354,8 +357,8 @@ func TestServiceUpdatesCheckpointGauge(t *testing.T) {
 	t.Parallel()
 
 	_, metrics := observability.NewRegistry()
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
-	svc := New(fakeEngine{}, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, metrics)
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour}, metrics)
 	defer svc.Shutdown(context.Background())
 
 	if err := svc.Enqueue(context.Background(), signed("rec-gauge"), recordWithWAL("rec-gauge", 1), accepted("rec-gauge")); err != nil {
@@ -391,11 +394,12 @@ func TestServiceInvokesOnCheckpointAdvanced(t *testing.T) {
 		hookCPs  []model.WALCheckpoint
 		hookFire = make(chan struct{}, 8)
 	)
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	svc := New(fakeEngine{}, store, Options{
-		QueueSize:  4,
-		MaxRecords: 1,
-		MaxDelay:   time.Hour,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   4,
+		MaxRecords:  1,
+		MaxDelay:    time.Hour,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			hookMu.Lock()
 			hookCPs = append(hookCPs, cp)
@@ -440,11 +444,11 @@ func TestServiceInvokesOnCheckpointAdvanced(t *testing.T) {
 
 func TestServiceKeepsWorkerCheckpointFailureVisible(t *testing.T) {
 	store := &checkpointRecordingStore{
-		LocalStore: proofstore.LocalStore{Root: t.TempDir()},
+		LocalStore: newBoundTestLocalStore(t, t.TempDir()),
 		failPuts:   1,
 	}
 	_, metrics := observability.NewRegistry()
-	svc := New(fakeEngine{}, store, Options{QueueSize: 2, MaxRecords: 1, MaxDelay: time.Hour}, metrics)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 2, MaxRecords: 1, MaxDelay: time.Hour}, metrics)
 	defer svc.Shutdown(context.Background())
 
 	if err := svc.Enqueue(context.Background(), signed("checkpoint-error"), recordWithWAL("checkpoint-error", 1), accepted("checkpoint-error")); err != nil {
@@ -486,8 +490,8 @@ func TestServiceAsyncProofModePublishesIndexBeforeBundle(t *testing.T) {
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	engine := blockingMaterializeEngine{block: block, entered: entered}
-	store := proofstore.LocalStore{Root: t.TempDir()}
-	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync}, nil)
+	store := newBoundTestLocalStore(t, t.TempDir())
+	svc := New(engine, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync}, nil)
 	defer func() {
 		close(block)
 		_ = svc.Shutdown(context.Background())
@@ -524,12 +528,13 @@ func TestServiceAsyncProofModePublishesIndexBeforeBundle(t *testing.T) {
 func TestServiceNonInlineFallbackRejectsInconsistentProofCount(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(emptyBundleEngine{}, store, Options{
-		QueueSize:  4,
-		MaxRecords: 1,
-		MaxDelay:   time.Hour,
-		ProofMode:  ProofModeAsync,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   4,
+		MaxRecords:  1,
+		MaxDelay:    time.Hour,
+		ProofMode:   ProofModeAsync,
 	}, nil)
 	defer svc.Shutdown(context.Background())
 
@@ -553,8 +558,8 @@ func TestServiceOnDemandProofModeMaterializesOnce(t *testing.T) {
 	t.Parallel()
 
 	engine := &countingMaterializeEngine{}
-	store := proofstore.LocalStore{Root: t.TempDir()}
-	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeOnDemand}, nil)
+	store := newBoundTestLocalStore(t, t.TempDir())
+	svc := New(engine, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeOnDemand}, nil)
 	defer svc.Shutdown(context.Background())
 
 	if err := svc.Enqueue(context.Background(), signed("ondemand-rec"), recordWithWAL("ondemand-rec", 41), accepted("ondemand-rec")); err != nil {
@@ -590,7 +595,7 @@ func TestServiceOnDemandRecoverManifestKeepsBundleLazy(t *testing.T) {
 
 	items := []Accepted{{Signed: signed("recover-ondemand"), Record: recordWithWAL("recover-ondemand", 51), Accepted: accepted("recover-ondemand")}}
 	engine := &countingMaterializeEngine{}
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	closedAt := time.Unix(0, 1234).UTC()
 	root, indexes, err := engine.CommitBatchIndexes("recover-batch", closedAt, []model.SignedClaim{items[0].Signed}, []model.ServerRecord{items[0].Record}, []model.AcceptedReceipt{items[0].Accepted})
 	if err != nil {
@@ -598,6 +603,7 @@ func TestServiceOnDemandRecoverManifestKeepsBundleLazy(t *testing.T) {
 	}
 	manifest := model.BatchManifest{
 		SchemaVersion:   model.SchemaBatchManifest,
+		CryptoSuite:     cryptosuite.INTLV1,
 		BatchID:         "recover-batch",
 		State:           model.BatchStatePrepared,
 		TreeAlg:         model.DefaultMerkleTreeAlg,
@@ -616,10 +622,11 @@ func TestServiceOnDemandRecoverManifestKeepsBundleLazy(t *testing.T) {
 	}
 
 	svc := New(engine, store, Options{
-		QueueSize:  4,
-		MaxRecords: 1,
-		MaxDelay:   time.Hour,
-		ProofMode:  ProofModeOnDemand,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   4,
+		MaxRecords:  1,
+		MaxDelay:    time.Hour,
+		ProofMode:   ProofModeOnDemand,
 		LoadBatchItems: func(context.Context, model.BatchManifest) ([]Accepted, error) {
 			return cloneAcceptedItems(items), nil
 		},
@@ -791,12 +798,14 @@ func (fakeEngine) CommitBatch(batchID string, closedAt time.Time, signed []model
 		}
 		out[i] = model.ProofBundle{
 			SchemaVersion:   model.SchemaProofBundle,
+			CryptoSuite:     cryptosuite.INTLV1,
 			RecordID:        records[i].RecordID,
 			SignedClaim:     signed[i],
 			ServerRecord:    records[i],
 			AcceptedReceipt: accepted[i],
 			CommittedReceipt: model.CommittedReceipt{
 				SchemaVersion: model.SchemaCommittedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      records[i].RecordID,
 				Status:        "committed",
 				BatchID:       batchID,
@@ -890,23 +899,32 @@ func (e *countingMaterializeEngine) CommitCount() int {
 }
 
 func signed(recordID string) model.SignedClaim {
-	return model.SignedClaim{SchemaVersion: model.SchemaSignedClaim, Claim: model.ClientClaim{IdempotencyKey: recordID}}
+	return model.SignedClaim{
+		SchemaVersion: model.SchemaSignedClaim,
+		CryptoSuite:   cryptosuite.INTLV1,
+		Claim: model.ClientClaim{
+			SchemaVersion:  model.SchemaClientClaim,
+			CryptoSuite:    cryptosuite.INTLV1,
+			IdempotencyKey: recordID,
+		},
+	}
 }
 
 func record(recordID string) model.ServerRecord {
-	return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, RecordID: recordID}
+	return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, CryptoSuite: cryptosuite.INTLV1, RecordID: recordID}
 }
 
 func recordWithWAL(recordID string, seq uint64) model.ServerRecord {
 	return model.ServerRecord{
 		SchemaVersion: model.SchemaServerRecord,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      recordID,
 		WAL:           model.WALPosition{SegmentID: 1, Offset: int64(seq) * 128, Sequence: seq},
 	}
 }
 
 func accepted(recordID string) model.AcceptedReceipt {
-	return model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, RecordID: recordID, Status: "accepted"}
+	return model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, CryptoSuite: cryptosuite.INTLV1, RecordID: recordID, Status: "accepted"}
 }
 
 // TestServiceInitialSeqResumesSuffix locks in the cross-restart fix
@@ -916,12 +934,13 @@ func accepted(recordID string) model.AcceptedReceipt {
 func TestServiceInitialSeqResumesSuffix(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(fakeEngine{}, store, Options{
-		QueueSize:  4,
-		MaxRecords: 1, // commit immediately, no batching delay
-		MaxDelay:   time.Hour,
-		InitialSeq: 42,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   4,
+		MaxRecords:  1, // commit immediately, no batching delay
+		MaxDelay:    time.Hour,
+		InitialSeq:  42,
 	}, nil)
 	defer svc.Shutdown(context.Background())
 
@@ -958,11 +977,12 @@ func TestServiceInitialSeqResumesSuffix(t *testing.T) {
 func TestServiceInitialSeqZeroPreservesLegacyBehaviour(t *testing.T) {
 	t.Parallel()
 
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	svc := New(fakeEngine{}, store, Options{
-		QueueSize:  4,
-		MaxRecords: 1,
-		MaxDelay:   time.Hour,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   4,
+		MaxRecords:  1,
+		MaxDelay:    time.Hour,
 	}, nil)
 	defer svc.Shutdown(context.Background())
 

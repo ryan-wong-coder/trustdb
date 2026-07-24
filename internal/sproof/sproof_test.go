@@ -1,8 +1,6 @@
 package sproof
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,23 +10,14 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
-func TestNewL3SingleProof(t *testing.T) {
+func TestNewRejectsUnavailableGeneration(t *testing.T) {
 	t.Parallel()
 
-	proof, err := New(vectorProof().ProofBundle, Options{ExportedAtUnixN: 1_700_000_000_000_000_000})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if proof.SchemaVersion != model.SchemaSingleProof {
-		t.Fatalf("SchemaVersion = %q", proof.SchemaVersion)
-	}
-	if proof.FormatVersion != FormatVersion {
-		t.Fatalf("FormatVersion = %d, want %d", proof.FormatVersion, FormatVersion)
-	}
-	if proof.RecordID != "rec-vector-1" || proof.ProofLevel != "L3" {
-		t.Fatalf("proof metadata = %+v", proof)
+	if _, err := New(vectorProof().ProofBundle, Options{ExportedAtUnixN: 1_700_000_000_000_000_000}); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition || !strings.Contains(err.Error(), "sproof v1 writer is retired") {
+		t.Fatalf("New() code=%s error=%v", trusterr.CodeOf(err), err)
 	}
 }
 
@@ -72,11 +61,13 @@ func TestValidateStrictlyDecodesFISCOBCOSProviderProof(t *testing.T) {
 	proof.ProofBundle.NodeID = proof.NodeID
 	proof.ProofBundle.LogID = proof.LogID
 	proof.ProofBundle.CommittedReceipt = model.CommittedReceipt{
+		SchemaVersion: model.SchemaCommittedReceipt, CryptoSuite: cryptosuite.INTLV1,
 		BatchID: "batch-1", BatchRoot: make([]byte, 32), ClosedAtUnixN: 7,
 	}
+	proof.ProofBundle.CryptoSuite = cryptosuite.INTLV1
 	proof.ProofBundle.BatchProof = model.BatchProof{TreeSize: 1}
 	leaf := model.GlobalLogLeaf{
-		SchemaVersion: model.SchemaGlobalLogLeaf, NodeID: proof.NodeID, LogID: proof.LogID,
+		SchemaVersion: model.SchemaGlobalLogLeaf, CryptoSuite: cryptosuite.INTLV1, NodeID: proof.NodeID, LogID: proof.LogID,
 		BatchID: "batch-1", BatchRoot: make([]byte, 32), BatchTreeSize: 1, BatchClosedAtUnixN: 7,
 	}
 	leafHash, err := globallog.HashLeaf(leaf)
@@ -84,16 +75,16 @@ func TestValidateStrictlyDecodesFISCOBCOSProviderProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	sth := model.SignedTreeHead{
-		SchemaVersion: model.SchemaSignedTreeHead, TreeAlg: cryptosuite.MerkleRFC6962SHA256,
+		SchemaVersion: model.SchemaSignedTreeHead, CryptoSuite: cryptosuite.INTLV1, TreeAlg: cryptosuite.MerkleRFC6962SHA256,
 		TreeSize: 1, RootHash: leafHash, TimestampUnixN: 8, NodeID: proof.NodeID, LogID: proof.LogID,
 		Signature: model.Signature{Alg: cryptosuite.SignatureEd25519, KeyID: "server", Signature: []byte{1}},
 	}
 	proof.GlobalProof = &model.GlobalLogProof{
-		SchemaVersion: model.SchemaGlobalLogProof, NodeID: proof.NodeID, LogID: proof.LogID,
+		SchemaVersion: model.SchemaGlobalLogProof, CryptoSuite: cryptosuite.INTLV1, NodeID: proof.NodeID, LogID: proof.LogID,
 		BatchID: "batch-1", LeafIndex: 0, LeafHash: leafHash, TreeSize: 1, STH: sth,
 	}
 	proof.AnchorResult = &model.STHAnchorResult{
-		SchemaVersion: model.SchemaSTHAnchorResult, NodeID: proof.NodeID, LogID: proof.LogID,
+		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1, NodeID: proof.NodeID, LogID: proof.LogID,
 		TreeSize: 1, SinkName: fiscobcos.SinkName, AnchorID: strings.Repeat("0", 64),
 		RootHash: leafHash, STH: sth, Proof: []byte{0xa1, 0x61, 0x78, 0x01}, PublishedAtUnixN: 9,
 	}
@@ -102,55 +93,16 @@ func TestValidateStrictlyDecodesFISCOBCOSProviderProof(t *testing.T) {
 	}
 }
 
-func TestSProofV1L3Vector(t *testing.T) {
+func TestSProofV1L3VectorIsRejected(t *testing.T) {
 	t.Parallel()
 
-	proof := vectorProof()
-	data, err := Marshal(proof)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
 	vectorPath := filepath.Join("..", "..", "test", "vectors", "sproof-v1-l3.cbor")
-	hashPath := filepath.Join("..", "..", "test", "vectors", "sproof-v1-l3.sha256")
-	if os.Getenv("TRUSTDB_UPDATE_VECTORS") == "1" {
-		if err := os.MkdirAll(filepath.Dir(vectorPath), 0o755); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
-		}
-		if err := os.WriteFile(vectorPath, data, 0o600); err != nil {
-			t.Fatalf("write vector: %v", err)
-		}
-		sum := sha256.Sum256(data)
-		if err := os.WriteFile(hashPath, []byte(hex.EncodeToString(sum[:])+"\n"), 0o600); err != nil {
-			t.Fatalf("write vector hash: %v", err)
-		}
-	}
-
 	fixture, err := os.ReadFile(vectorPath)
 	if err != nil {
 		t.Fatalf("read vector: %v", err)
 	}
-	if string(fixture) != string(data) {
-		t.Fatal("encoded .sproof vector changed; update docs and run with TRUSTDB_UPDATE_VECTORS=1 if intentional")
-	}
-	wantHash, err := os.ReadFile(hashPath)
-	if err != nil {
-		t.Fatalf("read vector hash: %v", err)
-	}
-	sum := sha256.Sum256(fixture)
-	if got := hex.EncodeToString(sum[:]); got != strings.TrimSpace(string(wantHash)) {
-		t.Fatalf("vector sha256 = %s, want %s", got, strings.TrimSpace(string(wantHash)))
-	}
-	decoded, err := Unmarshal(fixture)
-	if err != nil {
-		t.Fatalf("Unmarshal(vector) error = %v", err)
-	}
-	equal, err := EqualEncoded(decoded, proof)
-	if err != nil {
-		t.Fatalf("EqualEncoded() error = %v", err)
-	}
-	if !equal {
-		t.Fatal("decoded vector does not re-encode deterministically")
+	if _, err := Unmarshal(fixture); err == nil {
+		t.Fatal("Unmarshal(v1 vector) error = nil, want retired generation rejection")
 	}
 }
 
@@ -166,31 +118,15 @@ func TestReadFileRejectsOversizedSingleProof(t *testing.T) {
 	}
 }
 
-func TestWriteFileRoundTripUsesPrivateMode(t *testing.T) {
+func TestWriteFileRejectsUnavailableGeneration(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "proof.sproof")
-	proof := vectorProof()
-	if err := WriteFile(path, proof); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
+	if err := WriteFile(path, vectorProof()); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("WriteFile() code=%s error=%v", trusterr.CodeOf(err), err)
 	}
-	got, err := ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-	equal, err := EqualEncoded(got, proof)
-	if err != nil {
-		t.Fatalf("EqualEncoded() error = %v", err)
-	}
-	if !equal {
-		t.Fatalf("decoded proof = %+v, want vector proof", got)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %o, want 0600", info.Mode().Perm())
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("retired writer produced output: %v", err)
 	}
 }
 

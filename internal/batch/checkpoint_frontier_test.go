@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -115,9 +116,10 @@ func readCheckpointExact(t *testing.T, store interface {
 }
 
 func TestServiceCheckpointStopsAtSparseGap(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	var hooks []model.WALCheckpoint
 	svc := New(fakeEngine{}, store, Options{
+		CryptoSuite: cryptosuite.INTLV1,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			hooks = append(hooks, cp)
 		},
@@ -151,11 +153,12 @@ func TestServiceCheckpointStopsAtSparseGap(t *testing.T) {
 }
 
 func TestServiceCheckpointHookRunsOutsideLockInPersistedOrder(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	firstHookEntered := make(chan struct{})
 	releaseFirstHook := make(chan struct{})
 	hookSequences := make(chan uint64, 2)
 	svc := New(fakeEngine{}, store, Options{
+		CryptoSuite: cryptosuite.INTLV1,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			if cp.LastSequence == 1 {
 				close(firstHookEntered)
@@ -216,11 +219,12 @@ func TestServiceCheckpointHookRunsOutsideLockInPersistedOrder(t *testing.T) {
 }
 
 func TestServiceCheckpointHookCoalescesSlowPendingAdvances(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	firstHookEntered := make(chan struct{})
 	releaseFirstHook := make(chan struct{})
 	hookSequences := make(chan uint64, 2)
 	svc := New(fakeEngine{}, store, Options{
+		CryptoSuite: cryptosuite.INTLV1,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			if cp.LastSequence == 1 {
 				close(firstHookEntered)
@@ -287,13 +291,14 @@ func TestServiceCheckpointHookCoalescesSlowPendingAdvances(t *testing.T) {
 }
 
 func TestServiceCheckpointHookCanAdvanceReentrantly(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	var (
 		svc           *Service
 		hookSequences []uint64
 		reentrantErr  error
 	)
 	svc = New(fakeEngine{}, store, Options{
+		CryptoSuite: cryptosuite.INTLV1,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			hookSequences = append(hookSequences, cp.LastSequence)
 			if cp.LastSequence == 1 {
@@ -329,12 +334,13 @@ func TestServiceCheckpointHookCanAdvanceReentrantly(t *testing.T) {
 }
 
 func TestServiceCheckpointHookPanicDoesNotStopDrain(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	var (
 		svc           *Service
 		hookSequences []uint64
 	)
 	svc = New(fakeEngine{}, store, Options{
+		CryptoSuite: cryptosuite.INTLV1,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			hookSequences = append(hookSequences, cp.LastSequence)
 			if cp.LastSequence == 1 {
@@ -361,9 +367,10 @@ func TestServiceCheckpointHookPanicDoesNotStopDrain(t *testing.T) {
 }
 
 func TestServiceCheckpointMergesOutOfOrderCoverage(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	seed := model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
+		CryptoSuite:   cryptosuite.INTLV1,
 		SegmentID:     1,
 		LastSequence:  10,
 		LastOffset:    1000,
@@ -372,7 +379,7 @@ func TestServiceCheckpointMergesOutOfOrderCoverage(t *testing.T) {
 	if err := store.PutCheckpoint(context.Background(), seed); err != nil {
 		t.Fatalf("PutCheckpoint(seed) error = %v", err)
 	}
-	svc := New(fakeEngine{}, store, Options{}, nil)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 
 	persistCheckpointTestBatch(t, svc, "batch-high",
@@ -401,7 +408,7 @@ func TestServiceCheckpointMergesOutOfOrderCoverage(t *testing.T) {
 }
 
 func TestAsyncMaterializersAdvanceOnlyAfterEarlierGapCloses(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	engine := outOfOrderCheckpointEngine{
 		lowEntered:  make(chan struct{}, 1),
 		lowRelease:  make(chan struct{}),
@@ -412,6 +419,7 @@ func TestAsyncMaterializersAdvanceOnlyAfterEarlierGapCloses(t *testing.T) {
 		hooks  []model.WALCheckpoint
 	)
 	svc := New(engine, store, Options{
+		CryptoSuite:           cryptosuite.INTLV1,
 		QueueSize:             4,
 		MaxRecords:            1,
 		MaxDelay:              time.Hour,
@@ -481,11 +489,12 @@ func TestAsyncMaterializersAdvanceOnlyAfterEarlierGapCloses(t *testing.T) {
 
 func TestServiceCheckpointWriteFailureRetainsCoverage(t *testing.T) {
 	store := &checkpointRecordingStore{
-		LocalStore: proofstore.LocalStore{Root: t.TempDir()},
+		LocalStore: newBoundTestLocalStore(t, t.TempDir()),
 		failPuts:   1,
 	}
 	var hooks []model.WALCheckpoint
 	svc := New(fakeEngine{}, store, Options{
+		CryptoSuite: cryptosuite.INTLV1,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			durable, found := readCheckpointExact(t, store.LocalStore)
 			if !found || durable.LastSequence != cp.LastSequence {
@@ -529,9 +538,10 @@ func TestServiceCheckpointWriteFailureRetainsCoverage(t *testing.T) {
 }
 
 func TestServiceCheckpointDeferralFlushesOnce(t *testing.T) {
-	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &checkpointRecordingStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	var hooks []model.WALCheckpoint
 	svc := New(fakeEngine{}, store, Options{
+		CryptoSuite:            cryptosuite.INTLV1,
 		DeferCheckpointAdvance: true,
 		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
 			hooks = append(hooks, cp)
@@ -572,8 +582,8 @@ func TestServiceCheckpointDeferralFlushesOnce(t *testing.T) {
 }
 
 func TestServiceCheckpointCoverageCompressesAcrossBatches(t *testing.T) {
-	store := checkpointSafeLocalStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
-	svc := New(fakeEngine{}, store, Options{DeferCheckpointAdvance: true}, nil)
+	store := checkpointSafeLocalStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, DeferCheckpointAdvance: true}, nil)
 	defer svc.Shutdown(context.Background())
 
 	for seq := uint64(3); seq <= 10_000; seq++ {
@@ -589,8 +599,8 @@ func TestServiceCheckpointCoverageCompressesAcrossBatches(t *testing.T) {
 	}
 }
 
-func TestServiceMigratesLegacyCheckpointAtZeroWithoutHook(t *testing.T) {
-	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+func TestCheckpointStoreRejectsCheckpointWithoutSuite(t *testing.T) {
+	store := newBoundTestLocalStore(t, t.TempDir())
 	legacy := model.WALCheckpoint{
 		SchemaVersion: model.SchemaWALCheckpoint,
 		SegmentID:     9,
@@ -598,114 +608,21 @@ func TestServiceMigratesLegacyCheckpointAtZeroWithoutHook(t *testing.T) {
 		LastOffset:    4096,
 		BatchID:       "legacy-unsafe",
 	}
-	if err := store.LocalStore.PutCheckpoint(context.Background(), legacy); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
-	var hooks []model.WALCheckpoint
-	svc := New(fakeEngine{}, store, Options{
-		DeferCheckpointAdvance: true,
-		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
-			hooks = append(hooks, cp)
-		},
-	}, nil)
-	defer svc.Shutdown(context.Background())
-
-	if err := svc.StartCheckpointAdvance(context.Background()); err != nil {
-		t.Fatalf("StartCheckpointAdvance() error = %v", err)
-	}
-	cp, found := readCheckpointExact(t, store.LocalStore)
-	if !found || cp.SchemaVersion != model.SchemaWALCheckpointContiguous || cp.LastSequence != 0 || cp.SegmentID != 0 || cp.LastOffset != 0 || cp.BatchID != "" {
-		t.Fatalf("migrated checkpoint = %+v found=%v, want clean v2 sequence zero", cp, found)
-	}
-	if len(hooks) != 0 {
-		t.Fatalf("migration-only hooks = %+v, want none", hooks)
-	}
-	attempts, _ := store.snapshots()
-	if len(attempts) != 1 || attempts[0].LastSequence != 0 {
-		t.Fatalf("migration attempts = %+v, want one sequence-zero write", attempts)
-	}
-}
-
-func TestServiceMigratesLegacyCheckpointFromRebuiltCoverage(t *testing.T) {
-	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
-	if err := store.LocalStore.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		SegmentID:     8,
-		LastSequence:  80,
-		LastOffset:    8000,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
-	var hooks []model.WALCheckpoint
-	svc := New(fakeEngine{}, store, Options{
-		DeferCheckpointAdvance: true,
-		OnCheckpointAdvanced: func(_ context.Context, cp model.WALCheckpoint) {
-			hooks = append(hooks, cp)
-		},
-	}, nil)
-	defer svc.Shutdown(context.Background())
-
-	if err := svc.RecordCommittedWALRange(context.Background(),
-		model.WALPosition{SegmentID: 1, Offset: 0, Sequence: 1},
-		model.WALPosition{SegmentID: 2, Offset: 256, Sequence: 3},
-		"rebuilt-batch",
-	); err != nil {
-		t.Fatalf("RecordCommittedWALRange() error = %v", err)
-	}
-	if err := svc.StartCheckpointAdvance(context.Background()); err != nil {
-		t.Fatalf("StartCheckpointAdvance() error = %v", err)
-	}
-	cp, found := readCheckpointExact(t, store.LocalStore)
-	if !found || cp.SchemaVersion != model.SchemaWALCheckpointContiguous || cp.LastSequence != 3 || cp.SegmentID != 2 || cp.LastOffset != 256 || cp.BatchID != "rebuilt-batch" {
-		t.Fatalf("rebuilt checkpoint = %+v found=%v", cp, found)
-	}
-	if len(hooks) != 1 || hooks[0].LastSequence != 3 {
-		t.Fatalf("rebuilt hooks = %+v, want [3]", hooks)
-	}
-}
-
-func TestServiceRetriesLegacyCheckpointMigration(t *testing.T) {
-	store := &checkpointRecordingStore{
-		LocalStore: proofstore.LocalStore{Root: t.TempDir()},
-		failPuts:   1,
-	}
-	if err := store.LocalStore.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		LastSequence:  0,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
-	svc := New(fakeEngine{}, store, Options{DeferCheckpointAdvance: true}, nil)
-	defer svc.Shutdown(context.Background())
-
-	if err := svc.StartCheckpointAdvance(context.Background()); err == nil {
-		t.Fatal("first StartCheckpointAdvance() error = nil, want injected failure")
-	}
-	if cp, _ := readCheckpointExact(t, store.LocalStore); cp.SchemaVersion != model.SchemaWALCheckpoint {
-		t.Fatalf("checkpoint after failed migration = %+v, want legacy v1 retained", cp)
-	}
-	if err := svc.StartCheckpointAdvance(context.Background()); err != nil {
-		t.Fatalf("second StartCheckpointAdvance() error = %v", err)
-	}
-	cp, _ := readCheckpointExact(t, store.LocalStore)
-	if cp.SchemaVersion != model.SchemaWALCheckpointContiguous || cp.LastSequence != 0 {
-		t.Fatalf("checkpoint after migration retry = %+v, want v2 zero", cp)
-	}
-	attempts, _ := store.snapshots()
-	if len(attempts) != 2 {
-		t.Fatalf("migration attempts = %+v, want two", attempts)
+	if err := store.PutCheckpoint(context.Background(), legacy); err == nil {
+		t.Fatal("PutCheckpoint(legacy) error = nil, want missing suite rejection")
 	}
 }
 
 func TestServiceRejectsUnknownCheckpointSchema(t *testing.T) {
-	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &checkpointRecordingStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	if err := store.LocalStore.PutCheckpoint(context.Background(), model.WALCheckpoint{
 		SchemaVersion: "trustdb.wal-checkpoint.v999",
+		CryptoSuite:   cryptosuite.INTLV1,
 		LastSequence:  12,
 	}); err != nil {
 		t.Fatalf("PutCheckpoint(unknown) error = %v", err)
 	}
-	svc := New(fakeEngine{}, store, Options{DeferCheckpointAdvance: true}, nil)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, DeferCheckpointAdvance: true}, nil)
 	defer svc.Shutdown(context.Background())
 
 	err := svc.StartCheckpointAdvance(context.Background())
@@ -722,9 +639,9 @@ func TestServiceRejectsUnknownCheckpointSchema(t *testing.T) {
 }
 
 func TestServiceBoundsAndReportsCheckpointCoverageIslands(t *testing.T) {
-	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &checkpointRecordingStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	_, metrics := observability.NewRegistry()
-	svc := New(fakeEngine{}, store, Options{DeferCheckpointAdvance: true}, metrics)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1, DeferCheckpointAdvance: true}, metrics)
 	defer svc.Shutdown(context.Background())
 
 	for i := 0; i <= maxCheckpointCoverageRuns; i++ {
@@ -764,9 +681,9 @@ func TestServiceBoundsAndReportsCheckpointCoverageIslands(t *testing.T) {
 }
 
 func TestServiceDoesNotCheckpointDuplicateUnprotectedRecordID(t *testing.T) {
-	store := &checkpointRecordingStore{LocalStore: proofstore.LocalStore{Root: t.TempDir()}}
+	store := &checkpointRecordingStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
 	_, metrics := observability.NewRegistry()
-	svc := New(fakeEngine{}, store, Options{}, metrics)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, metrics)
 	defer svc.Shutdown(context.Background())
 
 	first := checkpointAccepted("duplicate-record", model.WALPosition{SegmentID: 1, Offset: 100, Sequence: 1})
@@ -786,9 +703,10 @@ func TestServiceDoesNotCheckpointDuplicateUnprotectedRecordID(t *testing.T) {
 }
 
 func TestServiceDisablesCheckpointForUnsafeStore(t *testing.T) {
-	store := proofstore.LocalStore{Root: t.TempDir()}
+	store := newBoundTestLocalStore(t, t.TempDir())
 	var hookCalls int
 	svc := New(fakeEngine{}, store, Options{
+		CryptoSuite:          cryptosuite.INTLV1,
 		OnCheckpointAdvanced: func(context.Context, model.WALCheckpoint) { hookCalls++ },
 	}, nil)
 	defer svc.Shutdown(context.Background())

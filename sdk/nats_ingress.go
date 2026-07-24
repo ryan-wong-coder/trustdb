@@ -42,10 +42,10 @@ type NATSIngressConfig struct {
 func DefaultNATSIngressConfig() NATSIngressConfig {
 	return NATSIngressConfig{
 		URLs:           []string{"nats://127.0.0.1:4222"},
-		Stream:         "TRUSTDB_INGRESS",
-		Subject:        "trustdb.ingress.v1.claims",
-		ResultStream:   "TRUSTDB_INGRESS_RESULTS",
-		ResultSubject:  "trustdb.ingress.v1.results.*",
+		Stream:         "TRUSTDB_INGRESS_V2",
+		Subject:        "trustdb.ingress.v2.claims",
+		ResultStream:   "TRUSTDB_INGRESS_V2_RESULTS",
+		ResultSubject:  "trustdb.ingress.v2.results.*",
 		ConnectTimeout: defaultNATSIngressConnectTimeout,
 		DrainTimeout:   defaultNATSIngressDrainTimeout,
 	}
@@ -58,7 +58,7 @@ type NATSSubmission struct {
 	SignedClaim SignedClaim
 }
 
-// NATSIngressClient publishes the existing TrustDB NATS v1 request contract
+// NATSIngressClient publishes the TrustDB NATS v2 request contract
 // and recovers its immutable result. It intentionally does not implement the
 // read-oriented Transport interface used by Client.
 type NATSIngressClient struct {
@@ -142,7 +142,7 @@ func (c *NATSIngressClient) Endpoint() string {
 	return c.endpoint
 }
 
-// PublishSignedClaim durably publishes one exact NATS v1 request and returns a
+// PublishSignedClaim durably publishes one exact NATS v2 request and returns a
 // handle that can recover the matching result after a caller or process retry.
 func (c *NATSIngressClient) PublishSignedClaim(ctx context.Context, signed SignedClaim) (NATSSubmission, error) {
 	ctx = nonNilContext(ctx)
@@ -388,7 +388,7 @@ func validateNATSIngressStream(ctx context.Context, stream jetstream.Stream, sub
 		return fmt.Errorf("stream %q does not contain exact subject %q", info.Config.Name, subject)
 	}
 	if info.Config.MaxMsgSize > 0 && info.Config.MaxMsgSize < natsingress.MaxMessageBytes {
-		return fmt.Errorf("stream %q max message size %d is below TrustDB NATS v1 limit %d", info.Config.Name, info.Config.MaxMsgSize, natsingress.MaxMessageBytes)
+		return fmt.Errorf("stream %q max message size %d is below TrustDB NATS v2 limit %d", info.Config.Name, info.Config.MaxMsgSize, natsingress.MaxMessageBytes)
 	}
 	return nil
 }
@@ -405,7 +405,7 @@ func validateNATSResultStream(ctx context.Context, stream jetstream.Stream, subj
 		return fmt.Errorf("stream %q does not enforce one immutable result per subject", info.Config.Name)
 	}
 	if info.Config.MaxMsgSize > 0 && info.Config.MaxMsgSize < natsingress.MaxMessageBytes {
-		return fmt.Errorf("stream %q max message size %d is below TrustDB NATS v1 limit %d", info.Config.Name, info.Config.MaxMsgSize, natsingress.MaxMessageBytes)
+		return fmt.Errorf("stream %q max message size %d is below TrustDB NATS v2 limit %d", info.Config.Name, info.Config.MaxMsgSize, natsingress.MaxMessageBytes)
 	}
 	return nil
 }

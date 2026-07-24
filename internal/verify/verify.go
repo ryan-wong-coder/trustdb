@@ -13,6 +13,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/prooflevel"
 	"github.com/wowtrust/trustdb/internal/receipt"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
@@ -85,6 +86,9 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	suite, err := cryptosuite.RequireAvailable(provider.Suite())
 	if err != nil {
 		return Result{}, err
+	}
+	if err := modelsuite.Require(suite.ID, bundle); err != nil {
+		return Result{}, fmt.Errorf("verify: proof bundle crypto_suite: %w", err)
 	}
 	sum, n, err := trustcrypto.HashReaderWithProvider(provider, bundle.SignedClaim.Claim.Content.HashAlg, raw)
 	if err != nil {
@@ -166,6 +170,9 @@ func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified, p
 	suite, err := cryptosuite.RequireAvailable(provider.Suite())
 	if err != nil {
 		return err
+	}
+	if err := modelsuite.Require(suite.ID, bundle); err != nil {
+		return fmt.Errorf("verify: proof bundle crypto_suite: %w", err)
 	}
 	if bundle.ServerRecord.TenantID != bundle.SignedClaim.Claim.TenantID {
 		return fmt.Errorf("verify: server record tenant_id mismatch")
@@ -251,6 +258,12 @@ func globalLogConsistencyWithProvider(bundle model.ProofBundle, proof model.Glob
 	if err != nil {
 		return err
 	}
+	if err := modelsuite.Require(suite.ID, bundle); err != nil {
+		return fmt.Errorf("verify: proof bundle crypto_suite: %w", err)
+	}
+	if err := modelsuite.Require(suite.ID, proof); err != nil {
+		return fmt.Errorf("verify: global proof crypto_suite: %w", err)
+	}
 	if proof.STH.TreeAlg != suite.Merkle.Algorithm {
 		return fmt.Errorf("verify: unsupported STH tree_alg: %s", proof.STH.TreeAlg)
 	}
@@ -280,6 +293,7 @@ func globalLogConsistencyWithProvider(bundle model.ProofBundle, proof model.Glob
 	}
 	leaf := model.GlobalLogLeaf{
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
+		CryptoSuite:        suite.ID,
 		NodeID:             proof.NodeID,
 		LogID:              proof.LogID,
 		BatchID:            bundle.CommittedReceipt.BatchID,
@@ -364,6 +378,16 @@ func AnchorBindingConsistency(proof model.GlobalLogProof, ar model.STHAnchorResu
 	if ar.SchemaVersion != model.SchemaSTHAnchorResult {
 		return fmt.Errorf("verify: unexpected anchor result schema: %s", ar.SchemaVersion)
 	}
+	suite, err := cryptosuite.RequireAvailable(ar.CryptoSuite)
+	if err != nil {
+		return fmt.Errorf("verify: anchor result crypto_suite: %w", err)
+	}
+	if err := modelsuite.Require(suite.ID, proof); err != nil {
+		return fmt.Errorf("verify: global proof crypto_suite: %w", err)
+	}
+	if err := modelsuite.Require(suite.ID, ar); err != nil {
+		return fmt.Errorf("verify: anchor result crypto_suite: %w", err)
+	}
 	if ar.TreeSize != proof.STH.TreeSize {
 		return fmt.Errorf("verify: anchor tree_size mismatch: anchor=%d sth=%d", ar.TreeSize, proof.STH.TreeSize)
 	}
@@ -390,6 +414,7 @@ func AnchorBindingConsistency(proof model.GlobalLogProof, ar model.STHAnchorResu
 
 func sameSignedTreeHead(left, right model.SignedTreeHead) bool {
 	return left.SchemaVersion == right.SchemaVersion &&
+		left.CryptoSuite == right.CryptoSuite &&
 		left.TreeAlg == right.TreeAlg &&
 		left.TreeSize == right.TreeSize &&
 		bytes.Equal(left.RootHash, right.RootHash) &&

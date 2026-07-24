@@ -37,7 +37,7 @@ func TestSubmitClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/claims", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -52,6 +52,18 @@ func TestSubmitClaim(t *testing.T) {
 	}
 	if got["proof_level"] != "L2" {
 		t.Fatalf("proof_level = %#v", got["proof_level"])
+	}
+}
+
+func TestV1RoutesAreNotRegistered(t *testing.T) {
+	t.Parallel()
+
+	handler := New(nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/claims", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("legacy route status = %d, want 404", rec.Code)
 	}
 }
 
@@ -77,7 +89,7 @@ func TestSubmitClaimsBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/claims/batch", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims/batch", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMultiStatus {
@@ -98,6 +110,23 @@ func TestSubmitClaimsBatch(t *testing.T) {
 	}
 	if got.Results[2].Result == nil || !got.Results[2].Result.Idempotent || got.Results[2].Result.BatchEnqueued {
 		t.Fatalf("result[2] = %+v", got.Results[2])
+	}
+}
+
+func TestSubmitClaimsBatchRejectsOversizedDeclaredCollection(t *testing.T) {
+	t.Parallel()
+
+	body, err := cborx.Marshal(submitClaimsBatchRequest{
+		Claims: make([]model.SignedClaim, maxClaimBatchItems+1),
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims/batch", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	New(nil, nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "max number of elements 1000") {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -166,7 +195,7 @@ func TestSubmitClaimEnqueuesBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/claims", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -245,7 +274,7 @@ func TestSubmitClaimIdempotentReplaySkipsBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/claims", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -279,7 +308,7 @@ func TestSubmitClaimIdempotencyConflictReturns409(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/claims", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
@@ -300,7 +329,7 @@ func TestSubmitClaimRejectsBadCBOR(t *testing.T) {
 	svc := ingest.New(processorFunc(nil), ingest.Options{QueueSize: 1, Workers: 1}, nil)
 	defer svc.Shutdown(context.Background())
 	handler := New(svc, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/claims", strings.NewReader("not cbor"))
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims", strings.NewReader("not cbor"))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -319,7 +348,7 @@ func TestSubmitClaimRejectsTrailingCBORData(t *testing.T) {
 		t.Fatalf("Marshal() error = %v", err)
 	}
 	body = append(body, 0x00)
-	req := httptest.NewRequest(http.MethodPost, "/v1/claims", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v2/claims", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -415,21 +444,21 @@ func TestProofAndRootEndpoints(t *testing.T) {
 	}
 	handler := New(nil, nil, batchSvc)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/proofs/tr1proof", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/proofs/tr1proof", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("proof status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/roots/latest", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/roots/latest", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("latest root status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/roots?limit=1", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/roots?limit=1", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -449,7 +478,7 @@ func TestRecordEndpoints(t *testing.T) {
 	}
 	handler := New(nil, nil, batchSvc)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/records?limit=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/records?limit=2", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -463,7 +492,7 @@ func TestRecordEndpoints(t *testing.T) {
 		t.Fatalf("records page = %+v", page)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/records?limit=2&cursor="+page.NextCursor, nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?limit=2&cursor="+page.NextCursor, nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -477,7 +506,7 @@ func TestRecordEndpoints(t *testing.T) {
 		t.Fatalf("next records page = %+v", next)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/records/rec-2", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/records/rec-2", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -491,21 +520,21 @@ func TestRecordEndpoints(t *testing.T) {
 		t.Fatalf("record index = %+v", idx)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/records/rec-2/status", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/records/rec-2/status", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"committed"`) {
 		t.Fatalf("record status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/records/status:batchGet", strings.NewReader(`{"record_ids":["rec-2","missing"]}`))
+	req = httptest.NewRequest(http.MethodPost, "/v2/records/status:batchGet", strings.NewReader(`{"record_ids":["rec-2","missing"]}`))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"missing_record_ids":["missing"]`) {
 		t.Fatalf("record status batch = %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/records/status:batchGet", strings.NewReader(`{"record_ids":[" rec-2 ","rec-2"]}`))
+	req = httptest.NewRequest(http.MethodPost, "/v2/records/status:batchGet", strings.NewReader(`{"record_ids":[" rec-2 ","rec-2"]}`))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -519,7 +548,7 @@ func TestRecordEndpoints(t *testing.T) {
 		t.Fatalf("normalized status batch = %+v", normalizedStatuses)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/records?q=screenshot&limit=10", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?q=screenshot&limit=10", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -533,7 +562,7 @@ func TestRecordEndpoints(t *testing.T) {
 		t.Fatalf("q records page = %+v", byQuery)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/records?content_hash="+strings.Repeat("02", 32)+"&limit=10", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?content_hash="+strings.Repeat("02", 32)+"&limit=10", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -547,7 +576,7 @@ func TestRecordEndpoints(t *testing.T) {
 		t.Fatalf("hash records page = %+v", byHash)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/records?received_from=150&received_to=250&limit=10", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?received_from=150&received_to=250&limit=10", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -561,7 +590,7 @@ func TestRecordEndpoints(t *testing.T) {
 		t.Fatalf("range records page = %+v", byRange)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/records?level=L5&limit=10", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?level=L5&limit=10", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -573,6 +602,54 @@ func TestRecordEndpoints(t *testing.T) {
 	}
 	if len(byLevel.Records) != 1 || byLevel.Records[0].RecordID != "rec-3" {
 		t.Fatalf("level records page = %+v", byLevel)
+	}
+}
+
+func TestRecordContentHashUsesBoundCryptoSuite(t *testing.T) {
+	t.Parallel()
+
+	hash := bytes.Repeat([]byte{0x5a}, cryptosuite.DigestSize)
+	batchSvc := &fakeBatchService{
+		suiteID: cryptosuite.CNSMV1,
+		records: []model.RecordIndex{
+			{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: cryptosuite.CNSMV1, RecordID: "rec-sm3", ContentHash: hash},
+			{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: cryptosuite.CNSMV1, RecordID: "rec-other", ContentHash: bytes.Repeat([]byte{0x6b}, cryptosuite.DigestSize)},
+		},
+	}
+	handler := New(nil, nil, batchSvc)
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/records?content_hash=sm3:"+strings.Repeat("5a", cryptosuite.DigestSize), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("SM3 content_hash status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var page recordsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode SM3 content_hash response: %v", err)
+	}
+	if len(page.Records) != 1 || page.Records[0].RecordID != "rec-sm3" {
+		t.Fatalf("SM3 content_hash records = %+v", page.Records)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?content_hash=sha256:"+strings.Repeat("5a", cryptosuite.DigestSize), nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "algorithm must be sm3") {
+		t.Fatalf("mixed-suite content_hash status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?sha256="+strings.Repeat("5a", cryptosuite.DigestSize), nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retired sha256 alias status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode retired sha256 alias response: %v", err)
+	}
+	if len(page.Records) != 2 {
+		t.Fatalf("retired sha256 alias filtered records: %+v", page.Records)
 	}
 }
 
@@ -592,8 +669,9 @@ func TestCreateStatusSubscriptionAuthenticatesBeforeRecordLookups(t *testing.T) 
 		Alg: cryptosuite.SignatureEd25519, PublicKey: clientPublic, Status: model.KeyStatusValid,
 	}}
 	hub, err := statusnotify.New(statusnotify.Config{
-		Routes: resolver,
-		Signer: trustcrypto.MustNewEd25519Signer("server-key", serverPrivate),
+		Routes:      resolver,
+		Signer:      trustcrypto.MustNewEd25519Signer("server-key", serverPrivate),
+		CryptoSuite: cryptosuite.INTLV1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -603,7 +681,7 @@ func TestCreateStatusSubscriptionAuthenticatesBeforeRecordLookups(t *testing.T) 
 	statuses := &countingRecordStatusService{}
 	handler := buildMux(Handler{Statuses: statuses, StatusHub: hub})
 	body := `{"tenant_id":"tenant","client_id":"client","key_id":"key","record_ids":["tr1"]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/status-subscriptions", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v2/status-subscriptions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -636,7 +714,7 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/sth?limit=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/sth?limit=2", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -650,7 +728,7 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 		t.Fatalf("sth page = %+v", sthsPage)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/global-log/leaves?limit=2", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/global-log/leaves?limit=2", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -664,7 +742,7 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 		t.Fatalf("leaves page = %+v", leavesPage)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth?limit=2", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/anchors/sth?limit=2", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -685,7 +763,7 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 			t.Fatalf("anchor list item is not immutable publication evidence: %+v", item)
 		}
 	}
-	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth?limit=2&cursor="+anchorsPage.NextCursor, nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/anchors/sth?limit=2&cursor="+anchorsPage.NextCursor, nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -699,7 +777,7 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 		t.Fatalf("second anchor page skipped or duplicated a same-tree sink: %+v", secondAnchorsPage)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth/2", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/anchors/sth/2", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -716,7 +794,7 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 		t.Fatalf("anchor response = %+v", anchorItem)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/anchors/sth/3", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/anchors/sth/3", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -728,9 +806,9 @@ func TestBatchTreeEndpoints(t *testing.T) {
 	t.Parallel()
 
 	handler := New(nil, nil, &fakeBatchService{
-		roots: []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-a", TreeSize: 2, BatchRoot: []byte{9}, ClosedAtUnixN: 100}},
+		roots: []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: cryptosuite.CNSMV1, BatchID: "batch-a", TreeSize: 2, BatchRoot: []byte{9}, ClosedAtUnixN: 100}},
 		manifests: map[string]model.BatchManifest{
-			"batch-a": {SchemaVersion: model.SchemaBatchManifest, BatchID: "batch-a", State: model.BatchStateCommitted, TreeSize: 2, BatchRoot: []byte{9}, RecordIDs: []string{"rec-a", "rec-b"}, ClosedAtUnixN: 100},
+			"batch-a": {SchemaVersion: model.SchemaBatchManifest, CryptoSuite: cryptosuite.CNSMV1, BatchID: "batch-a", State: model.BatchStateCommitted, TreeSize: 2, BatchRoot: []byte{9}, RecordIDs: []string{"rec-a", "rec-b"}, ClosedAtUnixN: 100},
 		},
 		treeLeaves: []model.BatchTreeLeaf{
 			{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-a", RecordID: "rec-a", LeafIndex: 0, LeafHash: []byte{1}},
@@ -743,7 +821,7 @@ func TestBatchTreeEndpoints(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/batches/batch-a", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/batches/batch-a", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -753,11 +831,12 @@ func TestBatchTreeEndpoints(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("decode batch detail: %v", err)
 	}
-	if detail.RecordCount != 2 || detail.Root.BatchID != "batch-a" {
+	if detail.RecordCount != 2 || detail.Root.BatchID != "batch-a" ||
+		detail.Root.CryptoSuite != cryptosuite.CNSMV1 {
 		t.Fatalf("batch detail = %+v", detail)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/batches/batch-a/tree/leaves?limit=1", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/batches/batch-a/tree/leaves?limit=1", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -771,7 +850,7 @@ func TestBatchTreeEndpoints(t *testing.T) {
 		t.Fatalf("batch leaves = %+v", leaves)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/batches/batch-a/tree/nodes?level=0&limit=2", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/batches/batch-a/tree/nodes?level=0&limit=2", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -794,11 +873,11 @@ func TestAnchorSystemEndpoints(t *testing.T) {
 		path string
 		want string
 	}{
-		{"/v1/anchor-systems", `"system_id":"chain-a"`},
-		{"/v1/anchor-systems/chain-a", `"kind":"evidence_blockchain"`},
-		{"/v1/anchor-systems/chain-a/status", `"state":"healthy"`},
-		{"/v1/anchor-systems/chain-a/resources?kind=node&limit=10", `"resource_id":"node-1"`},
-		{"/v1/anchor-systems/chain-a/resources/node/node-1", `"status":"online"`},
+		{"/v2/anchor-systems", `"system_id":"chain-a"`},
+		{"/v2/anchor-systems/chain-a", `"kind":"evidence_blockchain"`},
+		{"/v2/anchor-systems/chain-a/status", `"state":"healthy"`},
+		{"/v2/anchor-systems/chain-a/resources?kind=node&limit=10", `"resource_id":"node-1"`},
+		{"/v2/anchor-systems/chain-a/resources/node/node-1", `"status":"online"`},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		rec := httptest.NewRecorder()
@@ -818,7 +897,7 @@ func TestBatchTreeEndpointReportsMissingIndex(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/batches/old-batch/tree/leaves?limit=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/batches/old-batch/tree/leaves?limit=1", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusPreconditionFailed {
@@ -838,7 +917,7 @@ func TestGlobalTreeEndpoints(t *testing.T) {
 		},
 	}, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/global-log/tree", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/global-log/tree", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -852,7 +931,7 @@ func TestGlobalTreeEndpoints(t *testing.T) {
 		t.Fatalf("global tree = %+v", tree)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/global-log/tree/nodes?limit=1", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/global-log/tree/nodes?limit=1", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -866,7 +945,7 @@ func TestGlobalTreeEndpoints(t *testing.T) {
 		t.Fatalf("global nodes = %+v", nodes)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/global-log/tree/nodes?level=0&start=1", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v2/global-log/tree/nodes?level=0&start=1", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -888,7 +967,7 @@ func TestGlobalEvidenceEndpoint(t *testing.T) {
 		AnchorResult: &model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 3, AnchorID: "anchor-3"},
 	}
 	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, fakeGlobalService{evidence: want}, nil)
-	req := httptest.NewRequest(http.MethodGet, "/v1/global-log/evidence/batch-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/global-log/evidence/batch-1", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -908,14 +987,14 @@ func TestGlobalRoutesAreNotRegisteredWithoutGlobalService(t *testing.T) {
 
 	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, nil, nil)
 	for _, path := range []string{
-		"/v1/sth/latest",
-		"/v1/sth",
-		"/v1/global-log/leaves",
-		"/v1/global-log/tree",
-		"/v1/global-log/tree/nodes",
-		"/v1/global-log/inclusion/batch-1",
-		"/v1/global-log/evidence/batch-1",
-		"/v1/global-log/consistency?from=1&to=2",
+		"/v2/sth/latest",
+		"/v2/sth",
+		"/v2/global-log/leaves",
+		"/v2/global-log/tree",
+		"/v2/global-log/tree/nodes",
+		"/v2/global-log/inclusion/batch-1",
+		"/v2/global-log/evidence/batch-1",
+		"/v2/global-log/consistency?from=1&to=2",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
@@ -932,14 +1011,14 @@ func TestGlobalRoutesAreNotRegisteredWithTypedNilGlobalService(t *testing.T) {
 	var global *fakeGlobalService
 	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, global, nil)
 	for _, path := range []string{
-		"/v1/sth/latest",
-		"/v1/sth",
-		"/v1/global-log/leaves",
-		"/v1/global-log/tree",
-		"/v1/global-log/tree/nodes",
-		"/v1/global-log/inclusion/batch-1",
-		"/v1/global-log/evidence/batch-1",
-		"/v1/global-log/consistency?from=1&to=2",
+		"/v2/sth/latest",
+		"/v2/sth",
+		"/v2/global-log/leaves",
+		"/v2/global-log/tree",
+		"/v2/global-log/tree/nodes",
+		"/v2/global-log/inclusion/batch-1",
+		"/v2/global-log/evidence/batch-1",
+		"/v2/global-log/consistency?from=1&to=2",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
@@ -961,6 +1040,7 @@ func (f processorFunc) Submit(ctx context.Context, signed model.SignedClaim) (mo
 
 type fakeBatchService struct {
 	mu         sync.Mutex
+	suiteID    cryptosuite.ID
 	enqueued   string
 	proof      model.ProofBundle
 	roots      []model.BatchRoot
@@ -968,6 +1048,13 @@ type fakeBatchService struct {
 	manifests  map[string]model.BatchManifest
 	treeLeaves []model.BatchTreeLeaf
 	treeNodes  []model.BatchTreeNode
+}
+
+func (f *fakeBatchService) CryptoSuite() cryptosuite.ID {
+	if f.suiteID == "" {
+		return cryptosuite.INTLV1
+	}
+	return f.suiteID
 }
 
 type staticStatusRouteResolver struct {

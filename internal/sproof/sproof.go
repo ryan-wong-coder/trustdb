@@ -11,8 +11,11 @@ import (
 
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/prooflevel"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/internal/verify"
 )
 
@@ -30,6 +33,9 @@ type Options struct {
 // New builds a stable .sproof v1 envelope. ProofLevel is descriptive only;
 // verifiers must recompute the level from the bundled evidence.
 func New(bundle model.ProofBundle, opts Options) (model.SingleProof, error) {
+	if err := requireWritableGeneration(bundle.CryptoSuite); err != nil {
+		return model.SingleProof{}, err
+	}
 	proof := model.SingleProof{
 		SchemaVersion:   model.SchemaSingleProof,
 		FormatVersion:   FormatVersion,
@@ -130,10 +136,24 @@ func Validate(proof model.SingleProof) error {
 }
 
 func Marshal(proof model.SingleProof) ([]byte, error) {
+	if err := requireWritableGeneration(proof.ProofBundle.CryptoSuite); err != nil {
+		return nil, err
+	}
 	if err := Validate(proof); err != nil {
 		return nil, err
 	}
 	return cborx.Marshal(proof)
+}
+
+func requireWritableGeneration(suiteID cryptosuite.ID) error {
+	if _, _, err := formatregistry.RequireWritable(formatregistry.SingleProofV1, suiteID); err != nil {
+		return trusterr.Wrap(
+			trusterr.CodeFailedPrecondition,
+			"sproof v1 writer is retired and sproof v2 is not available",
+			err,
+		)
+	}
+	return nil
 }
 
 func Unmarshal(data []byte) (model.SingleProof, error) {

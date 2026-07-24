@@ -30,6 +30,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/idempotency"
 	"github.com/wowtrust/trustdb/internal/l5coverage"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/proofstoremeta"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -72,10 +73,10 @@ const (
 	prefixGlobalStatus   = "global/outbox-status/"
 	prefixGlobalStream   = "global/outbox-stream-status/"
 	prefixAnchorResult   = "anchor/sth-result/v2/"
-	prefixAnchorLatest   = "anchor/sth-latest/v1/"
-	prefixAnchorTreeRoot = "anchor/sth-tree-root/v1/"
-	prefixAnchorSchedule = "anchor/schedule/v1/"
-	prefixL5Coverage     = "anchor/l5-coverage/v1/"
+	prefixAnchorLatest   = "anchor/sth-latest/v2/"
+	prefixAnchorTreeRoot = "anchor/sth-tree-root/v2/"
+	prefixAnchorSchedule = "anchor/schedule/v2/"
+	prefixL5Coverage     = "anchor/l5-coverage/v2/"
 	prefixIdempotency    = "idempotency/decision/"
 	checkpointKey        = "checkpoint/wal"
 	globalStateKey       = "global/state/latest"
@@ -116,24 +117,26 @@ type storedProofBundleEnvelope struct {
 }
 
 type batchTreeLeafTile struct {
-	SchemaVersion  string   `cbor:"schema_version"`
-	BatchID        string   `cbor:"batch_id"`
-	StartIndex     uint64   `cbor:"start_index"`
-	LeafIndexes    []uint64 `cbor:"leaf_indexes"`
-	RecordIDs      []string `cbor:"record_ids"`
-	Hashes         [][]byte `cbor:"hashes"`
-	CreatedAtUnixN int64    `cbor:"created_at_unix_nano"`
+	SchemaVersion  string         `cbor:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite"`
+	BatchID        string         `cbor:"batch_id"`
+	StartIndex     uint64         `cbor:"start_index"`
+	LeafIndexes    []uint64       `cbor:"leaf_indexes"`
+	RecordIDs      []string       `cbor:"record_ids"`
+	Hashes         [][]byte       `cbor:"hashes"`
+	CreatedAtUnixN int64          `cbor:"created_at_unix_nano"`
 }
 
 type batchTreeNodeTile struct {
-	SchemaVersion  string   `cbor:"schema_version"`
-	BatchID        string   `cbor:"batch_id"`
-	Level          uint64   `cbor:"level"`
-	StartIndex     uint64   `cbor:"start_index"`
-	StartIndexes   []uint64 `cbor:"start_indexes"`
-	Widths         []uint64 `cbor:"widths"`
-	Hashes         [][]byte `cbor:"hashes"`
-	CreatedAtUnixN int64    `cbor:"created_at_unix_nano"`
+	SchemaVersion  string         `cbor:"schema_version"`
+	CryptoSuite    cryptosuite.ID `cbor:"crypto_suite"`
+	BatchID        string         `cbor:"batch_id"`
+	Level          uint64         `cbor:"level"`
+	StartIndex     uint64         `cbor:"start_index"`
+	StartIndexes   []uint64       `cbor:"start_indexes"`
+	Widths         []uint64       `cbor:"widths"`
+	Hashes         [][]byte       `cbor:"hashes"`
+	CreatedAtUnixN int64          `cbor:"created_at_unix_nano"`
 }
 
 type Options struct {
@@ -142,6 +145,9 @@ type Options struct {
 	IndexStorageTokens           bool
 	IndexStorageTokensConfigured bool
 	CryptoSuite                  cryptosuite.ID
+	NodeID                       string
+	LogID                        string
+	NamespaceID                  string
 }
 
 type encodedBatchArtifact struct {
@@ -175,7 +181,7 @@ type Store struct {
 	db               *pdb.DB
 	recordIndexMode  string
 	artifactSyncMode string
-	suiteID          cryptosuite.ID
+	binding          proofstoremeta.Marker
 
 	// closeOnce guards the underlying db.Close so that duplicate
 	// Close calls from defers and shutdown hooks cannot panic on a
@@ -193,10 +199,23 @@ type Store struct {
 var storageInitMu sync.Mutex
 
 func (s *Store) CryptoSuite() cryptosuite.ID {
-	if s == nil || s.suiteID == "" {
-		return cryptosuite.INTLV1
+	if s == nil {
+		return ""
 	}
-	return s.suiteID
+	return s.binding.CryptoSuite
+}
+
+func (s *Store) requireSuite(value any) error {
+	if s == nil {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "proofstore store is nil")
+	}
+	if err := proofstoremeta.ValidateBinding(s.binding, s.binding.CryptoSuite, s.binding.NodeID, s.binding.LogID, s.binding.NamespaceID); err != nil {
+		return trusterr.Wrap(trusterr.CodeFailedPrecondition, "proofstore namespace binding", err)
+	}
+	if err := modelsuite.Require(s.CryptoSuite(), value); err != nil {
+		return trusterr.Wrap(trusterr.CodeInvalidArgument, "proofstore crypto_suite", err)
+	}
+	return nil
 }
 
 // WALCheckpointPruneSafe becomes true only after the durable projection is
@@ -206,17 +225,12 @@ func (s *Store) WALCheckpointPruneSafe() bool {
 	return s != nil && s.idempotencyReady.Load()
 }
 
-// Open creates or opens a Pebble database at path and wraps it in a
-// Store. The caller owns the returned *Store and must call Close to
-// release the underlying file locks; Pebble refuses a second Open at
-// the same path while the first handle is still live.
-func Open(path string) (*Store, error) {
-	return OpenWithOptions(path, Options{RecordIndexMode: RecordIndexModeFull, ArtifactSyncMode: ArtifactSyncModeChunk})
-}
-
 func OpenWithOptions(path string, opts Options) (*Store, error) {
 	if path == "" {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "pebble proofstore path is required")
+	}
+	if strings.TrimSpace(opts.NodeID) == "" || strings.TrimSpace(opts.LogID) == "" || strings.TrimSpace(opts.NamespaceID) == "" {
+		return nil, trusterr.New(trusterr.CodeInvalidArgument, "pebble proofstore node_id, log_id, and namespace_id are required")
 	}
 	suiteID, err := proofstoremeta.RequestedSuite(opts.CryptoSuite)
 	if err != nil {
@@ -226,7 +240,7 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 	if err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeInternal, "open pebble proofstore", err)
 	}
-	marker, err := ensureStorageSchema(db, suiteID)
+	marker, err := ensureStorageSchema(db, suiteID, opts.NodeID, opts.LogID, opts.NamespaceID)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -235,7 +249,7 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 		db:               db,
 		recordIndexMode:  normalizeRecordIndexMode(opts),
 		artifactSyncMode: normalizeArtifactSyncMode(opts.ArtifactSyncMode),
-		suiteID:          marker.CryptoSuite,
+		binding:          marker,
 	}
 	ready, err := store.projectionReadyOnDisk()
 	if err != nil {
@@ -252,7 +266,7 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 	return store, nil
 }
 
-func ensureStorageSchema(db *pdb.DB, expected cryptosuite.ID) (proofstoremeta.Marker, error) {
+func ensureStorageSchema(db *pdb.DB, expected cryptosuite.ID, nodeID, logID, namespaceID string) (proofstoremeta.Marker, error) {
 	storageInitMu.Lock()
 	defer storageInitMu.Unlock()
 
@@ -266,7 +280,7 @@ func ensureStorageSchema(db *pdb.DB, expected cryptosuite.ID) (proofstoremeta.Ma
 		if err != nil {
 			return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeDataLoss, "decode pebble proofstore suite marker", err)
 		}
-		if err := proofstoremeta.Validate(marker, expected); err != nil {
+		if err := proofstoremeta.ValidateBinding(marker, expected, nodeID, logID, namespaceID); err != nil {
 			return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "validate pebble proofstore suite marker", err)
 		}
 		return marker, nil
@@ -289,7 +303,7 @@ func ensureStorageSchema(db *pdb.DB, expected cryptosuite.ID) (proofstoremeta.Ma
 	if hasExistingData {
 		return proofstoremeta.Marker{}, trusterr.New(trusterr.CodeFailedPrecondition, "non-empty pebble proofstore has no cryptographic suite marker; clear or rebuild the proofstore")
 	}
-	marker, err := proofstoremeta.New(expected)
+	marker, err := proofstoremeta.New(expected, nodeID, logID, namespaceID)
 	if err != nil {
 		return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeInvalidArgument, "build pebble proofstore suite marker", err)
 	}
@@ -477,6 +491,9 @@ func (s *Store) writeIdempotencyDecisionPage(decisions []model.IdempotencyDecisi
 	defer batch.Close()
 	seen := make(map[string]model.IdempotencyDecision, len(decisions))
 	for i := range decisions {
+		if err := s.requireSuite(decisions[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeDataLoss, fmt.Sprintf("rebuilt idempotency decision %d", i), err)
+		}
 		storageKey, err := idempotency.StorageKeyForSuite(s.CryptoSuite(), decisions[i].Identity)
 		if err != nil {
 			return trusterr.Wrap(trusterr.CodeDataLoss, "derive rebuilt idempotency storage key", err)
@@ -1060,6 +1077,9 @@ func (s *Store) PutBundle(ctx context.Context, bundle model.ProofBundle) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put bundle canceled", err)
 	}
+	if err := s.requireSuite(bundle); err != nil {
+		return err
+	}
 	if bundle.RecordID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "proof bundle record_id is required")
 	}
@@ -1099,6 +1119,14 @@ func (s *Store) PutBatchArtifacts(ctx context.Context, bundles []model.ProofBund
 	if len(bundles) == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "proofstore batch artifacts require at least one bundle")
 	}
+	if err := s.requireSuite(root); err != nil {
+		return err
+	}
+	for i := range bundles {
+		if err := s.requireSuite(bundles[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("batch bundle %d", i), err)
+		}
+	}
 	root, err := normalizeBatchRoot(root, len(bundles))
 	if err != nil {
 		return err
@@ -1132,6 +1160,11 @@ func (s *Store) PutMaterializedBatchArtifacts(ctx context.Context, bundles []mod
 	}
 	if len(bundles) == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "proofstore materialized batch artifacts require at least one bundle")
+	}
+	for i := range bundles {
+		if err := s.requireSuite(bundles[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("materialized batch bundle %d", i), err)
+		}
 	}
 	for start := 0; start < len(bundles); start += batchArtifactChunkSize {
 		end := start + batchArtifactChunkSize
@@ -1300,6 +1333,14 @@ func (s *Store) putBatchIndexesAndRoot(ctx context.Context, indexes []model.Reco
 	if len(indexes) == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "proofstore batch indexes require at least one record index")
 	}
+	if err := s.requireSuite(root); err != nil {
+		return err
+	}
+	for i := range indexes {
+		if err := s.requireSuite(indexes[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("batch record index %d", i), err)
+		}
+	}
 	root, err := normalizeBatchRoot(root, len(indexes))
 	if err != nil {
 		return err
@@ -1401,6 +1442,9 @@ func (s *Store) stageEncodedMaterializedBatchArtifact(batch *pdb.Batch, artifact
 func (s *Store) PutRecordIndex(ctx context.Context, idx model.RecordIndex) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put record index canceled", err)
+	}
+	if err := s.requireSuite(idx); err != nil {
+		return err
 	}
 	if idx.RecordID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "record index record_id is required")
@@ -1519,6 +1563,9 @@ func (s *Store) ListRecordIndexes(ctx context.Context, opts model.RecordListOpti
 func (s *Store) PutRoot(ctx context.Context, root model.BatchRoot) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put root canceled", err)
+	}
+	if err := s.requireSuite(root); err != nil {
+		return err
 	}
 	root, err := normalizeBatchRoot(root, 0)
 	if err != nil {
@@ -1720,6 +1767,16 @@ func (s *Store) PutBatchTreeArtifacts(ctx context.Context, leaves []model.BatchT
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch tree artifacts canceled", err)
 	}
+	for i := range leaves {
+		if err := s.requireSuite(leaves[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("batch tree leaf %d", i), err)
+		}
+	}
+	for i := range nodes {
+		if err := s.requireSuite(nodes[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("batch tree node %d", i), err)
+		}
+	}
 	if len(leaves) == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "batch tree artifacts require at least one leaf")
 	}
@@ -1735,6 +1792,7 @@ func (s *Store) PutBatchTreeArtifacts(ctx context.Context, leaves []model.BatchT
 		end := min(start+batchTreeTileSize, len(sortedLeaves))
 		tile := batchTreeLeafTile{
 			SchemaVersion:  schemaBatchTreeLeafTileV2,
+			CryptoSuite:    leaves[start].CryptoSuite,
 			BatchID:        batchID,
 			StartIndex:     sortedLeaves[start].LeafIndex,
 			LeafIndexes:    make([]uint64, end-start),
@@ -1776,6 +1834,7 @@ func (s *Store) PutBatchTreeArtifacts(ctx context.Context, leaves []model.BatchT
 				end := min(start+batchTreeTileSize, levelEnd)
 				tile := batchTreeNodeTile{
 					SchemaVersion:  schemaBatchTreeNodeTileV2,
+					CryptoSuite:    sortedNodes[start].CryptoSuite,
 					BatchID:        batchID,
 					Level:          level,
 					StartIndex:     sortedNodes[start].StartIndex,
@@ -1809,6 +1868,9 @@ func (s *Store) PutBatchTreeSnapshot(ctx context.Context, snapshot model.BatchTr
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put batch tree snapshot canceled", err)
 	}
+	if err := s.requireSuite(snapshot); err != nil {
+		return err
+	}
 	if snapshot.BatchID == "" || len(snapshot.LeafHashes) == 0 || len(snapshot.LeafHashes) != len(snapshot.RecordIDs) {
 		return trusterr.New(trusterr.CodeInvalidArgument, "invalid batch tree snapshot")
 	}
@@ -1821,6 +1883,7 @@ func (s *Store) PutBatchTreeSnapshot(ctx context.Context, snapshot model.BatchTr
 		end := min(start+batchTreeTileSize, len(snapshot.LeafHashes))
 		tile := batchTreeLeafTile{
 			SchemaVersion:  schemaBatchTreeLeafTileV2,
+			CryptoSuite:    snapshot.CryptoSuite,
 			BatchID:        snapshot.BatchID,
 			StartIndex:     uint64(start),
 			LeafIndexes:    make([]uint64, end-start),
@@ -1847,6 +1910,7 @@ func (s *Store) PutBatchTreeSnapshot(ctx context.Context, snapshot model.BatchTr
 				end := min(start+batchTreeTileSize, levelEnd)
 				tile := batchTreeNodeTile{
 					SchemaVersion:  schemaBatchTreeNodeTileV2,
+					CryptoSuite:    snapshot.CryptoSuite,
 					BatchID:        snapshot.BatchID,
 					Level:          level,
 					StartIndex:     snapshot.Nodes[start].StartIndex,
@@ -1947,6 +2011,7 @@ func (s *Store) ListBatchTreeLeaves(ctx context.Context, opts model.BatchTreeLea
 			}
 			leaves = append(leaves, model.BatchTreeLeaf{
 				SchemaVersion:  model.SchemaBatchTreeLeaf,
+				CryptoSuite:    tile.CryptoSuite,
 				BatchID:        tile.BatchID,
 				RecordID:       tile.RecordIDs[i],
 				LeafIndex:      tile.LeafIndexes[i],
@@ -1989,6 +2054,7 @@ func (s *Store) ListBatchTreeNodes(ctx context.Context, opts model.BatchTreeNode
 		for i := range leaves {
 			nodes[i] = model.BatchTreeNode{
 				SchemaVersion:  model.SchemaBatchTreeNode,
+				CryptoSuite:    leaves[i].CryptoSuite,
 				BatchID:        leaves[i].BatchID,
 				Level:          0,
 				StartIndex:     leaves[i].LeafIndex,
@@ -2034,6 +2100,7 @@ func (s *Store) ListBatchTreeNodes(ctx context.Context, opts model.BatchTreeNode
 			}
 			nodes = append(nodes, model.BatchTreeNode{
 				SchemaVersion:  model.SchemaBatchTreeNode,
+				CryptoSuite:    tile.CryptoSuite,
 				BatchID:        tile.BatchID,
 				Level:          tile.Level,
 				StartIndex:     tile.StartIndexes[i],
@@ -2052,6 +2119,9 @@ func (s *Store) ListBatchTreeNodes(ctx context.Context, opts model.BatchTreeNode
 func (s *Store) PutManifest(ctx context.Context, manifest model.BatchManifest) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put manifest canceled", err)
+	}
+	if err := s.requireSuite(manifest); err != nil {
+		return err
 	}
 	if manifest.BatchID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "batch manifest batch_id is required")
@@ -2127,6 +2197,14 @@ func (s *Store) PublishCommittedBatch(ctx context.Context, manifest model.BatchM
 	}
 	if manifest.SchemaVersion == "" {
 		manifest.SchemaVersion = model.SchemaBatchManifest
+	}
+	if err := s.requireSuite(manifest); err != nil {
+		return nil, err
+	}
+	for i := range bundles {
+		if err := s.requireSuite(bundles[i]); err != nil {
+			return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("committed bundle %d", i), err)
+		}
 	}
 	provider, err := trustcrypto.ProviderForSuite(s.CryptoSuite())
 	if err != nil {
@@ -2443,6 +2521,9 @@ func (s *Store) PutCheckpoint(ctx context.Context, cp model.WALCheckpoint) error
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put checkpoint canceled", err)
 	}
+	if err := s.requireSuite(cp); err != nil {
+		return err
+	}
 	if cp.SchemaVersion == "" {
 		cp.SchemaVersion = model.SchemaWALCheckpoint
 	}
@@ -2637,6 +2718,9 @@ func (s *Store) PutGlobalLeaf(ctx context.Context, leaf model.GlobalLogLeaf) err
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global leaf canceled", err)
 	}
+	if err := s.requireSuite(leaf); err != nil {
+		return err
+	}
 	if leaf.BatchID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log leaf batch_id is required")
 	}
@@ -2694,6 +2778,9 @@ func (s *Store) GetGlobalLeafByBatchID(ctx context.Context, batchID string) (mod
 func (s *Store) PutGlobalLogNode(ctx context.Context, node model.GlobalLogNode) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global node canceled", err)
+	}
+	if err := s.requireSuite(node); err != nil {
+		return err
 	}
 	if node.Width == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log node width is required")
@@ -2767,6 +2854,9 @@ func (s *Store) ListGlobalLogNodesAfter(ctx context.Context, afterLevel, afterSt
 func (s *Store) PutGlobalLogState(ctx context.Context, state model.GlobalLogState) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global state canceled", err)
+	}
+	if err := s.requireSuite(state); err != nil {
+		return err
 	}
 	if state.SchemaVersion == "" {
 		state.SchemaVersion = model.SchemaGlobalLogState
@@ -2899,6 +2989,9 @@ func (s *Store) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeHead)
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put sth canceled", err)
 	}
+	if err := s.requireSuite(sth); err != nil {
+		return err
+	}
 	if sth.TreeSize == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "sth tree_size is required")
 	}
@@ -2917,6 +3010,9 @@ func (s *Store) PutSignedTreeHead(ctx context.Context, sth model.SignedTreeHead)
 func (s *Store) CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLogAppend) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore commit global log append canceled", err)
+	}
+	if err := s.requireSuite(entry); err != nil {
+		return err
 	}
 	if entry.Leaf.BatchID == "" {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log append leaf batch_id is required")
@@ -3005,6 +3101,11 @@ func (s *Store) CommitGlobalLogAppend(ctx context.Context, entry model.GlobalLog
 func (s *Store) CommitGlobalLogAppends(ctx context.Context, entries []model.GlobalLogAppend) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore commit global log appends canceled", err)
+	}
+	for i := range entries {
+		if err := s.requireSuite(entries[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("global log append %d", i), err)
+		}
 	}
 	if len(entries) == 0 {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log appends require at least one entry")
@@ -3231,6 +3332,9 @@ func (s *Store) PutGlobalLogTile(ctx context.Context, tile model.GlobalLogTile) 
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put global tile canceled", err)
 	}
+	if err := s.requireSuite(tile); err != nil {
+		return err
+	}
 	if tile.SchemaVersion == "" {
 		tile.SchemaVersion = model.SchemaGlobalLogTile
 	}
@@ -3305,6 +3409,9 @@ func (s *Store) ListGlobalLogTilesAfter(ctx context.Context, afterLevel, afterSt
 func (s *Store) EnqueueGlobalLog(ctx context.Context, item model.GlobalLogOutboxItem) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore enqueue global log canceled", err)
+	}
+	if err := s.requireSuite(item); err != nil {
+		return err
 	}
 	if item.BatchID == "" {
 		item.BatchID = item.BatchRoot.BatchID
@@ -3459,6 +3566,16 @@ func (s *Store) markGlobalLogPublishedBatch(ctx context.Context, batchIDs []stri
 	}
 	if len(batchIDs) == 0 || len(batchIDs) != len(sths) {
 		return trusterr.New(trusterr.CodeInvalidArgument, "global log published batch inputs are inconsistent")
+	}
+	for i := range sths {
+		if err := s.requireSuite(sths[i]); err != nil {
+			return trusterr.Wrap(trusterr.CodeInvalidArgument, fmt.Sprintf("published STH %d", i), err)
+		}
+	}
+	if candidate != nil {
+		if err := s.requireSuite(*candidate); err != nil {
+			return err
+		}
 	}
 	batchIDs, sths = coalescePebbleGlobalLogPublicationInputs(batchIDs, sths)
 	if candidate != nil {
@@ -3674,6 +3791,9 @@ func (s *Store) PutSTHAnchorResult(ctx context.Context, result model.STHAnchorRe
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore put sth anchor result canceled", err)
 	}
+	if err := s.requireSuite(result); err != nil {
+		return err
+	}
 	key := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
 	if err := anchorschedule.ValidateResult(key, result); err != nil {
 		return err
@@ -3712,6 +3832,12 @@ func (s *Store) PutSTHAnchorResult(ctx context.Context, result model.STHAnchorRe
 func (s *Store) UpdateSTHAnchorResult(ctx context.Context, expected, result model.STHAnchorResult) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore update sth anchor result canceled", err)
+	}
+	if err := s.requireSuite(expected); err != nil {
+		return trusterr.Wrap(trusterr.CodeInvalidArgument, "expected anchor result", err)
+	}
+	if err := s.requireSuite(result); err != nil {
+		return err
 	}
 	key := model.STHAnchorScheduleKey{NodeID: result.NodeID, LogID: result.LogID, SinkName: result.SinkName}
 	if err := anchorschedule.ValidateResult(key, result); err != nil {
@@ -3839,6 +3965,9 @@ func (s *Store) ListSTHAnchorResultsPage(ctx context.Context, opts model.AnchorL
 func (s *Store) UpsertSTHAnchorCandidate(ctx context.Context, candidate model.STHAnchorCandidate) (model.STHAnchorSchedule, error) {
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorSchedule{}, trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore upsert sth anchor candidate canceled", err)
+	}
+	if err := s.requireSuite(candidate); err != nil {
+		return model.STHAnchorSchedule{}, err
 	}
 	if err := anchorschedule.ValidateCandidate(candidate); err != nil {
 		return model.STHAnchorSchedule{}, err
@@ -4049,6 +4178,9 @@ func (s *Store) CompleteSTHAnchorAttempt(ctx context.Context, key model.STHAncho
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore complete sth anchor attempt canceled", err)
 	}
+	if err := s.requireSuite(result); err != nil {
+		return err
+	}
 	if err := anchorschedule.ValidateResult(key, result); err != nil {
 		return err
 	}
@@ -4122,6 +4254,9 @@ func (s *Store) ReplaceSTHAnchorSchedule(ctx context.Context, schedule model.STH
 func (s *Store) restoreSTHAnchorSchedule(ctx context.Context, schedule model.STHAnchorSchedule, replace bool) error {
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "proofstore restore sth anchor schedule canceled", err)
+	}
+	if err := s.requireSuite(schedule); err != nil {
+		return err
 	}
 	if err := anchorschedule.ValidateSchedule(schedule); err != nil {
 		return err
@@ -4247,7 +4382,7 @@ func (s *Store) AdvanceL5CoverageCheckpoint(ctx context.Context, key model.STHAn
 	if err != nil {
 		return model.L5CoverageCheckpoint{}, trusterr.Wrap(trusterr.CodeDataLoss, "read L5 coverage checkpoint", err)
 	}
-	next, changed, err := l5coverage.Advance(current, found, key, coveredTreeSize, updatedAtUnixN)
+	next, changed, err := l5coverage.Advance(current, found, s.CryptoSuite(), key, coveredTreeSize, updatedAtUnixN)
 	if err != nil {
 		return model.L5CoverageCheckpoint{}, err
 	}

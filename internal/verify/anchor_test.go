@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/anchor"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -16,8 +17,10 @@ import (
 func newGlobalProofWithSTH(treeSize uint64, root []byte) model.GlobalLogProof {
 	return model.GlobalLogProof{
 		SchemaVersion: model.SchemaGlobalLogProof,
+		CryptoSuite:   cryptosuite.INTLV1,
 		STH: model.SignedTreeHead{
 			SchemaVersion: model.SchemaSignedTreeHead,
+			CryptoSuite:   cryptosuite.INTLV1,
 			TreeAlg:       model.DefaultMerkleTreeAlg,
 			TreeSize:      treeSize,
 			RootHash:      root,
@@ -82,6 +85,7 @@ func otsAnchorResult(t *testing.T, proof model.GlobalLogProof, digest []byte, ti
 	}
 	return model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.OtsSinkName,
 		AnchorID:      anchor.DeterministicOtsAnchorID(proof.STH),
@@ -93,10 +97,11 @@ func otsAnchorResult(t *testing.T, proof model.GlobalLogProof, digest []byte, ti
 
 func TestAnchorConsistencyFileSinkOK(t *testing.T) {
 	t.Parallel()
-	root := []byte{0xaa, 0xbb, 0xcc}
+	root := bytes.Repeat([]byte{0xaa}, cryptosuite.DigestSize)
 	proof := newGlobalProofWithSTH(7, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.FileSinkName,
 		AnchorID:      anchor.DeterministicFileAnchorID(proof.STH),
@@ -110,10 +115,11 @@ func TestAnchorConsistencyFileSinkOK(t *testing.T) {
 
 func TestAnchorConsistencyNoopSinkOK(t *testing.T) {
 	t.Parallel()
-	root := []byte{1, 2, 3}
+	root := bytes.Repeat([]byte{0x01}, cryptosuite.DigestSize)
 	proof := newGlobalProofWithSTH(8, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.NoopSinkName,
 		AnchorID:      anchor.DeterministicNoopAnchorID(proof.STH),
@@ -152,6 +158,7 @@ func TestAnchorConsistencyRejectsUnknownSink(t *testing.T) {
 	proof := newGlobalProofWithSTH(9, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      "ct-log",
 		AnchorID:      "arbitrary-opaque-id-from-ct-log",
@@ -179,6 +186,7 @@ func TestAnchorConsistencyUsesExternalVerifier(t *testing.T) {
 	proof := newGlobalProofWithSTH(12, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      "vendor-chain",
 		AnchorID:      "transaction-1",
@@ -200,6 +208,7 @@ func TestAnchorContainerConsistencyAllowsBoundCustomProof(t *testing.T) {
 	proof := newGlobalProofWithSTH(13, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      "vendor-chain",
 		AnchorID:      "transaction-2",
@@ -236,10 +245,12 @@ func TestAnchorConsistencyRejectsTreeSizeMismatch(t *testing.T) {
 	proof := newGlobalProofWithSTH(2, []byte{1})
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      3,
 		SinkName:      anchor.NoopSinkName,
 		AnchorID:      "noop-sth-3",
 		RootHash:      []byte{1},
+		STH:           proof.STH,
 	}
 	err := AnchorConsistency(proof, ar)
 	if err == nil || !strings.Contains(err.Error(), "tree_size") {
@@ -252,10 +263,12 @@ func TestAnchorConsistencyRejectsRootMismatch(t *testing.T) {
 	proof := newGlobalProofWithSTH(4, []byte{1, 2, 3})
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.NoopSinkName,
 		AnchorID:      anchor.DeterministicNoopAnchorID(proof.STH),
 		RootHash:      []byte{9, 9, 9},
+		STH:           proof.STH,
 	}
 	err := AnchorConsistency(proof, ar)
 	if err == nil || !strings.Contains(err.Error(), "root_hash") {
@@ -269,6 +282,7 @@ func TestAnchorConsistencyRejectsFileAnchorIDTamper(t *testing.T) {
 	proof := newGlobalProofWithSTH(5, root)
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.FileSinkName,
 		AnchorID:      "file-tampered-0000000000000000000",
@@ -286,9 +300,11 @@ func TestAnchorConsistencyRejectsEmptyAnchorID(t *testing.T) {
 	proof := newGlobalProofWithSTH(6, []byte{1})
 	ar := model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   proof.CryptoSuite,
 		TreeSize:      proof.STH.TreeSize,
 		SinkName:      anchor.FileSinkName,
 		RootHash:      []byte{1},
+		STH:           proof.STH,
 	}
 	err := AnchorConsistency(proof, ar)
 	if err == nil || !strings.Contains(err.Error(), "anchor_id") {

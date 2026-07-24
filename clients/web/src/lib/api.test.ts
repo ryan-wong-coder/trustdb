@@ -54,9 +54,9 @@ describe('admin API facade', () => {
   it('builds read-only proxy URLs under /admin/api/proxy', async () => {
     fetchMock.mockResolvedValueOnce(new Response('{}', { status: 200 }))
 
-    await proxyGet('/v1/records?limit=5')
+    await proxyGet('/v2/records?limit=5')
 
-    expect(fetchMock).toHaveBeenCalledWith('/admin/api/proxy/v1/records?limit=5', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenCalledWith('/admin/api/proxy/v2/records?limit=5', { credentials: 'include' })
   })
 
   it('loads batch and tree endpoints through the proxy facade', async () => {
@@ -69,9 +69,9 @@ describe('admin API facade', () => {
     await expect(getBatchDetail('batch-a')).resolves.toMatchObject({ record_count: 2 })
     await expect(getBatchTreeNodes('batch-a', { level: 0, start: 0 })).resolves.toMatchObject({ nodes: [{ level: 0 }] })
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, '/admin/api/proxy/v1/batches?limit=10', { credentials: 'include' })
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/admin/api/proxy/v1/batches/batch-a', { credentials: 'include' })
-    expect(fetchMock).toHaveBeenNthCalledWith(3, '/admin/api/proxy/v1/batches/batch-a/tree/nodes?level=0&start=0', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/admin/api/proxy/v2/batches?limit=10', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/admin/api/proxy/v2/batches/batch-a', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/admin/api/proxy/v2/batches/batch-a/tree/nodes?level=0&start=0', { credentials: 'include' })
   })
 
   it('loads filtered records through the typed proxy facade', async () => {
@@ -84,7 +84,7 @@ describe('admin API facade', () => {
     await expect(getRecords({ limit: 25, query: 'invoice', level: 'L5' })).resolves.toMatchObject({
       records: [{ record_id: 'record-a', proof_level: 'L5' }],
     })
-    expect(fetchMock).toHaveBeenCalledWith('/admin/api/proxy/v1/records?limit=25&q=invoice&level=L5', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenCalledWith('/admin/api/proxy/v2/records?limit=25&q=invoice&level=L5', { credentials: 'include' })
   })
 
   it('loads global tree through the proxy facade', async () => {
@@ -94,7 +94,7 @@ describe('admin API facade', () => {
 
     await expect(getGlobalTree()).resolves.toMatchObject({ ok: true, state: { tree_size: 2 } })
     await expect(getGlobalTreeNodes({ level: 0, start: 1, limit: 1 })).resolves.toMatchObject({ nodes: [{ start_index: 1 }] })
-    expect(fetchMock).toHaveBeenNthCalledWith(1, '/admin/api/proxy/v1/global-log/tree', { credentials: 'include' })
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/admin/api/proxy/v1/global-log/tree/nodes?level=0&start=1&limit=1', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/admin/api/proxy/v2/global-log/tree', { credentials: 'include' })
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/admin/api/proxy/v2/global-log/tree/nodes?level=0&start=1&limit=1', { credentials: 'include' })
   })
 })

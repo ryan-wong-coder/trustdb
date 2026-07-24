@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/merkle"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
@@ -74,6 +75,7 @@ type Accepted struct {
 }
 
 type Options struct {
+	CryptoSuite              cryptosuite.ID
 	QueueSize                int
 	MaxRecords               int
 	MaxDelay                 time.Duration
@@ -140,6 +142,8 @@ type Service struct {
 	queueSlots      chan struct{}
 	shutdownStarted chan struct{}
 	opts            Options
+	suiteID         cryptosuite.ID
+	configErr       error
 
 	mu      sync.RWMutex
 	closed  bool
@@ -170,7 +174,6 @@ type Service struct {
 	checkpointFrontier         model.WALCheckpoint
 	checkpointPersistedSeq     uint64
 	checkpointDeferred         bool
-	checkpointMigrationPending bool
 	checkpointEnabled          bool
 	checkpointCallbacks        []walCheckpointCallback
 	checkpointCallbackDraining bool
@@ -203,6 +206,12 @@ type walCheckpointCallback struct {
 const maxCheckpointCoverageRuns = 4096
 
 func New(engine Engine, store Store, opts Options, metrics *observability.Metrics) *Service {
+	suite, suiteErr := cryptosuite.RequireAvailable(opts.CryptoSuite)
+	if suiteErr == nil {
+		opts.CryptoSuite = suite.ID
+	} else {
+		suiteErr = trusterr.Wrap(trusterr.CodeInvalidArgument, "batch crypto_suite", suiteErr)
+	}
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = 1024
 	}
@@ -230,6 +239,8 @@ func New(engine Engine, store Store, opts Options, metrics *observability.Metric
 		queueSlots:           make(chan struct{}, opts.QueueSize),
 		shutdownStarted:      make(chan struct{}),
 		opts:                 opts,
+		suiteID:              opts.CryptoSuite,
+		configErr:            suiteErr,
 		seq:                  opts.InitialSeq,
 		ingestDone:           make(chan struct{}),
 		shutdownDone:         make(chan struct{}),
@@ -281,6 +292,9 @@ func normalizeProofMode(mode string) string {
 }
 
 func (s *Service) Enqueue(ctx context.Context, signed model.SignedClaim, record model.ServerRecord, accepted model.AcceptedReceipt) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "batch enqueue canceled", err)
 	}
@@ -289,6 +303,9 @@ func (s *Service) Enqueue(ctx context.Context, signed model.SignedClaim, record 
 }
 
 func (s *Service) EnqueueRecovered(ctx context.Context, item Accepted) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "batch enqueue canceled", err)
 	}
@@ -408,6 +425,7 @@ func (s *Service) RecordStatus(ctx context.Context, recordID string) (model.Reco
 	}
 	status := model.RecordStatus{
 		SchemaVersion:  model.SchemaRecordStatus,
+		CryptoSuite:    idx.CryptoSuite,
 		RecordID:       idx.RecordID,
 		TenantID:       idx.TenantID,
 		ClientID:       idx.ClientID,
@@ -732,6 +750,7 @@ func (s *Service) persistBatch(ctx context.Context, batchID string, closedAt tim
 	}
 	manifest := model.BatchManifest{
 		SchemaVersion:    model.SchemaBatchManifest,
+		CryptoSuite:      commit.Root.CryptoSuite,
 		BatchID:          batchID,
 		NodeID:           commit.Root.NodeID,
 		LogID:            commit.Root.LogID,
@@ -875,7 +894,15 @@ func buildBatchTreeArtifacts(batchID string, root model.BatchRoot, records []mod
 }
 
 func buildBatchTreeSnapshot(batchID string, root model.BatchRoot, records []model.ServerRecord) (model.BatchTreeSnapshot, error) {
-	tree, err := merkle.Build(records)
+	if _, err := cryptosuite.RequireAvailable(root.CryptoSuite); err != nil {
+		return model.BatchTreeSnapshot{}, trusterr.Wrap(trusterr.CodeInvalidArgument, "batch root crypto_suite", err)
+	}
+	for i := range records {
+		if err := cryptosuite.RequireSame(root.CryptoSuite, records[i].CryptoSuite); err != nil {
+			return model.BatchTreeSnapshot{}, trusterr.Wrap(trusterr.CodeDataLoss, fmt.Sprintf("batch tree record %d crypto_suite", i), err)
+		}
+	}
+	tree, err := merkle.BuildForSuite(root.CryptoSuite, root.TreeAlg(), records)
 	if err != nil {
 		return model.BatchTreeSnapshot{}, err
 	}
@@ -904,6 +931,7 @@ func buildBatchTreeSnapshot(batchID string, root model.BatchRoot, records []mode
 		}
 	}
 	return model.BatchTreeSnapshot{
+		CryptoSuite:    root.CryptoSuite,
 		BatchID:        batchID,
 		CreatedAtUnixN: now,
 		RecordIDs:      recordIDs,
@@ -920,6 +948,7 @@ func batchTreeArtifactsFromSnapshot(snapshot model.BatchTreeSnapshot) ([]model.B
 	for i := range snapshot.LeafHashes {
 		leaves[i] = model.BatchTreeLeaf{
 			SchemaVersion:  model.SchemaBatchTreeLeaf,
+			CryptoSuite:    snapshot.CryptoSuite,
 			BatchID:        snapshot.BatchID,
 			RecordID:       snapshot.RecordIDs[i],
 			LeafIndex:      uint64(i),
@@ -931,6 +960,7 @@ func batchTreeArtifactsFromSnapshot(snapshot model.BatchTreeSnapshot) ([]model.B
 	for i := range snapshot.Nodes {
 		nodes[i] = model.BatchTreeNode{
 			SchemaVersion:  model.SchemaBatchTreeNode,
+			CryptoSuite:    snapshot.CryptoSuite,
 			BatchID:        snapshot.BatchID,
 			Level:          snapshot.Nodes[i].Level,
 			StartIndex:     snapshot.Nodes[i].StartIndex,
@@ -949,6 +979,7 @@ func rootFromBundles(batchID string, bundles []model.ProofBundle) model.BatchRoo
 		TreeSize:      uint64(len(bundles)),
 	}
 	if len(bundles) > 0 {
+		r.CryptoSuite = bundles[0].CryptoSuite
 		r.BatchRoot = append([]byte(nil), bundles[0].CommittedReceipt.BatchRoot...)
 		r.ClosedAtUnixN = bundles[0].CommittedReceipt.ClosedAtUnixN
 		r.NodeID = bundles[0].NodeID
@@ -1035,6 +1066,9 @@ func cloneAcceptedItems(items []Accepted) []Accepted {
 // root/index artifacts and leaves bundles lazy so the first Proof call remains
 // the materialization boundary.
 func (s *Service) RecoverManifest(ctx context.Context, manifest model.BatchManifest, items []Accepted) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	s.setRecordStatuses(items, model.RecordStatusProcessing, manifest.BatchID, false, "")
 	if manifest.State == model.BatchStateCommitted {
 		s.markRecordStatusesCommitted(items, manifest.BatchID, manifest.CommittedAtUnixN)
@@ -1541,6 +1575,7 @@ func (s *Service) setRecordStatuses(items []Accepted, state, batchID string, not
 		}
 		status := model.RecordStatus{
 			SchemaVersion:  model.SchemaRecordStatus,
+			CryptoSuite:    item.Record.CryptoSuite,
 			RecordID:       item.Record.RecordID,
 			TenantID:       item.Record.TenantID,
 			ClientID:       item.Record.ClientID,
@@ -1573,6 +1608,7 @@ func (s *Service) markRecordStatusesCommitted(items []Accepted, batchID string, 
 		item := items[i]
 		status := model.RecordStatus{
 			SchemaVersion:  model.SchemaRecordStatus,
+			CryptoSuite:    item.Record.CryptoSuite,
 			RecordID:       item.Record.RecordID,
 			TenantID:       item.Record.TenantID,
 			ClientID:       item.Record.ClientID,
@@ -1635,6 +1671,9 @@ func (s *Service) DeferCheckpointAdvance() {
 // contiguous committed WAL frontier. Coverage observed while deferred stays
 // compressed in memory and cannot invoke the prune hook before this call.
 func (s *Service) StartCheckpointAdvance(ctx context.Context) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if !s.checkpointEnabled {
 		return nil
 	}
@@ -1658,6 +1697,9 @@ func (s *Service) StartCheckpointAdvance(ctx context.Context) error {
 // manifest. The range is kept in memory while checkpoint advancement is
 // deferred and is flushed by StartCheckpointAdvance.
 func (s *Service) RecordCommittedWALRange(ctx context.Context, from, to model.WALPosition, batchID string) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if !s.checkpointEnabled {
 		return nil
 	}
@@ -1907,32 +1949,28 @@ func (s *Service) flushCheckpointLocked(ctx context.Context) (bool, error) {
 			return false, trusterr.Wrap(trusterr.CodeDataLoss, "load wal checkpoint", err)
 		}
 		if found {
-			switch existing.SchemaVersion {
-			case model.SchemaWALCheckpointContiguous:
-				if existing.LastSequence > 0 && (existing.SegmentID == 0 || existing.LastOffset < 0) {
-					return false, trusterr.New(trusterr.CodeDataLoss, "contiguous wal checkpoint has an invalid position")
-				}
-				s.checkpointFrontier = existing
-				s.checkpointPersistedSeq = existing.LastSequence
-			case "", model.SchemaWALCheckpoint:
-				// v1 checkpoints were derived from batch min/max envelopes and
-				// may cross uncommitted gaps. Rebuild from exact WAL coverage and
-				// replace even a safe zero frontier so an unsafe legacy value is
-				// never resurrected by a later rollback.
-				s.checkpointMigrationPending = true
-			default:
+			if existing.SchemaVersion != model.SchemaWALCheckpointContiguous {
 				return false, trusterr.New(trusterr.CodeFailedPrecondition, "unsupported wal checkpoint schema: "+existing.SchemaVersion)
 			}
+			if err := cryptosuite.RequireSame(s.suiteID, existing.CryptoSuite); err != nil {
+				return false, trusterr.Wrap(trusterr.CodeDataLoss, "wal checkpoint crypto_suite", err)
+			}
+			if existing.LastSequence > 0 && (existing.SegmentID == 0 || existing.LastOffset < 0) {
+				return false, trusterr.New(trusterr.CodeDataLoss, "contiguous wal checkpoint has an invalid position")
+			}
+			s.checkpointFrontier = existing
+			s.checkpointPersistedSeq = existing.LastSequence
 		}
 		s.checkpointLoaded = true
 	}
 
 	s.consumeCheckpointCoverageLocked()
-	if s.checkpointDeferred || (!s.checkpointMigrationPending && s.checkpointFrontier.LastSequence <= s.checkpointPersistedSeq) {
+	if s.checkpointDeferred || s.checkpointFrontier.LastSequence <= s.checkpointPersistedSeq {
 		return false, nil
 	}
 	cp := s.checkpointFrontier
 	cp.SchemaVersion = model.SchemaWALCheckpointContiguous
+	cp.CryptoSuite = s.suiteID
 	cp.RecordedAtUnixN = time.Now().UTC().UnixNano()
 	advanced := cp.LastSequence > s.checkpointPersistedSeq
 	if err := s.store.PutCheckpoint(ctx, cp); err != nil {
@@ -1940,7 +1978,6 @@ func (s *Service) flushCheckpointLocked(ctx context.Context) (bool, error) {
 	}
 	s.checkpointFrontier = cp
 	s.checkpointPersistedSeq = cp.LastSequence
-	s.checkpointMigrationPending = false
 	if s.metrics != nil {
 		s.metrics.WALCheckpointLastSequence.Set(float64(cp.LastSequence))
 	}

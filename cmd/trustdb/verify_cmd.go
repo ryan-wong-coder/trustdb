@@ -299,12 +299,12 @@ type anchorResponseEnvelope struct {
 	Result   *model.STHAnchorResult `json:"result,omitempty"`
 }
 
-// fetchProofBundle retrieves /v1/proofs/{record_id} and unwraps the
+// fetchProofBundle retrieves /v2/proofs/{record_id} and unwraps the
 // JSON envelope into a concrete ProofBundle. The server uses the same
 // JSON shape in both local and remote clients, so a successful decode
 // here is effectively a smoke test of the API schema.
 func fetchProofBundle(ctx context.Context, client *http.Client, serverURL, recordID string) (model.ProofBundle, error) {
-	endpoint, err := joinURL(serverURL, "/v1/proofs/", recordID)
+	endpoint, err := joinURL(serverURL, "/v2/proofs/", recordID)
 	if err != nil {
 		return model.ProofBundle{}, err
 	}
@@ -322,7 +322,7 @@ func fetchGlobalProof(ctx context.Context, client *http.Client, serverURL, batch
 	if batchID == "" {
 		return model.GlobalLogProof{}, fmt.Errorf("verify: proof bundle has empty batch_id")
 	}
-	endpoint, err := joinURL(serverURL, "/v1/global-log/inclusion/", batchID)
+	endpoint, err := joinURL(serverURL, "/v2/global-log/inclusion/", batchID)
 	if err != nil {
 		return model.GlobalLogProof{}, err
 	}
@@ -333,7 +333,7 @@ func fetchGlobalProof(ctx context.Context, client *http.Client, serverURL, batch
 	return proof, nil
 }
 
-// fetchAnchorResult retrieves /v1/anchors/sth/{tree_size} and returns the
+// fetchAnchorResult retrieves /v2/anchors/sth/{tree_size} and returns the
 // embedded STHAnchorResult when present. A 404 or a present-but-pending
 // entry is reported as (nil, nil) because the caller then falls back
 // to L4 verification, which is a legitimate state for a freshly
@@ -342,7 +342,7 @@ func fetchAnchorResult(ctx context.Context, client *http.Client, serverURL strin
 	if treeSize == 0 {
 		return nil, nil
 	}
-	endpoint, err := joinURL(serverURL, "/v1/anchors/sth/", fmt.Sprintf("%d", treeSize))
+	endpoint, err := joinURL(serverURL, "/v2/anchors/sth/", fmt.Sprintf("%d", treeSize))
 	if err != nil {
 		return nil, err
 	}

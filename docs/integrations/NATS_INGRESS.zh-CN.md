@@ -28,7 +28,7 @@ proof、Global Log、anchor 或离线验证语义。
    |
    | 发布 SignedClaim request
    v
-TRUSTDB_INGRESS（work-queue stream）
+TRUSTDB_INGRESS_V2（work-queue stream）
    |
    | durable pull consumer，受 MaxAckPending 限制
    v
@@ -36,7 +36,7 @@ TrustDB 共用 submission service -> 签名/密钥校验 -> WAL acceptance
    |                                      |
    | accepted 或终态失败                  | 非法 broker delivery
    v                                      v
-TRUSTDB_INGRESS_RESULTS                 TRUSTDB_INGRESS_DLQ
+TRUSTDB_INGRESS_V2_RESULTS                 TRUSTDB_INGRESS_V2_DLQ
    |
    | 先持久化不可变结果
    v
@@ -114,10 +114,10 @@ broker 不可达或已有资源语义不匹配时，启动会失败关闭。
 
 | 资源 | 默认值 | 必须满足的语义 |
 | --- | --- | --- |
-| Ingress stream | `TRUSTDB_INGRESS` | 对具体 `trustdb.ingress.v1.claims` subject 使用 work-queue retention、`DiscardNew`、有界字节/消息大小和配置的 duplicate window。 |
-| Durable consumer | `trustdb-ingress` | 显式 ACK、instant replay、精确 subject filter，以及配置的 `AckWait`、`MaxDeliver`、`MaxAckPending`、request batch 和 expiry。 |
-| Result stream | `TRUSTDB_INGRESS_RESULTS` | 对 `trustdb.ingress.v1.results.*` 使用 limits retention；每个结果 subject 只能保存一条不可变消息，并启用 `DiscardNewPerSubject`。 |
-| Dead-letter stream | `TRUSTDB_INGRESS_DLQ` | 对 `trustdb.ingress.v1.dlq.*` 使用 limits retention；每个 rejection subject 只能保存一条不可变消息，并启用 `DiscardNewPerSubject`。 |
+| Ingress stream | `TRUSTDB_INGRESS_V2` | 对具体 `trustdb.ingress.v2.claims` subject 使用 work-queue retention、`DiscardNew`、有界字节/消息大小和配置的 duplicate window。 |
+| Durable consumer | `trustdb-ingress-v2` | 显式 ACK、instant replay、精确 subject filter，以及配置的 `AckWait`、`MaxDeliver`、`MaxAckPending`、request batch 和 expiry。 |
+| Result stream | `TRUSTDB_INGRESS_V2_RESULTS` | 对 `trustdb.ingress.v2.results.*` 使用 limits retention；每个结果 subject 只能保存一条不可变消息，并启用 `DiscardNewPerSubject`。 |
+| Dead-letter stream | `TRUSTDB_INGRESS_V2_DLQ` | 对 `trustdb.ingress.v2.dlq.*` 使用 limits retention；每个 rejection subject 只能保存一条不可变消息，并启用 `DiscardNewPerSubject`。 |
 
 `nats.provision: true` 时，TrustDB 会创建缺失资源，但不会静默改写已有
 stream 或 consumer；所有关键字段都会被校验，不兼容拓扑会阻止启动。

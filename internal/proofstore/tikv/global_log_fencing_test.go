@@ -37,7 +37,7 @@ func TestGlobalLogCommitErrorMapsWriteConflictsForServiceRetry(t *testing.T) {
 
 func TestCommitGlobalLogAppendRejectsStaleTreeState(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "global-log-fence/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 	ctx := context.Background()
 
 	winner := testGlobalLogAppend("winner", 0)
@@ -60,7 +60,7 @@ func TestCommitGlobalLogAppendRejectsStaleTreeState(t *testing.T) {
 
 func TestCommitGlobalLogAppendsRequiresContiguousPlan(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "global-log-contiguous/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 	ctx := context.Background()
 
 	err := store.CommitGlobalLogAppends(ctx, []model.GlobalLogAppend{
@@ -77,7 +77,7 @@ func TestCommitGlobalLogAppendsRequiresContiguousPlan(t *testing.T) {
 
 func TestCommitGlobalLogAppendsFencesStaleBatch(t *testing.T) {
 	db, _ := newMockTiKVDB(t, "global-log-batch-fence/")
-	store := &Store{db: db}
+	store := &Store{binding: testStoreBinding(), db: db}
 	ctx := context.Background()
 
 	winner := []model.GlobalLogAppend{
@@ -103,11 +103,11 @@ func TestCommitGlobalLogAppendsFencesStaleBatch(t *testing.T) {
 func testGlobalLogAppend(batchID string, leafIndex uint64) model.GlobalLogAppend {
 	treeSize := leafIndex + 1
 	return model.GlobalLogAppend{
-		Leaf: model.GlobalLogLeaf{
+		Leaf: model.GlobalLogLeaf{CryptoSuite: "INTL_V1",
 			BatchID:   batchID,
 			LeafIndex: leafIndex,
 		},
-		State: model.GlobalLogState{TreeSize: treeSize},
-		STH:   model.SignedTreeHead{TreeSize: treeSize},
+		State: model.GlobalLogState{CryptoSuite: "INTL_V1", TreeSize: treeSize},
+		STH:   model.SignedTreeHead{CryptoSuite: "INTL_V1", TreeSize: treeSize},
 	}
 }
