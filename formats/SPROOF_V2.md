@@ -147,10 +147,14 @@ by explicit verifier policy is `skipped`. The result also reports
 
 The CLI uses the verifier-local public descriptors passed through
 `--client-public-key`, `--server-public-key`, and
-`--registry-public-key`. Repeatable `--client-ca-certificate` and
-`--server-ca-certificate` flags accept strict DER or certificate-only PEM
-roots. `--require-certificate-status` requires a CRL covering every actual
-signature time for every carried certificate chain.
+`--registry-public-key`. When accepted receipts, committed receipts, and STHs
+span a server-key rotation, repeatable `--additional-server-public-key` flags
+provide the other verifier-local historical keys. Each signature is verified
+only with the exact trusted descriptor matching its `key_id`; one current
+server key is never substituted for a referenced historical key. Repeatable
+`--client-ca-certificate` and `--server-ca-certificate` flags accept strict
+DER or certificate-only PEM roots. `--require-certificate-status` requires a
+CRL covering every actual signature time for every carried certificate chain.
 
 If a file carries any identity evidence, the CLI requires complete evidence
 for every referenced client and server signature key. An incomplete subset
