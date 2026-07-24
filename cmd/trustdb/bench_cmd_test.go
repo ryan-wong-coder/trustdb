@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/sdk"
@@ -270,7 +271,11 @@ func (f *fakeBenchVisibilityTransport) GetRecord(_ context.Context, recordID str
 	if f.recordCalls[recordID] == 1 {
 		return model.RecordIndex{}, &sdk.Error{StatusCode: 404, Code: "NOT_FOUND", Message: "record not visible yet"}
 	}
-	return model.RecordIndex{RecordID: recordID, BatchID: "batch-bench-1"}, nil
+	return model.RecordIndex{
+		CryptoSuite: cryptosuite.INTLV1,
+		RecordID:    recordID,
+		BatchID:     "batch-bench-1",
+	}, nil
 }
 
 func (f *fakeBenchTransport) Endpoint() string { return "bench://fake" }
@@ -296,7 +301,11 @@ func (f *fakeBenchTransport) SubmitSignedClaim(_ context.Context, signed sdk.Sig
 }
 
 func (f *fakeBenchTransport) GetRecord(_ context.Context, recordID string) (sdk.RecordIndex, error) {
-	return model.RecordIndex{RecordID: recordID, BatchID: "batch-bench-1"}, nil
+	return model.RecordIndex{
+		CryptoSuite: cryptosuite.INTLV1,
+		RecordID:    recordID,
+		BatchID:     "batch-bench-1",
+	}, nil
 }
 
 func (f *fakeBenchTransport) ListRecords(context.Context, sdk.ListRecordsOptions) (sdk.RecordPage, error) {
@@ -310,6 +319,7 @@ func (f *fakeBenchTransport) ListRootsPage(context.Context, sdk.ListPageOptions)
 func (f *fakeBenchTransport) GetProofBundle(_ context.Context, recordID string) (sdk.ProofBundle, error) {
 	return model.ProofBundle{
 		SchemaVersion: model.SchemaProofBundle,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      recordID,
 		CommittedReceipt: model.CommittedReceipt{
 			BatchID: "batch-bench-1",
