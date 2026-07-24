@@ -201,6 +201,9 @@ func validateSignedTreeHead(suiteID cryptosuite.ID, sth model.SignedTreeHead) (c
 	if sth.SchemaVersion != model.SchemaSignedTreeHead {
 		return cryptosuite.Suite{}, fmt.Errorf("%w: signed STH schema_version=%q", ErrInvalidPayload, sth.SchemaVersion)
 	}
+	if err := cryptosuite.RequireSame(suiteID, sth.CryptoSuite); err != nil {
+		return cryptosuite.Suite{}, fmt.Errorf("%w: signed STH crypto_suite: %v", ErrInvalidPayload, err)
+	}
 	if strings.TrimSpace(sth.NodeID) == "" || strings.TrimSpace(sth.LogID) == "" {
 		return cryptosuite.Suite{}, fmt.Errorf("%w: signed STH node_id and log_id are required", ErrInvalidPayload)
 	}
