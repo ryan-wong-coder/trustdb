@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/objectstore"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
@@ -41,30 +42,32 @@ func newClaimFileCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var sum []byte
-			var n int64
+			suite, err := cryptosuite.RequireAvailable(key.CryptoSuite)
+			if err != nil {
+				return err
+			}
+			f, err := os.Open(filePath)
+			if err != nil {
+				return err
+			}
+			sum, n, err := trustcrypto.HashReaderWithProvider(provider, suite.ContentHash.Algorithm, f)
+			closeErr := f.Close()
+			if err != nil {
+				return err
+			}
+			if closeErr != nil {
+				return closeErr
+			}
 			storageURI := filePath
 			if objectDir != "" {
 				put, err := objectstore.LocalStore{Root: objectDir}.PutFile(context.Background(), filePath)
 				if err != nil {
 					return err
 				}
-				sum = put.ContentHash
-				n = put.ContentLength
+				if put.ContentLength != n {
+					return usageError("object store content length does not match the claimed file")
+				}
 				storageURI = put.URI
-			} else {
-				f, err := os.Open(filePath)
-				if err != nil {
-					return err
-				}
-				sum, n, err = trustcrypto.HashReader(model.DefaultHashAlg, f)
-				closeErr := f.Close()
-				if err != nil {
-					return err
-				}
-				if closeErr != nil {
-					return closeErr
-				}
 			}
 			nonce, err := trustcrypto.NewNonce(16)
 			if err != nil {
@@ -74,7 +77,8 @@ func newClaimFileCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := claim.NewFileClaim(
+			c, err := claim.NewFileClaimForSuite(
+				suite.ID,
 				tenantID,
 				clientID,
 				keyID,
@@ -82,7 +86,7 @@ func newClaimFileCommand(rt *runtimeConfig) *cobra.Command {
 				nonce,
 				base64.RawURLEncoding.EncodeToString(idem),
 				model.Content{
-					HashAlg:       model.DefaultHashAlg,
+					HashAlg:       suite.ContentHash.Algorithm,
 					ContentHash:   sum,
 					ContentLength: n,
 					MediaType:     "application/octet-stream",

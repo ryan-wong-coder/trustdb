@@ -12,6 +12,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/claim"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/internal/wal"
 )
@@ -101,6 +102,10 @@ func newWALDumpCommand(rt *runtimeConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			provider, err := trustcrypto.ProviderForSuite(opts.CryptoSuite)
+			if err != nil {
+				return trusterr.Wrap(trusterr.CodeFailedPrecondition, "open WAL cryptographic suite", err)
+			}
 			if limit > 0 && len(records) > limit {
 				records = records[:limit]
 			}
@@ -118,7 +123,10 @@ func newWALDumpCommand(rt *runtimeConfig) *cobra.Command {
 				if err := cborx.Unmarshal(record.Payload, &signed); err == nil {
 					claimCBOR, err := claim.Canonical(signed.Claim)
 					if err == nil {
-						item["record_id"] = claim.RecordID(claimCBOR, signed.Signature)
+						recordID, recordIDErr := claim.RecordIDWithProvider(provider, claimCBOR, signed.Signature)
+						if recordIDErr == nil {
+							item["record_id"] = recordID
+						}
 					}
 					item["tenant"] = signed.Claim.TenantID
 					item["client"] = signed.Claim.ClientID

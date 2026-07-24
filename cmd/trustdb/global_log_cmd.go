@@ -5,6 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/globallog"
+	"github.com/wowtrust/trustdb/internal/proofstore"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -109,7 +111,7 @@ func newGlobalLogInclusionCommand(rt *runtimeConfig) *cobra.Command {
 				return err
 			}
 			defer closeFn()
-			svc, err := globallog.NewReader(store)
+			svc, err := newGlobalLogReaderForStore(store)
 			if err != nil {
 				return err
 			}
@@ -160,7 +162,7 @@ func newGlobalLogConsistencyCommand(rt *runtimeConfig) *cobra.Command {
 				return err
 			}
 			defer closeFn()
-			svc, err := globallog.NewReader(store)
+			svc, err := newGlobalLogReaderForStore(store)
 			if err != nil {
 				return err
 			}
@@ -211,7 +213,7 @@ func newGlobalLogCompactCommand(rt *runtimeConfig) *cobra.Command {
 				return err
 			}
 			defer closeFn()
-			svc, err := globallog.NewReader(store)
+			svc, err := newGlobalLogReaderForStore(store)
 			if err != nil {
 				return err
 			}
@@ -228,4 +230,16 @@ func newGlobalLogCompactCommand(rt *runtimeConfig) *cobra.Command {
 	addProofStoreFlags(cmd, &metastoreKind, &metastorePath, &proofDir)
 	cmd.Flags().Uint64Var(&tileSize, "tile-size", 0, "history tile size (default from config)")
 	return cmd
+}
+
+func newGlobalLogReaderForStore(store proofstore.Store) (*globallog.Service, error) {
+	suiteID, err := proofstore.BoundCryptoSuite(store)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := trustcrypto.ProviderForSuite(suiteID)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "open Global Log cryptographic suite", err)
+	}
+	return globallog.NewReaderWithProvider(store, provider)
 }

@@ -12,17 +12,23 @@ import (
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
 
-func seedGlobalLogForCLI(t *testing.T, proofDir string) {
+func seedGlobalLogForCLI(t *testing.T, proofDir string, suiteID cryptosuite.ID) {
 	t.Helper()
-	store, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendFile, proofDir))
+	config := newBoundTestProofstoreConfig(proofstore.BackendFile, proofDir)
+	config.CryptoSuite = suiteID
+	store, err := proofstore.Open(config)
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
 	defer store.Close()
 	ctx := context.Background()
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	leafHash := bytes.Repeat([]byte{0x42}, 32)
 	leaf := model.GlobalLogLeaf{
-		CryptoSuite:        cryptosuite.INTLV1,
+		CryptoSuite:        suiteID,
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
 		BatchID:            "batch-1",
 		BatchRoot:          bytes.Repeat([]byte{0x11}, 32),
@@ -36,9 +42,9 @@ func seedGlobalLogForCLI(t *testing.T, proofDir string) {
 		t.Fatalf("PutGlobalLeaf: %v", err)
 	}
 	sth := model.SignedTreeHead{
-		CryptoSuite:    cryptosuite.INTLV1,
+		CryptoSuite:    suiteID,
 		SchemaVersion:  model.SchemaSignedTreeHead,
-		TreeAlg:        model.DefaultMerkleTreeAlg,
+		TreeAlg:        suite.Merkle.Algorithm,
 		TreeSize:       1,
 		RootHash:       leafHash,
 		TimestampUnixN: 102,
@@ -53,7 +59,7 @@ func TestGlobalLogInclusionCommand_DefaultsToJSONStdout(t *testing.T) {
 	t.Parallel()
 
 	proofDir := filepath.Join(t.TempDir(), "proofs")
-	seedGlobalLogForCLI(t, proofDir)
+	seedGlobalLogForCLI(t, proofDir, cryptosuite.INTLV1)
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -81,7 +87,7 @@ func TestGlobalLogInclusionCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 	tmp := t.TempDir()
 	proofDir := filepath.Join(tmp, "proofs")
 	outPath := filepath.Join(tmp, "batch-1.tdgproof")
-	seedGlobalLogForCLI(t, proofDir)
+	seedGlobalLogForCLI(t, proofDir, cryptosuite.INTLV1)
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -113,5 +119,33 @@ func TestGlobalLogInclusionCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 	}
 	if proof.SchemaVersion != model.SchemaGlobalLogProof || proof.BatchID != "batch-1" || proof.TreeSize != 1 {
 		t.Fatalf("exported proof = %+v", proof)
+	}
+}
+
+func TestGlobalLogInclusionCommandCNSMV1(t *testing.T) {
+	t.Parallel()
+
+	proofDir := filepath.Join(t.TempDir(), "proofs")
+	seedGlobalLogForCLI(t, proofDir, cryptosuite.CNSMV1)
+
+	var out, errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"global-log", "proof", "inclusion",
+		"--batch-id", "batch-1",
+		"--metastore-path", proofDir,
+		"--crypto-suite", "CN_SM_V1",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("global-log proof inclusion: %v stderr=%s", err, errOut.String())
+	}
+	var proof model.GlobalLogProof
+	if err := json.Unmarshal(out.Bytes(), &proof); err != nil {
+		t.Fatalf("stdout is not GlobalLogProof JSON: %q err=%v", out.String(), err)
+	}
+	if proof.CryptoSuite != cryptosuite.CNSMV1 ||
+		proof.STH.CryptoSuite != cryptosuite.CNSMV1 ||
+		proof.STH.TreeAlg != cryptosuite.MerkleRFC6962SM3 {
+		t.Fatalf("unexpected CN_SM_V1 proof: %+v", proof)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	prommodel "github.com/prometheus/common/model"
 	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -532,15 +533,20 @@ func submitBenchFile(ctx context.Context, client *sdk.Client, raw []byte, cfg be
 	if cfg.CryptoProvider == nil {
 		return sdk.SubmitResult{}, errors.New("bench: descriptor signer has no crypto provider")
 	}
+	suite, err := cryptosuite.RequireAvailable(cfg.CryptoProvider.Suite())
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
 	hashAlg := opts.HashAlg
 	if hashAlg == "" {
-		hashAlg = model.DefaultHashAlg
+		hashAlg = suite.ContentHash.Algorithm
 	}
 	contentHash, err := trustcrypto.HashBytesWithProvider(cfg.CryptoProvider, hashAlg, raw)
 	if err != nil {
 		return sdk.SubmitResult{}, err
 	}
-	claimValue, err := claim.NewFileClaim(
+	claimValue, err := claim.NewFileClaimForSuite(
+		suite.ID,
 		cfg.Identity.TenantID,
 		cfg.Identity.ClientID,
 		cfg.Identity.KeyID,
