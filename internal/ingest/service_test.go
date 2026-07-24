@@ -52,7 +52,7 @@ func TestServiceRejectsFullQueue(t *testing.T) {
 	t.Parallel()
 
 	block := make(chan struct{})
-	entered := make(chan struct{})
+	entered := make(chan struct{}, 1)
 	p := processorFunc(func(ctx context.Context, signed model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error) {
 		select {
 		case entered <- struct{}{}:
@@ -63,6 +63,7 @@ func TestServiceRejectsFullQueue(t *testing.T) {
 	})
 	svc := New(p, Options{QueueSize: 1, Workers: 1}, nil)
 	defer func() {
+		close(block)
 		_ = svc.Shutdown(context.Background())
 	}()
 
@@ -80,7 +81,6 @@ func TestServiceRejectsFullQueue(t *testing.T) {
 	defer cancel()
 	_, _, _, err := svc.Submit(ctx, model.SignedClaim{})
 	gotCode := trusterr.CodeOf(err)
-	close(block)
 	if gotCode != trusterr.CodeResourceExhausted {
 		t.Fatalf("Submit() error code = %s, want %s err=%v", gotCode, trusterr.CodeResourceExhausted, err)
 	}
