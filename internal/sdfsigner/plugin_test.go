@@ -579,7 +579,7 @@ func (s *fakeSession) PublicKey(ctx context.Context, keyIndex uint32, credential
 	if s.backend.publicErr != nil {
 		return nil, s.backend.publicErr
 	}
-	if keyIndex != 7 {
+	if keyIndex != 7 && keyIndex != 8 {
 		return nil, newFault(faultNotFound)
 	}
 	if string(credential) != "846295" {
@@ -598,7 +598,7 @@ func (s *fakeSession) SignSM2Digest(ctx context.Context, keyIndex uint32, creden
 	if s.backend.signErr != nil {
 		return nil, s.backend.signErr
 	}
-	if keyIndex != 7 || string(credential) != "846295" || len(digest) != 32 {
+	if (keyIndex != 7 && keyIndex != 8) || string(credential) != "846295" || len(digest) != 32 {
 		return nil, newFault(faultInvalid)
 	}
 	s.backend.lastDigest = append(s.backend.lastDigest[:0], digest...)

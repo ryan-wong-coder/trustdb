@@ -613,6 +613,41 @@ func (p *Plugin) acceptPublicKey(cacheKey string, publicKey []byte) error {
 	return nil
 }
 
+type publicKeyAcceptance struct {
+	cacheKey string
+	bytes    []byte
+}
+
+// acceptPublicKeysAtomically preflights every existing pin before publishing
+// any recovered pin. It prevents a later conflict from leaving an earlier
+// recovery entry visible in the process-local accepted cache.
+func (p *Plugin) acceptPublicKeysAtomically(values []publicKeyAcceptance) error {
+	prepared := make([]publicKeyAcceptance, len(values))
+	for i := range values {
+		prepared[i] = publicKeyAcceptance{
+			cacheKey: values[i].cacheKey,
+			bytes:    append([]byte(nil), values[i].bytes...),
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return newFault(faultUnavailable)
+	}
+	for _, value := range prepared {
+		if accepted, exists := p.accepted[value.cacheKey]; exists &&
+			!bytes.Equal(accepted, value.bytes) {
+			return newFault(faultPrecondition)
+		}
+	}
+	for _, value := range prepared {
+		if _, exists := p.accepted[value.cacheKey]; !exists {
+			p.accepted[value.cacheKey] = value.bytes
+		}
+	}
+	return nil
+}
+
 func (p *Plugin) requireAcceptedPublicKey(cacheKey string, publicKey []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
