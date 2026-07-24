@@ -564,7 +564,10 @@ func validateEventShape(suiteID cryptosuite.ID, event model.KeyEvent) (keydescri
 		if descriptor.KeyID != event.KeyID || descriptor.CryptoSuite != suiteID {
 			return keydescriptor.Descriptor{}, errors.New("keystore: event descriptor identity or suite mismatch")
 		}
-		if event.ValidFromUnixN == 0 || event.ValidUntilUnixN != 0 && event.ValidUntilUnixN <= event.ValidFromUnixN {
+		// Unix epoch is a valid lifecycle boundary. Do not use zero as a
+		// sentinel for ValidFromUnixN; callers may intentionally register a
+		// key that has been valid since 1970-01-01T00:00:00Z.
+		if event.ValidUntilUnixN != 0 && event.ValidUntilUnixN <= event.ValidFromUnixN {
 			return keydescriptor.Descriptor{}, errors.New("keystore: event validity interval is invalid")
 		}
 		if event.Type == model.KeyEventRotate {

@@ -95,6 +95,31 @@ func TestRegistryV2SupportsSM2AndRejectsMixedSuite(t *testing.T) {
 	}
 }
 
+func TestRegistryAllowsUnixEpochValidity(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "keys.tdkeys")
+	registrySigner, registryPub := newINTLRegistrySigner(t)
+	registry, err := Open(path, registrySigner, registryPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPub, _ := mustINTLKey(t)
+	if _, err := registry.RegisterClientKey("tenant", "client", intlVerifierDescriptor("epoch-key", clientPub), time.Unix(0, 0), time.Time{}); err != nil {
+		t.Fatalf("RegisterClientKey(epoch) error = %v", err)
+	}
+	if _, err := registry.LookupClientKeyAt("tenant", "client", "epoch-key", time.Unix(0, 0)); err != nil {
+		t.Fatalf("LookupClientKeyAt(epoch) error = %v", err)
+	}
+
+	reloaded, err := Open(path, nil, registryPub)
+	if err != nil {
+		t.Fatalf("Open(reload) error = %v", err)
+	}
+	if _, err := reloaded.LookupClientKeyAt("tenant", "client", "epoch-key", time.Unix(1, 0)); err != nil {
+		t.Fatalf("LookupClientKeyAt(reload) error = %v", err)
+	}
+}
+
 func TestRegistryRotationPreservesHistoricalLookup(t *testing.T) {
 	t.Parallel()
 	registrySigner, registryPub := newINTLRegistrySigner(t)
