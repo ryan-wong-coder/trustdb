@@ -290,4 +290,3 @@ const content = {
 export function natsIngressContent(locale = "zh-CN") {
   return content[locale] || content.en;
 }
-
