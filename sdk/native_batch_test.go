@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
@@ -100,6 +101,51 @@ func TestNativeLogBatchPreservesOrderAroundBuildFailures(t *testing.T) {
 	}
 	if got := transport.idempotencyKeys(); len(got) != 2 || got[0] != "first" || got[1] != "third" {
 		t.Fatalf("submitted idempotency keys = %v, want [first third]", got)
+	}
+}
+
+func TestCNSMV1NativeLogBatchPreservesSuiteAndOrder(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := GenerateCNSMV1SoftwareKey()
+	if err != nil {
+		t.Fatalf("GenerateCNSMV1SoftwareKey: %v", err)
+	}
+	transport := &capturingSignedClaimBatchTransport{
+		results: []signedClaimBatchItemResult{
+			{Index: 0, Result: SubmitResult{RecordID: "record-0"}},
+			{Index: 1, Result: SubmitResult{RecordID: "record-1"}},
+		},
+	}
+	client, err := NewClientWithTransportForSuite(transport, CryptoSuiteCNSMV1)
+	if err != nil {
+		t.Fatalf("NewClientWithTransportForSuite: %v", err)
+	}
+	result, err := client.SubmitLogBatch(
+		context.Background(),
+		[]LogEntry{
+			{Body: []byte(`{"index":0}`), Options: fixedLogClaimOptions("cn-first", 1)},
+			{Body: []byte(`{"index":1}`), Options: fixedLogClaimOptions("cn-second", 2)},
+		},
+		mustCNSMV1Identity(t, "tenant-cn", "client-cn", "client-sm2", privateKey),
+		LogSubmitOptions{Concurrency: 2},
+	)
+	if err != nil {
+		t.Fatalf("SubmitLogBatch: %v", err)
+	}
+	if result.Submitted != 2 || result.Results[0].Result.RecordID != "record-0" ||
+		result.Results[1].Result.RecordID != "record-1" {
+		t.Fatalf("result = %+v", result)
+	}
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	for index, signed := range transport.signed {
+		if signed.CryptoSuite != cryptosuite.CNSMV1 ||
+			signed.Claim.CryptoSuite != cryptosuite.CNSMV1 ||
+			signed.Claim.Content.HashAlg != cryptosuite.HashSM3 ||
+			signed.Signature.Alg != cryptosuite.SignatureSM2SM3 {
+			t.Fatalf("signed[%d] = %+v", index, signed)
+		}
 	}
 }
 

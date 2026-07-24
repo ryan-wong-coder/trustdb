@@ -64,6 +64,59 @@ func TestDecodeAndVerifyStatusRefreshJSON(t *testing.T) {
 	}
 }
 
+func TestDecodeAndVerifyStatusRefreshCNSMV1(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := GenerateCNSMV1SoftwareKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := trustcrypto.NewSM2Signer("server-sm2", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notification := model.StatusRefresh{
+		SchemaVersion:   model.SchemaStatusRefresh,
+		CryptoSuite:     cryptosuite.CNSMV1,
+		SubscriptionID:  "tss1-cn",
+		TenantID:        "tenant-cn",
+		ClientID:        "client-cn",
+		Version:         7,
+		RefreshRequired: true,
+		EmittedAtUnixN:  time.Now().UTC().UnixNano(),
+	}
+	payload, err := cborx.Marshal(notification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := trustcrypto.SignatureInputForSuite(cryptosuite.CNSMV1, trustcrypto.SignaturePurposeStatusRefresh, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notification.ServerSig, err = trustcrypto.Sign(context.Background(), cryptosuite.CNSMV1, signer, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := cborx.Marshal(notification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeAndVerifyStatusRefreshCBOR(body, mustCNSMV1PublicKey(t, "server-sm2", publicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.CryptoSuite != cryptosuite.CNSMV1 || decoded.ServerSig.Alg != cryptosuite.SignatureSM2SM3 {
+		t.Fatalf("decoded status refresh = %+v", decoded)
+	}
+	intlPublic, _, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAndVerifyStatusRefreshCBOR(body, mustINTLV1PublicKey(t, "server-sm2", intlPublic)); err == nil {
+		t.Fatal("CN status refresh verified with an INTL trust key")
+	}
+}
+
 func TestSubscribeNATSStatusRefreshSharesOneQueueGroupAcrossReplicas(t *testing.T) {
 	t.Parallel()
 
