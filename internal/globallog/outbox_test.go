@@ -51,6 +51,7 @@ func TestOutboxWorkerReschedulesAppendFailure(t *testing.T) {
 	}
 	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 		SchemaVersion: model.SchemaGlobalLogOutbox,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       root.BatchID,
 		BatchRoot:     root,
 		Status:        model.AnchorStatePending,
@@ -128,6 +129,7 @@ func TestOutboxWorkerPublishesBatch(t *testing.T) {
 	}
 	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 		SchemaVersion: model.SchemaGlobalLogOutbox,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       root.BatchID,
 		BatchRoot:     root,
 		Status:        model.AnchorStatePending,
@@ -185,7 +187,8 @@ func TestOutboxWorkerAtomicallyStoresOnlyFinalAnchorCandidate(t *testing.T) {
 		}
 		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 			SchemaVersion: model.SchemaGlobalLogOutbox, BatchID: roots[i].BatchID,
-			BatchRoot: roots[i], Status: model.AnchorStatePending,
+			CryptoSuite: cryptosuite.INTLV1,
+			BatchRoot:   roots[i], Status: model.AnchorStatePending,
 		}); err != nil {
 			t.Fatalf("EnqueueGlobalLog(%d): %v", i, err)
 		}
@@ -260,6 +263,7 @@ func TestOutboxWorkerRetryPreservesOriginalFixedAnchorWindow(t *testing.T) {
 	}
 	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 		SchemaVersion: model.SchemaGlobalLogOutbox,
+		CryptoSuite:   cryptosuite.INTLV1,
 		BatchID:       root.BatchID,
 		BatchRoot:     root,
 		Status:        model.AnchorStatePending,
@@ -371,6 +375,7 @@ func TestOutboxWorkerNonMonotonicCoveredRetryUsesHighestNewSTH(t *testing.T) {
 	for i, root := range []model.BatchRoot{newRoot, oldRoot} {
 		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 			SchemaVersion:   model.SchemaGlobalLogOutbox,
+			CryptoSuite:     cryptosuite.INTLV1,
 			BatchID:         root.BatchID,
 			BatchRoot:       root,
 			Status:          model.AnchorStatePending,
@@ -467,6 +472,7 @@ func TestOutboxWorkerReplayPastInFlightStartsWindowAtFirstLaterSTH(t *testing.T)
 	for i, root := range []model.BatchRoot{oldRoot, newRoot} {
 		if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
 			SchemaVersion:   model.SchemaGlobalLogOutbox,
+			CryptoSuite:     cryptosuite.INTLV1,
 			BatchID:         root.BatchID,
 			BatchRoot:       root,
 			Status:          model.AnchorStatePending,
@@ -508,7 +514,13 @@ func TestOutboxWorkerAnchorPathFailsClosedWithoutDurableMarker(t *testing.T) {
 	base := newBoundTestLocalStore(t, t.TempDir())
 	store := struct{ proofstore.Store }{Store: base}
 	root := model.BatchRoot{CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-anchor-unsupported", LogID: "unsupported-anchor", BatchRoot: bytes.Repeat([]byte{0x61}, 32), TreeSize: 1, ClosedAtUnixN: 1}
-	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{BatchID: root.BatchID, BatchRoot: root, Status: model.AnchorStatePending}); err != nil {
+	if err := store.EnqueueGlobalLog(ctx, model.GlobalLogOutboxItem{
+		SchemaVersion: model.SchemaGlobalLogOutbox,
+		CryptoSuite:   cryptosuite.INTLV1,
+		BatchID:       root.BatchID,
+		BatchRoot:     root,
+		Status:        model.AnchorStatePending,
+	}); err != nil {
 		t.Fatalf("EnqueueGlobalLog: %v", err)
 	}
 	_, priv, err := trustcrypto.GenerateEd25519Key()

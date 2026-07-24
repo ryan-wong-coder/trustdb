@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
@@ -51,11 +52,13 @@ func testDurableDecision() model.IdempotencyDecision {
 	claimHash := bytes.Repeat([]byte{1}, 32)
 	return model.IdempotencyDecision{
 		SchemaVersion: model.SchemaIdempotencyDecision,
+		CryptoSuite:   cryptosuite.INTLV1,
 		Identity:      identity,
 		ClaimHash:     claimHash,
 		BatchID:       "batch-1",
 		Record: model.ServerRecord{
 			SchemaVersion:       model.SchemaServerRecord,
+			CryptoSuite:         cryptosuite.INTLV1,
 			RecordID:            "record-1",
 			TenantID:            identity.TenantID,
 			ClientID:            identity.ClientID,
@@ -67,6 +70,7 @@ func testDurableDecision() model.IdempotencyDecision {
 		},
 		Accepted: model.AcceptedReceipt{
 			SchemaVersion:   model.SchemaAcceptedReceipt,
+			CryptoSuite:     cryptosuite.INTLV1,
 			RecordID:        "record-1",
 			Status:          "accepted",
 			ServerID:        "server-1",

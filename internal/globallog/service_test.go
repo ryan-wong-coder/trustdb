@@ -477,6 +477,7 @@ func TestAppendBatchRootRefusesPartialExistingLeafWithoutSTH(t *testing.T) {
 	}
 	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{
 		SchemaVersion:  model.SchemaGlobalLogState,
+		CryptoSuite:    cryptosuite.INTLV1,
 		TreeSize:       1,
 		RootHash:       append([]byte(nil), hash...),
 		Frontier:       [][]byte{append([]byte(nil), hash...)},
