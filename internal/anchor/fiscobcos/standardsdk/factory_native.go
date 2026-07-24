@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +33,26 @@ import (
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
 )
 
-const maxCertificateBytes = 4 << 20
+const (
+	maxCertificateBytes         = 4 << 20
+	maxSDKRuntimeCodeBytes      = 4 << 20
+	maxSDKRawTransactionBytes   = 4 << 20
+	maxSDKRawReceiptBytes       = 4 << 20
+	maxSDKRawHeaderBytes        = 2 << 20
+	maxSDKDecodedEventBytes     = 1 << 20
+	maxSDKProofNodeBytes        = 128 << 10
+	maxSDKProofNodes            = 512
+	maxSDKCommitSignatures      = 1024
+	maxSDKValidators            = 1024
+	maxSDKReceiptLogs           = 1024
+	maxSDKLogTopics             = 16
+	maxSDKSignatureBytes        = 1024
+	maxSDKConfigStringBytes     = 4096
+	maxSDKTransactionsPerBlock  = 65536
+	maxSDKParentBlocks          = 1024
+	maxSDKConsensusWeights      = 1024
+	maxSDKTransactionNonceBytes = 1024
+)
 
 type nativeDriver struct {
 	endpoint  string
@@ -151,7 +171,7 @@ func (d *nativeDriver) ProbeChain(ctx context.Context) (fiscobcos.ChainProbe, er
 	if err != nil {
 		return fiscobcos.ChainProbe{}, err
 	}
-	code, err := decodeSDKHexJSON(codeJSON)
+	code, err := decodeSDKHexJSON(codeJSON, maxSDKRuntimeCodeBytes)
 	if err != nil {
 		return fiscobcos.ChainProbe{}, fmt.Errorf("decode contract runtime: %w", err)
 	}
@@ -201,6 +221,9 @@ func (d *nativeDriver) SubmitAnchor(ctx context.Context, request fiscobcos.Submi
 	if err != nil {
 		return fiscobcos.Submission{}, err
 	}
+	if len(encoded) == 0 || len(encoded) > maxSDKRawTransactionBytes {
+		return fiscobcos.Submission{}, fiscobcos.ErrDriverInvalid
+	}
 	receipt, err := d.client.SendEncodedTransaction(ctx, encoded, true)
 	if err != nil {
 		return fiscobcos.Submission{}, &fiscobcos.DriverError{
@@ -212,6 +235,12 @@ func (d *nativeDriver) SubmitAnchor(ctx context.Context, request fiscobcos.Submi
 		return fiscobcos.Submission{}, &fiscobcos.DriverError{
 			Operation: "submit_anchor", Endpoint: d.endpoint,
 			Class: fiscobcos.FailureAmbiguous, Kind: fiscobcos.ErrIncompleteChainEvidence,
+		}
+	}
+	if err := validateReceiptRPCBounds(receipt); err != nil {
+		return fiscobcos.Submission{}, &fiscobcos.DriverError{
+			Operation: "submit_anchor_receipt", Endpoint: d.endpoint,
+			Class: fiscobcos.FailureAmbiguous, Kind: err,
 		}
 	}
 	if err := validateSubmittedReceipt(receipt, digest, d.sender, d.trust.Contract.Address, callData); err != nil {
@@ -276,6 +305,12 @@ func (d *nativeDriver) GetReceiptWithProof(ctx context.Context, attempt fiscobco
 	if receipt == nil || transaction == nil || receipt.ReceiptProof == nil || transaction.TransactionProof == nil {
 		return fiscobcos.ReceiptWithProof{}, fiscobcos.ErrIncompleteChainEvidence
 	}
+	if err := validateReceiptRPCBounds(receipt); err != nil {
+		return fiscobcos.ReceiptWithProof{}, err
+	}
+	if err := validateTransactionRPCBounds(transaction); err != nil {
+		return fiscobcos.ReceiptWithProof{}, err
+	}
 	if err := validateReceiptTransactionIdentity(receipt, transaction, attempt, d.trust); err != nil {
 		return fiscobcos.ReceiptWithProof{}, err
 	}
@@ -300,6 +335,9 @@ func (d *nativeDriver) GetReceiptWithProof(ctx context.Context, attempt fiscobco
 	rawReceipt, err := json.Marshal(receipt)
 	if err != nil {
 		return fiscobcos.ReceiptWithProof{}, err
+	}
+	if len(rawReceipt) == 0 || len(rawReceipt) > maxSDKRawReceiptBytes {
+		return fiscobcos.ReceiptWithProof{}, fiscobcos.ErrDriverInvalid
 	}
 	receiptHash, err := strictHex32(receipt.Hash)
 	if err != nil {
@@ -343,6 +381,9 @@ func (d *nativeDriver) GetBlockHeader(ctx context.Context, blockNumber uint64) (
 	if block == nil || block.Number != blockNumber {
 		return fiscobcos.BlockHeader{}, fiscobcos.ErrIncompleteChainEvidence
 	}
+	if err := validateBlockRPCBounds(block); err != nil {
+		return fiscobcos.BlockHeader{}, err
+	}
 	hash, err := strictHex32(block.Hash)
 	if err != nil {
 		return fiscobcos.BlockHeader{}, err
@@ -350,6 +391,9 @@ func (d *nativeDriver) GetBlockHeader(ctx context.Context, blockNumber uint64) (
 	raw, err := json.Marshal(block)
 	if err != nil {
 		return fiscobcos.BlockHeader{}, err
+	}
+	if len(raw) == 0 || len(raw) > maxSDKRawHeaderBytes {
+		return fiscobcos.BlockHeader{}, fiscobcos.ErrDriverInvalid
 	}
 	return fiscobcos.BlockHeader{Observation: fiscobcos.BlockRPCObservation{
 		NormalizedRPCHeader: raw, BlockHashClaim: hash, BlockNumber: blockNumber,
@@ -364,6 +408,9 @@ func (d *nativeDriver) GetConsensusSnapshot(ctx context.Context, blockNumber uin
 	if block == nil || block.Number != blockNumber || len(block.SignatureList) == 0 || len(block.SealerList) == 0 {
 		return fiscobcos.ConsensusSnapshot{}, fiscobcos.ErrIncompleteChainEvidence
 	}
+	if err := validateBlockRPCBounds(block); err != nil {
+		return fiscobcos.ConsensusSnapshot{}, err
+	}
 	hash, err := strictHex32(block.Hash)
 	if err != nil {
 		return fiscobcos.ConsensusSnapshot{}, err
@@ -373,7 +420,7 @@ func (d *nativeDriver) GetConsensusSnapshot(ctx context.Context, blockNumber uin
 		if signature.SealerIndex >= uint64(len(block.SealerList)) {
 			return fiscobcos.ConsensusSnapshot{}, fiscobcos.ErrIncompleteChainEvidence
 		}
-		value, err := decodeHex(signature.Signature)
+		value, err := decodeHexBounded(signature.Signature, maxSDKSignatureBytes)
 		if err != nil || len(value) == 0 {
 			return fiscobcos.ConsensusSnapshot{}, fiscobcos.ErrIncompleteChainEvidence
 		}
@@ -406,6 +453,9 @@ func (d *nativeDriver) transactionIndex(ctx context.Context, blockNumber uint64,
 	block, err := d.client.GetBlockByNumber(ctx, int64(blockNumber), false, true)
 	if err != nil {
 		return 0, err
+	}
+	if block == nil || len(block.Transactions) > maxSDKTransactionsPerBlock {
+		return 0, fiscobcos.ErrDriverInvalid
 	}
 	for index, item := range block.Transactions {
 		text, ok := item.(string)
@@ -452,7 +502,7 @@ func validateSubmittedReceipt(receipt *types.Receipt, digest, sender, contract, 
 	if err != nil || !bytes.Equal(to, contract) {
 		return fiscobcos.ErrContractMismatch
 	}
-	input, err := decodeHex(receipt.Input)
+	input, err := decodeHexBounded(receipt.Input, fiscobcos.MaxPayloadBytes+4)
 	if err != nil || !bytes.Equal(input, callData) {
 		return fiscobcos.ErrContractMismatch
 	}
@@ -482,7 +532,7 @@ func validateReceiptTransactionIdentity(receipt *types.Receipt, transaction *typ
 		uint64(transaction.BlockLimit) != attempt.BlockLimit {
 		return fiscobcos.ErrContractMismatch
 	}
-	signature, err := decodeHex(transaction.Signature)
+	signature, err := strictHexBytes(transaction.Signature, len(attempt.Signature))
 	if err != nil || !bytes.Equal(signature, attempt.Signature) {
 		return fiscobcos.ErrContractMismatch
 	}
@@ -510,11 +560,11 @@ func validateReceiptTransactionIdentity(receipt *types.Receipt, transaction *typ
 	if err != nil || !bytes.Equal(transactionTo, attempt.To) {
 		return fiscobcos.ErrContractMismatch
 	}
-	receiptInput, err := decodeHex(receipt.Input)
+	receiptInput, err := decodeHexBounded(receipt.Input, fiscobcos.MaxPayloadBytes+4)
 	if err != nil || !bytes.Equal(receiptInput, attempt.Input) {
 		return fiscobcos.ErrContractMismatch
 	}
-	transactionInput, err := decodeHex(transaction.Input)
+	transactionInput, err := decodeHexBounded(transaction.Input, fiscobcos.MaxPayloadBytes+4)
 	if err != nil || !bytes.Equal(transactionInput, attempt.Input) {
 		return fiscobcos.ErrContractMismatch
 	}
@@ -661,6 +711,9 @@ func verifyCertificateReferences(config fiscobcos.TrustConfig, requireSoftwareAc
 }
 
 func decodeAnchorEvent(receipt *types.Receipt, contract fiscobcos.ContractBinding) (fiscobcos.AnchorPublishedEvent, error) {
+	if err := validateReceiptLogBounds(receipt.Logs); err != nil {
+		return fiscobcos.AnchorPublishedEvent{}, err
+	}
 	eventID := legacyKeccak([]byte(contract.EventSignature))
 	address := common.BytesToAddress(contract.Address)
 	var matched *types.NewLog
@@ -695,8 +748,8 @@ func decodeAnchorEvent(receipt *types.Receipt, contract fiscobcos.ContractBindin
 	if err != nil || !bytes.Equal(publisherWord[:12], make([]byte, 12)) {
 		return fiscobcos.AnchorPublishedEvent{}, fiscobcos.ErrContractMismatch
 	}
-	data, err := decodeHex(matched.Data)
-	if err != nil || len(data) != 4*32 || !bytes.Equal(data[:24], make([]byte, 24)) ||
+	data, err := strictHexBytes(matched.Data, 4*32)
+	if err != nil || !bytes.Equal(data[:24], make([]byte, 24)) ||
 		!bytes.Equal(data[3*32:3*32+30], make([]byte, 30)) {
 		return fiscobcos.AnchorPublishedEvent{}, fiscobcos.ErrContractMismatch
 	}
@@ -713,23 +766,233 @@ func decodeAnchorEvent(receipt *types.Receipt, contract fiscobcos.ContractBindin
 	if err != nil {
 		return fiscobcos.AnchorPublishedEvent{}, err
 	}
+	if len(decoded) == 0 || len(decoded) > maxSDKDecodedEventBytes {
+		return fiscobcos.AnchorPublishedEvent{}, fiscobcos.ErrDriverInvalid
+	}
 	event.NormalizedRPCLog = decoded
 	return event, nil
 }
 
 func decodeProofNodes(values []string) ([][]byte, error) {
-	if values == nil {
+	if values == nil || len(values) > maxSDKProofNodes {
 		return nil, fiscobcos.ErrIncompleteChainEvidence
 	}
 	out := make([][]byte, len(values))
 	for i, value := range values {
-		decoded, err := decodeHex(value)
+		decoded, err := decodeHexBounded(value, maxSDKProofNodeBytes)
 		if err != nil || len(decoded) == 0 {
 			return nil, fiscobcos.ErrIncompleteChainEvidence
 		}
 		out[i] = decoded
 	}
 	return out, nil
+}
+
+func validateReceiptRPCBounds(receipt *types.Receipt) error {
+	if receipt == nil {
+		return fiscobcos.ErrIncompleteChainEvidence
+	}
+	budget := 0
+	if err := addPlainRPCBudget(&budget, receipt.Message, maxSDKConfigStringBytes, maxSDKRawReceiptBytes); err != nil {
+		return err
+	}
+	for _, field := range []struct {
+		value string
+		limit int
+	}{
+		{receipt.ContractAddress, 20},
+		{receipt.From, 20},
+		{receipt.GasUsed, 32},
+		{receipt.Hash, 32},
+		{receipt.Input, fiscobcos.MaxPayloadBytes + 4},
+		{receipt.Output, maxSDKDecodedEventBytes},
+		{receipt.To, 20},
+		{receipt.TransactionHash, 32},
+	} {
+		if err := addHexRPCBudget(&budget, field.value, field.limit, true, maxSDKRawReceiptBytes); err != nil {
+			return err
+		}
+	}
+	if receipt.ReceiptProof != nil {
+		if err := addProofRPCBudget(&budget, receipt.ReceiptProof, maxSDKRawReceiptBytes); err != nil {
+			return err
+		}
+	}
+	if err := addReceiptLogRPCBudget(&budget, receipt.Logs, maxSDKRawReceiptBytes); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateTransactionRPCBounds(transaction *types.TransactionDetail) error {
+	if transaction == nil {
+		return fiscobcos.ErrIncompleteChainEvidence
+	}
+	budget := 0
+	for _, value := range []string{transaction.Abi, transaction.ChainID, transaction.GroupID} {
+		if err := addPlainRPCBudget(&budget, value, maxSDKConfigStringBytes, maxSDKRawTransactionBytes); err != nil {
+			return err
+		}
+	}
+	for _, field := range []struct {
+		value string
+		limit int
+	}{
+		{transaction.From, 20},
+		{transaction.Hash, 32},
+		{transaction.Input, fiscobcos.MaxPayloadBytes + 4},
+		{transaction.Nonce, maxSDKTransactionNonceBytes},
+		{transaction.Signature, maxSDKSignatureBytes},
+		{transaction.To, 20},
+	} {
+		if err := addHexRPCBudget(&budget, field.value, field.limit, true, maxSDKRawTransactionBytes); err != nil {
+			return err
+		}
+	}
+	return addProofRPCBudget(&budget, transaction.TransactionProof, maxSDKRawTransactionBytes)
+}
+
+func validateBlockRPCBounds(block *types.Block) error {
+	if block == nil {
+		return fiscobcos.ErrIncompleteChainEvidence
+	}
+	if len(block.ParentInfo) > maxSDKParentBlocks ||
+		len(block.SealerList) > maxSDKValidators ||
+		len(block.SignatureList) > maxSDKCommitSignatures ||
+		len(block.ConsensusWeights) > maxSDKConsensusWeights ||
+		len(block.Transactions) != 0 {
+		return fiscobcos.ErrDriverInvalid
+	}
+	budget := 0
+	if err := addPlainRPCBudget(&budget, block.ExtraData, maxSDKDecodedEventBytes, maxSDKRawHeaderBytes); err != nil {
+		return err
+	}
+	for _, field := range []struct {
+		value string
+		limit int
+	}{
+		{block.GasLimit, 32},
+		{block.GasUsed, 32},
+		{block.Hash, 32},
+		{block.ReceiptsRoot, 32},
+		{block.StateRoot, 32},
+		{block.TxsRoot, 32},
+	} {
+		if err := addHexRPCBudget(&budget, field.value, field.limit, true, maxSDKRawHeaderBytes); err != nil {
+			return err
+		}
+	}
+	for _, parent := range block.ParentInfo {
+		if err := addHexRPCBudget(&budget, parent.BlockHash, 32, false, maxSDKRawHeaderBytes); err != nil {
+			return err
+		}
+	}
+	for _, nodeID := range block.SealerList {
+		if err := addHexRPCBudget(&budget, nodeID, maxSDKConfigStringBytes/2, false, maxSDKRawHeaderBytes); err != nil {
+			return err
+		}
+	}
+	for _, signature := range block.SignatureList {
+		if err := addHexRPCBudget(&budget, signature.Signature, maxSDKSignatureBytes, false, maxSDKRawHeaderBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateReceiptLogBounds(logs []*types.NewLog) error {
+	budget := 0
+	return addReceiptLogRPCBudget(&budget, logs, maxSDKRawReceiptBytes)
+}
+
+func addReceiptLogRPCBudget(budget *int, logs []*types.NewLog, limit int) error {
+	if len(logs) > maxSDKReceiptLogs {
+		return fiscobcos.ErrDriverInvalid
+	}
+	for _, entry := range logs {
+		if entry == nil || len(entry.Topics) > maxSDKLogTopics {
+			return fiscobcos.ErrDriverInvalid
+		}
+		if err := addHexRPCBudget(budget, entry.BlockNumber, 32, true, limit); err != nil {
+			return err
+		}
+		if err := addHexRPCBudget(budget, entry.Address, 20, false, limit); err != nil {
+			return err
+		}
+		if err := addHexRPCBudget(budget, entry.Data, maxSDKDecodedEventBytes, true, limit); err != nil {
+			return err
+		}
+		for _, topic := range entry.Topics {
+			if err := addHexRPCBudget(budget, topic, 32, false, limit); err != nil {
+				return err
+			}
+		}
+		if err := addRPCBudget(budget, 128+8*len(entry.Topics), limit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addProofRPCBudget(budget *int, values []string, limit int) error {
+	if values == nil || len(values) > maxSDKProofNodes {
+		return fiscobcos.ErrIncompleteChainEvidence
+	}
+	for _, value := range values {
+		if err := addHexRPCBudget(budget, value, maxSDKProofNodeBytes, false, limit); err != nil {
+			return err
+		}
+	}
+	return addRPCBudget(budget, 8*len(values), limit)
+}
+
+func addPlainRPCBudget(budget *int, value string, fieldLimit, totalLimit int) error {
+	if len(value) > fieldLimit {
+		return fiscobcos.ErrDriverInvalid
+	}
+	// JSON may expand arbitrary text by as much as six bytes per source byte.
+	if len(value) > (totalLimit-*budget)/6 {
+		return fiscobcos.ErrDriverInvalid
+	}
+	return addRPCBudget(budget, len(value)*6, totalLimit)
+}
+
+func addHexRPCBudget(budget *int, value string, decodedLimit int, allowEmpty bool, totalLimit int) error {
+	if err := validateHexText(value, decodedLimit, allowEmpty); err != nil {
+		return err
+	}
+	return addRPCBudget(budget, len(value), totalLimit)
+}
+
+func addRPCBudget(budget *int, amount, limit int) error {
+	if budget == nil || amount < 0 || *budget < 0 || *budget > limit-amount {
+		return fiscobcos.ErrDriverInvalid
+	}
+	*budget += amount
+	return nil
+}
+
+func validateHexText(value string, decodedLimit int, allowEmpty bool) error {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "0x")
+	if value == "" {
+		if allowEmpty {
+			return nil
+		}
+		return fiscobcos.ErrDriverInvalid
+	}
+	if decodedLimit < 0 || len(value)%2 != 0 || len(value) > decodedLimit*2 {
+		return fiscobcos.ErrDriverInvalid
+	}
+	for index := 0; index < len(value); index++ {
+		item := value[index]
+		if !('0' <= item && item <= '9') &&
+			!('a' <= item && item <= 'f') &&
+			!('A' <= item && item <= 'F') {
+			return fiscobcos.ErrDriverInvalid
+		}
+	}
+	return nil
 }
 
 func parseEndpoint(endpoint string) (string, int, error) {
@@ -819,12 +1082,15 @@ func openBoundedRegularFile(path string, privateKey bool) (*os.File, int64, erro
 	return file, info.Size(), nil
 }
 
-func decodeSDKHexJSON(data []byte) ([]byte, error) {
+func decodeSDKHexJSON(data []byte, decodedLimit int) ([]byte, error) {
+	if decodedLimit < 0 || len(data) == 0 || len(data) > decodedLimit*2+64 {
+		return nil, fiscobcos.ErrDriverInvalid
+	}
 	var value string
 	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, err
 	}
-	return decodeHex(value)
+	return decodeHexBounded(value, decodedLimit)
 }
 
 func strictHash(value []byte) (common.Hash, error) {
@@ -839,18 +1105,18 @@ func strictHex32(value string) ([]byte, error) {
 }
 
 func strictHexBytes(value string, size int) ([]byte, error) {
-	decoded, err := decodeHex(value)
+	decoded, err := decodeHexBounded(value, size)
 	if err != nil || len(decoded) != size {
 		return nil, fmt.Errorf("hex value must encode %d bytes", size)
 	}
 	return decoded, nil
 }
 
-func decodeHex(value string) ([]byte, error) {
-	value = strings.TrimPrefix(strings.TrimSpace(value), "0x")
-	if len(value)%2 != 0 {
-		return nil, errors.New("hex value has odd length")
+func decodeHexBounded(value string, decodedLimit int) ([]byte, error) {
+	if err := validateHexText(value, decodedLimit, false); err != nil {
+		return nil, err
 	}
+	value = strings.TrimPrefix(strings.TrimSpace(value), "0x")
 	return hex.DecodeString(value)
 }
 

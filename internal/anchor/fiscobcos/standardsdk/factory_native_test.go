@@ -172,3 +172,85 @@ func TestLocalReferencesAreAbsoluteRegularAndPrivate(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeRPCBoundsRejectHostileEndpointValuesBeforeDecode(t *testing.T) {
+	t.Parallel()
+
+	if _, err := decodeSDKHexJSON(
+		[]byte(`"0x`+strings.Repeat("00", 17)+`"`),
+		16,
+	); err == nil {
+		t.Fatal("accepted oversized contract code JSON")
+	}
+	if _, err := strictHexBytes("0x"+strings.Repeat("00", 33), 32); err == nil {
+		t.Fatal("accepted oversized fixed-width hash")
+	}
+	if _, err := decodeProofNodes(make([]string, maxSDKProofNodes+1)); err == nil {
+		t.Fatal("allocated an oversized proof path")
+	}
+	if _, err := decodeProofNodes([]string{
+		"0x" + strings.Repeat("00", maxSDKProofNodeBytes+1),
+	}); err == nil {
+		t.Fatal("decoded an oversized proof node")
+	}
+
+	receipt := &types.Receipt{ReceiptProof: []string{}}
+	if err := validateReceiptRPCBounds(receipt); err != nil {
+		t.Fatalf("compact receipt rejected: %v", err)
+	}
+	receipt.Message = strings.Repeat("x", maxSDKConfigStringBytes+1)
+	if err := validateReceiptRPCBounds(receipt); err == nil {
+		t.Fatal("accepted oversized receipt message")
+	}
+	receipt.Message = ""
+	receipt.ReceiptProof = make([]string, maxSDKProofNodes+1)
+	if err := validateReceiptRPCBounds(receipt); err == nil {
+		t.Fatal("accepted oversized receipt proof path")
+	}
+	receipt.ReceiptProof = []string{}
+	receipt.Logs = make([]*types.NewLog, maxSDKReceiptLogs+1)
+	if err := validateReceiptRPCBounds(receipt); err == nil {
+		t.Fatal("accepted oversized receipt log collection")
+	}
+	receipt.Logs = []*types.NewLog{{
+		Address: "0x" + strings.Repeat("00", 20),
+		Data:    "0x" + strings.Repeat("00", maxSDKDecodedEventBytes+1),
+		Topics:  []string{"0x" + strings.Repeat("00", 32)},
+	}}
+	if err := validateReceiptRPCBounds(receipt); err == nil {
+		t.Fatal("accepted oversized receipt log data")
+	}
+
+	transaction := &types.TransactionDetail{TransactionProof: []string{}}
+	if err := validateTransactionRPCBounds(transaction); err != nil {
+		t.Fatalf("compact transaction rejected: %v", err)
+	}
+	transaction.TransactionProof = make([]string, maxSDKProofNodes+1)
+	if err := validateTransactionRPCBounds(transaction); err == nil {
+		t.Fatal("accepted oversized transaction proof path")
+	}
+	transaction.TransactionProof = []string{}
+	transaction.Input = "0x" + strings.Repeat("00", fiscobcos.MaxPayloadBytes+5)
+	if err := validateTransactionRPCBounds(transaction); err == nil {
+		t.Fatal("accepted oversized transaction input")
+	}
+
+	block := &types.Block{}
+	if err := validateBlockRPCBounds(block); err != nil {
+		t.Fatalf("compact header rejected: %v", err)
+	}
+	block.SignatureList = make([]types.Signature, maxSDKCommitSignatures+1)
+	if err := validateBlockRPCBounds(block); err == nil {
+		t.Fatal("accepted oversized block signature collection")
+	}
+	block.SignatureList = nil
+	block.SealerList = []string{"0x" + strings.Repeat("00", maxSDKConfigStringBytes/2+1)}
+	if err := validateBlockRPCBounds(block); err == nil {
+		t.Fatal("accepted oversized validator node ID")
+	}
+	block.SealerList = nil
+	block.Transactions = make([]interface{}, 1)
+	if err := validateBlockRPCBounds(block); err == nil {
+		t.Fatal("accepted transaction bodies in a header-only response")
+	}
+}
