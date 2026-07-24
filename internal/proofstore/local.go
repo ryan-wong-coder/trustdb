@@ -3,7 +3,6 @@ package proofstore
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -34,7 +33,7 @@ const (
 	encodedFileNamePrefix     = "~"
 	localPositionWidth        = 20
 	localAnchorScheduleSuffix = ".tdsth-anchor-schedule"
-	localAnchorSchedulePrefix = "v1_"
+	localAnchorSchedulePrefix = "v2_"
 	localAnchorResultSuffix   = ".tdsth-anchor-result"
 	localAnchorResultPrefix   = "v2_"
 	localAnchorTreeRefSuffix  = ".tdsth-anchor-tree-ref"
@@ -42,7 +41,7 @@ const (
 	localAnchorTreeRootSuffix = ".tdsth-anchor-tree-root"
 	localL5CoverageSuffix     = ".tdl5-coverage"
 	localAnchorPublishSuffix  = ".tdanchor-publish-journal"
-	localAnchorPublishSchema  = "trustdb.local-anchor-publish-journal.v1"
+	localAnchorPublishSchema  = "trustdb.local-anchor-publish-journal.v2"
 	localNamespaceLockFile    = ".trustdb-proofstore.lock"
 )
 
@@ -2935,7 +2934,7 @@ func (s LocalStore) validateOrStoreSTHAnchorTreeRootLocked(nodeID, logID string,
 		return trusterr.Wrap(trusterr.CodeDataLoss, "read canonical sth anchor tree root", err)
 	}
 	var stored []byte
-	if err := cborx.UnmarshalLimit(data, &stored, maxStoredObjectBytes); err != nil || len(stored) != sha256.Size {
+	if err := cborx.UnmarshalLimit(data, &stored, maxStoredObjectBytes); err != nil || len(stored) != cryptosuite.DigestSize {
 		return trusterr.New(trusterr.CodeDataLoss, "canonical sth anchor tree root is invalid")
 	}
 	if !bytes.Equal(stored, rootHash) {
@@ -3151,6 +3150,9 @@ func (s LocalStore) ListSTHAnchorSchedules(ctx context.Context) ([]model.STHAnch
 	schedules := make([]model.STHAnchorSchedule, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), localAnchorScheduleSuffix) {
+			continue
+		}
+		if strings.HasPrefix(entry.Name(), "v1_") {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

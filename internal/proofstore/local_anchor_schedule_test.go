@@ -37,6 +37,9 @@ func TestLocalStoreSTHAnchorScheduleUsesEncodedTuplePath(t *testing.T) {
 	if strings.HasPrefix(rel, "..") || filepath.Dir(rel) != "." {
 		t.Fatalf("schedule path escaped tuple directory: %q", rel)
 	}
+	if !strings.HasPrefix(filepath.Base(path), "v2_") {
+		t.Fatalf("schedule path %q does not use the v2 key generation", path)
+	}
 	decoded, err := decodeLocalSTHAnchorScheduleFilename(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("decodeLocalSTHAnchorScheduleFilename: %v", err)
@@ -55,6 +58,26 @@ func TestLocalStoreSTHAnchorScheduleUsesEncodedTuplePath(t *testing.T) {
 	listed, err := store.ListSTHAnchorSchedules(ctx)
 	if err != nil || len(listed) != 1 || !reflect.DeepEqual(listed[0], want) {
 		t.Fatalf("ListSTHAnchorSchedules = %+v err=%v", listed, err)
+	}
+}
+
+func TestLocalStoreV2ScheduleKeyspaceIgnoresV1Files(t *testing.T) {
+	t.Parallel()
+
+	store := testLocalStore(t.TempDir())
+	if err := os.MkdirAll(store.sthAnchorScheduleDir(), 0o755); err != nil {
+		t.Fatalf("create schedule directory: %v", err)
+	}
+	legacyPath := filepath.Join(store.sthAnchorScheduleDir(), "v1_legacy.tdsth-anchor-schedule")
+	if err := os.WriteFile(legacyPath, []byte{0xa0}, 0o600); err != nil {
+		t.Fatalf("seed v1 schedule: %v", err)
+	}
+	schedules, err := store.ListSTHAnchorSchedules(context.Background())
+	if err != nil {
+		t.Fatalf("ListSTHAnchorSchedules: %v", err)
+	}
+	if len(schedules) != 0 {
+		t.Fatalf("v2 keyspace exposed v1 schedule: %+v", schedules)
 	}
 }
 
