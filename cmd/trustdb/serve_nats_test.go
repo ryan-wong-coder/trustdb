@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	trustconfig "github.com/wowtrust/trustdb/internal/config"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/natsingress"
 	"github.com/wowtrust/trustdb/internal/observability"
@@ -248,10 +249,12 @@ func acceptedServeNATSOutcome() submission.Outcome {
 		BatchEnqueued: true,
 		ServerRecord: model.ServerRecord{
 			SchemaVersion: model.SchemaServerRecord,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      recordID,
 		},
 		AcceptedReceipt: model.AcceptedReceipt{
 			SchemaVersion: model.SchemaAcceptedReceipt,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      recordID,
 			Status:        "accepted",
 		},
@@ -262,8 +265,10 @@ func serveNATSRequest(t *testing.T, idempotencyKey string) natsingress.Request {
 	t.Helper()
 	request, err := natsingress.NewRequest(model.SignedClaim{
 		SchemaVersion: model.SchemaSignedClaim,
+		CryptoSuite:   cryptosuite.INTLV1,
 		Claim: model.ClientClaim{
 			SchemaVersion:  model.SchemaClientClaim,
+			CryptoSuite:    cryptosuite.INTLV1,
 			TenantID:       "tenant-a",
 			ClientID:       "client-a",
 			IdempotencyKey: idempotencyKey,

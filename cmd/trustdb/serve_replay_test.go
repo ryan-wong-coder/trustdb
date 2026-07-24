@@ -16,6 +16,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -97,7 +98,7 @@ func TestReplayWALAcceptedRestoresUnbatchedRecord(t *testing.T) {
 	batchSvc := batch.New(
 		restartedEngine,
 		store,
-		batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour},
 		nil,
 	)
 	defer batchSvc.Shutdown(context.Background())
@@ -350,6 +351,7 @@ func newRecoveryEnv(t *testing.T, numClaims int) *recoveryEnv {
 	}
 
 	manifest := model.BatchManifest{
+		CryptoSuite:     cryptosuite.INTLV1,
 		SchemaVersion:   model.SchemaBatchManifest,
 		BatchID:         batchID,
 		State:           model.BatchStatePrepared,
@@ -362,6 +364,7 @@ func newRecoveryEnv(t *testing.T, numClaims int) *recoveryEnv {
 		PreparedAtUnixN: closedAt.UnixNano(),
 	}
 	root := model.BatchRoot{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       batchID,
 		BatchRoot:     bundles[0].CommittedReceipt.BatchRoot,
@@ -437,7 +440,7 @@ func (e *recoveryEnv) runReplay(t *testing.T) (int, int, int) {
 	svc := batch.New(
 		restartedEngine,
 		e.store,
-		batch.Options{QueueSize: len(e.items), MaxRecords: len(e.items), MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: len(e.items), MaxRecords: len(e.items), MaxDelay: time.Hour},
 		nil,
 	)
 	defer svc.Shutdown(context.Background())
@@ -741,7 +744,7 @@ func TestReplayRebuildsIdempotencyIndex(t *testing.T) {
 	batchSvc := batch.New(
 		restarted,
 		store,
-		batch.Options{QueueSize: 4, MaxRecords: 4, MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 4, MaxDelay: time.Hour},
 		nil,
 	)
 	defer batchSvc.Shutdown(context.Background())
@@ -829,7 +832,7 @@ func TestEmptyIdempotencyKeyExactRetrySurvivesRestart(t *testing.T) {
 	restarted.Idempotency = app.NewIdempotencyIndex()
 	store := newBoundTestLocalStore(t, filepath.Join(env.dir, "proofs"))
 	restarted.DurableRecords = store
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 3, MaxRecords: 3, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 3, MaxRecords: 3, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	if _, _, _, err = replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil); err != nil {
@@ -862,6 +865,7 @@ func TestReplaySkipsRecordsBelowCheckpoint(t *testing.T) {
 
 	top := env.items[len(env.items)-1].Record.WAL
 	if err := env.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     top.SegmentID,
 		LastSequence:  top.Sequence,
@@ -878,7 +882,7 @@ func TestReplaySkipsRecordsBelowCheckpoint(t *testing.T) {
 	svc := batch.New(
 		restarted,
 		store,
-		batch.Options{QueueSize: len(env.items), MaxRecords: len(env.items), MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: len(env.items), MaxRecords: len(env.items), MaxDelay: time.Hour},
 		nil,
 	)
 	defer svc.Shutdown(context.Background())
@@ -923,7 +927,7 @@ func TestReplayRecordsMetricsOnRecoveredPath(t *testing.T) {
 	svc := batch.New(
 		restarted,
 		env.store,
-		batch.Options{QueueSize: len(env.items), MaxRecords: len(env.items), MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: len(env.items), MaxRecords: len(env.items), MaxDelay: time.Hour},
 		nil,
 	)
 	defer svc.Shutdown(context.Background())
@@ -965,6 +969,7 @@ func TestReplaySkipsStalePreparedManifestBelowCheckpoint(t *testing.T) {
 
 	top := env.items[len(env.items)-1].Record.WAL
 	if err := env.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     top.SegmentID,
 		LastSequence:  top.Sequence,
@@ -981,7 +986,7 @@ func TestReplaySkipsStalePreparedManifestBelowCheckpoint(t *testing.T) {
 	svc := batch.New(
 		restarted,
 		store,
-		batch.Options{QueueSize: len(env.items), MaxRecords: len(env.items), MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: len(env.items), MaxRecords: len(env.items), MaxDelay: time.Hour},
 		nil,
 	)
 	defer svc.Shutdown(context.Background())
@@ -1022,9 +1027,9 @@ func TestOpenWALWriterModes(t *testing.T) {
 		if err := w.Close(); err != nil {
 			t.Fatalf("seed Close() error = %v", err)
 		}
-		got, mode, err := openWALWriter(walPath, 0)
+		got, mode, err := openBoundTestWALWriter(t, walPath, 0)
 		if err == nil || trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-			t.Fatalf("openWALWriter() = (%v, %q, %v), want failed precondition", got, mode, err)
+			t.Fatalf("openBoundTestWALWriter(t, ) = (%v, %q, %v), want failed precondition", got, mode, err)
 		}
 	})
 
@@ -1035,9 +1040,9 @@ func TestOpenWALWriterModes(t *testing.T) {
 		if err := os.MkdirAll(walDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll() error = %v", err)
 		}
-		got, mode, err := openWALWriter(walDir, 1024)
+		got, mode, err := openBoundTestWALWriter(t, walDir, 1024)
 		if err != nil {
-			t.Fatalf("openWALWriter() error = %v", err)
+			t.Fatalf("openBoundTestWALWriter(t, ) error = %v", err)
 		}
 		defer got.Close()
 		if mode != "directory" {
@@ -1052,9 +1057,9 @@ func TestOpenWALWriterModes(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		walPath := filepath.Join(dir, "fresh.wal")
-		got, mode, err := openWALWriter(walPath, 0)
+		got, mode, err := openBoundTestWALWriter(t, walPath, 0)
 		if err != nil {
-			t.Fatalf("openWALWriter() error = %v", err)
+			t.Fatalf("openBoundTestWALWriter(t, ) error = %v", err)
 		}
 		defer got.Close()
 		if mode != "directory" {
@@ -1073,9 +1078,9 @@ func TestOpenWALWriterModes(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		walPath := filepath.Join(dir, "wal")
-		got, mode, err := openWALWriter(walPath, 0)
+		got, mode, err := openBoundTestWALWriter(t, walPath, 0)
 		if err != nil {
-			t.Fatalf("openWALWriter() error = %v", err)
+			t.Fatalf("openBoundTestWALWriter(t, ) error = %v", err)
 		}
 		defer got.Close()
 		if mode != "directory" {
@@ -1108,9 +1113,9 @@ func TestReplayDirectoryModeRestoresRecord(t *testing.T) {
 
 	dir := t.TempDir()
 	walDir := filepath.Join(dir, "wal")
-	writer, mode, err := openWALWriter(walDir, 256)
+	writer, mode, err := openBoundTestWALWriter(t, walDir, 256)
 	if err != nil {
-		t.Fatalf("openWALWriter() error = %v", err)
+		t.Fatalf("openBoundTestWALWriter(t, ) error = %v", err)
 	}
 	if mode != "directory" {
 		t.Fatalf("mode = %q, want directory", mode)
@@ -1167,9 +1172,9 @@ func TestReplayDirectoryModeRestoresRecord(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	reopened, mode, err := openWALWriter(walDir, 256)
+	reopened, mode, err := openBoundTestWALWriter(t, walDir, 256)
 	if err != nil {
-		t.Fatalf("reopen openWALWriter() error = %v", err)
+		t.Fatalf("reopen openBoundTestWALWriter(t, ) error = %v", err)
 	}
 	if mode != "directory" {
 		t.Fatalf("reopened mode = %q, want directory", mode)
@@ -1189,7 +1194,7 @@ func TestReplayDirectoryModeRestoresRecord(t *testing.T) {
 	svc := batch.New(
 		restarted,
 		store,
-		batch.Options{QueueSize: len(wantRecords), MaxRecords: len(wantRecords), MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: len(wantRecords), MaxRecords: len(wantRecords), MaxDelay: time.Hour},
 		nil,
 	)
 	defer svc.Shutdown(context.Background())
@@ -1239,9 +1244,9 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 
 	dir := t.TempDir()
 	walDir := filepath.Join(dir, "wal")
-	writer, _, err := openWALWriter(walDir, 256)
+	writer, _, err := openBoundTestWALWriter(t, walDir, 256)
 	if err != nil {
-		t.Fatalf("openWALWriter() error = %v", err)
+		t.Fatalf("openBoundTestWALWriter(t, ) error = %v", err)
 	}
 	engine := app.LocalEngine{
 		ServerID:        "server-skip-seg",
@@ -1325,6 +1330,7 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 		}
 	}
 	if err := store.PutManifest(context.Background(), model.BatchManifest{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaBatchManifest,
 		BatchID:          checkpointBatchID,
 		State:            model.BatchStateCommitted,
@@ -1339,6 +1345,7 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 		t.Fatalf("PutManifest() error = %v", err)
 	}
 	if err := store.PutCheckpoint(context.Background(), model.WALCheckpoint{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     last.SegmentID,
 		LastSequence:  last.Sequence,
@@ -1348,9 +1355,9 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 		t.Fatalf("PutCheckpoint() error = %v", err)
 	}
 
-	reopened, _, err := openWALWriter(walDir, 256)
+	reopened, _, err := openBoundTestWALWriter(t, walDir, 256)
 	if err != nil {
-		t.Fatalf("reopen openWALWriter() error = %v", err)
+		t.Fatalf("reopen openBoundTestWALWriter(t, ) error = %v", err)
 	}
 	defer reopened.Close()
 	restarted := app.LocalEngine{
@@ -1364,7 +1371,7 @@ func TestReplayDirectoryModeSkipsEarlySegments(t *testing.T) {
 	svc := batch.New(
 		restarted,
 		store,
-		batch.Options{QueueSize: totalRecords, MaxRecords: totalRecords, MaxDelay: time.Hour},
+		batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: totalRecords, MaxRecords: totalRecords, MaxDelay: time.Hour},
 		nil,
 	)
 	defer svc.Shutdown(context.Background())

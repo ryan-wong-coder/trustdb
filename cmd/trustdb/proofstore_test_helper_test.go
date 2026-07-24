@@ -26,6 +26,11 @@ func newBoundTestWALOptions(t testing.TB, path string, opts wal.Options) wal.Opt
 	return opts
 }
 
+func openBoundTestWALWriter(t testing.TB, path string, maxSegmentBytes int64) (*wal.Writer, string, error) {
+	t.Helper()
+	return openWALWriterWithOptions(path, newBoundTestWALOptions(t, path, wal.Options{MaxSegmentBytes: maxSegmentBytes}))
+}
+
 func newBoundTestLocalStoreForSuite(t testing.TB, root string, suiteID cryptosuite.ID) proofstore.LocalStore {
 	t.Helper()
 	store, err := proofstore.OpenLocalStore(root, suiteID, "local-server", "trustdb-global-log", proofstoreNamespaceID("file", root, "", ""))

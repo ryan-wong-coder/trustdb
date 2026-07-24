@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
@@ -17,9 +18,11 @@ func seedGlobalLogForCLI(t *testing.T, proofDir string) {
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
+	defer store.Close()
 	ctx := context.Background()
 	leafHash := bytes.Repeat([]byte{0x42}, 32)
 	leaf := model.GlobalLogLeaf{
+		CryptoSuite:        cryptosuite.INTLV1,
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
 		BatchID:            "batch-1",
 		BatchRoot:          bytes.Repeat([]byte{0x11}, 32),
@@ -33,6 +36,7 @@ func seedGlobalLogForCLI(t *testing.T, proofDir string) {
 		t.Fatalf("PutGlobalLeaf: %v", err)
 	}
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       1,

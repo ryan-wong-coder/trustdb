@@ -21,6 +21,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/httpapi"
 	"github.com/wowtrust/trustdb/internal/ingest"
@@ -56,7 +57,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	anchorPath := filepath.Join(tmp, "anchors.jsonl")
 
 	_, metrics := observability.NewRegistry()
-	writer, mode, err := openWALWriterWithOptions(walDir, wal.Options{})
+	writer, mode, err := openWALWriterWithOptions(walDir, newBoundTestWALOptions(t, walDir, wal.Options{}))
 	if err != nil {
 		t.Fatalf("openWALWriterWithOptions: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	})
 	globalOutbox.Start(context.Background())
 	defer globalOutbox.Stop()
-	batchSvc := batch.New(engine, proofStore, batch.Options{
+	batchSvc := batch.New(engine, proofStore, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize: 8,
 		// MaxRecords=1 forces one record per batch, which gives us
 		// a deterministic number of batches regardless of parallel
@@ -165,9 +166,9 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Marshal(%d): %v", i, err)
 		}
-		resp, err := http.Post(server.URL+"/v1/claims", "application/cbor", bytes.NewReader(body))
+		resp, err := http.Post(server.URL+"/v2/claims", "application/cbor", bytes.NewReader(body))
 		if err != nil {
-			t.Fatalf("POST /v1/claims(%d): %v", i, err)
+			t.Fatalf("POST /v2/claims(%d): %v", i, err)
 		}
 		var decoded struct {
 			RecordID string `json:"record_id"`
@@ -178,7 +179,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusAccepted {
-			t.Fatalf("POST /v1/claims(%d) status = %d", i, resp.StatusCode)
+			t.Fatalf("POST /v2/claims(%d) status = %d", i, resp.StatusCode)
 		}
 		recordIDs = append(recordIDs, decoded.RecordID)
 	}
@@ -222,8 +223,8 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("anchors.jsonl lines = %d, want 1 (got %+v)", len(lines), lines)
 	}
-	if !strings.HasPrefix(lines[0].AnchorID, "file-") {
-		t.Fatalf("anchor id missing file- prefix: %q", lines[0].AnchorID)
+	if !strings.HasPrefix(lines[0].AnchorID, "file2-") {
+		t.Fatalf("anchor id missing file2- prefix: %q", lines[0].AnchorID)
 	}
 	if lines[0].TreeSize != totalClaims {
 		t.Fatalf("anchored tree size = %d, want %d", lines[0].TreeSize, totalClaims)
@@ -232,14 +233,14 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	// HTTP surface exposes the exact immutable result for the coalesced
 	// final STH.
 	treeSize := uint64(totalClaims)
-	resp, err := http.Get(fmt.Sprintf("%s/v1/anchors/sth/%d", server.URL, treeSize))
+	resp, err := http.Get(fmt.Sprintf("%s/v2/anchors/sth/%d", server.URL, treeSize))
 	if err != nil {
-		t.Fatalf("GET /v1/anchors/sth/%d: %v", treeSize, err)
+		t.Fatalf("GET /v2/anchors/sth/%d: %v", treeSize, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := readBody(resp)
 		resp.Body.Close()
-		t.Fatalf("GET /v1/anchors/sth/%d status = %d body=%s", treeSize, resp.StatusCode, body)
+		t.Fatalf("GET /v2/anchors/sth/%d status = %d body=%s", treeSize, resp.StatusCode, body)
 	}
 	var payload struct {
 		TreeSize   uint64 `json:"tree_size"`
@@ -256,7 +257,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 	}
 	resp.Body.Close()
 	if payload.Status != model.AnchorStatePublished {
-		t.Fatalf("/v1/anchors/sth/%d status = %q, want published", treeSize, payload.Status)
+		t.Fatalf("/v2/anchors/sth/%d status = %q, want published", treeSize, payload.Status)
 	}
 	if payload.TreeSize != treeSize {
 		t.Fatalf("tree_size = %d, want %d", payload.TreeSize, treeSize)
@@ -270,7 +271,7 @@ func TestServeAnchorEndToEnd(t *testing.T) {
 
 	// An unknown STH tree size is 404 so clients can differentiate
 	// "anchor not found" from "transport error".
-	resp, err = http.Get(server.URL + "/v1/anchors/sth/999999")
+	resp, err = http.Get(server.URL + "/v2/anchors/sth/999999")
 	if err != nil {
 		t.Fatalf("GET unknown anchor: %v", err)
 	}
@@ -290,6 +291,7 @@ func TestBackfillGlobalLog(t *testing.T) {
 
 	rootHash := bytes.Repeat([]byte{7}, 32)
 	root := model.BatchRoot{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       "startup-batch",
 		NodeID:        "test-node",

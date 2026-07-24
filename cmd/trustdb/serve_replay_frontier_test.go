@@ -132,7 +132,7 @@ func TestPebbleCheckpointedRestartUsesDurableIdempotencyWithoutWALAppend(t *test
 	if err != nil {
 		t.Fatalf("pebble.Open() error = %v", err)
 	}
-	svc := batch.New(env.engine, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := batch.New(env.engine, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	if err := svc.Enqueue(context.Background(), signed, wantRecord, wantAccepted); err != nil {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
@@ -168,7 +168,7 @@ func TestPebbleCheckpointedRestartUsesDurableIdempotencyWithoutWALAppend(t *test
 	restarted.WAL = reopenedWAL
 	restarted.Idempotency = app.NewIdempotencyIndex()
 	restarted.DurableIdempotency = store
-	replaySvc := batch.New(restarted, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	replaySvc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer replaySvc.Shutdown(context.Background())
 
 	recovered, replayed, skipped, err := replayWALAccepted(context.Background(), env.walPath, restarted, replaySvc, store, nil)
@@ -295,7 +295,7 @@ func TestReplayFlushesCommittedCoverageOnceAfterScan(t *testing.T) {
 	restarted.Idempotency = app.NewIdempotencyIndex()
 	store := &replayCheckpointStore{LocalStore: env.store}
 	var hooks []model.WALCheckpoint
-	svc := batch.New(restarted, store, batch.Options{
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:  len(env.items),
 		MaxRecords: len(env.items),
 		MaxDelay:   time.Hour,
@@ -336,7 +336,7 @@ func TestReplayCheckpointStopsBeforeUncommittedGap(t *testing.T) {
 	release := make(chan struct{}, 1)
 	engine := blockingReplayBatchEngine{base: restarted, entered: entered, release: release}
 	store := checkpointSafeLocalStore{LocalStore: env.store}
-	svc := batch.New(engine, store, batch.Options{
+	svc := batch.New(engine, store, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:  len(env.items),
 		MaxRecords: 1,
 		MaxDelay:   time.Hour,
@@ -397,7 +397,7 @@ func TestReplayDoesNotTreatOrphanRecordIndexAsCommitted(t *testing.T) {
 
 	restarted, reopened := env.restartedEngine(t)
 	defer reopened.Close()
-	svc := batch.New(restarted, env.store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, env.store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	_, _, _, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, env.store, nil)
@@ -409,210 +409,26 @@ func TestReplayDoesNotTreatOrphanRecordIndexAsCommitted(t *testing.T) {
 	}
 }
 
-func TestReplayMigratesLegacyCheckpointFromCompleteWAL(t *testing.T) {
-	env := newRecoveryEnv(t, 3)
-	env.writeBundles(t, len(env.bundles))
-	env.writeRoot(t)
-	env.writeCommittedManifest(t)
-	top := env.items[len(env.items)-1].Record.WAL
-	if err := env.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		SegmentID:     top.SegmentID,
-		LastSequence:  top.Sequence,
-		LastOffset:    top.Offset,
-		BatchID:       env.batchID,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
-
-	restarted, reopened := env.restartedEngine(t)
-	defer reopened.Close()
-	restarted.Idempotency = app.NewIdempotencyIndex()
-	store := &replayCheckpointStore{LocalStore: env.store}
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 3, MaxRecords: 3, MaxDelay: time.Hour}, nil)
-	defer svc.Shutdown(context.Background())
-
-	recovered, replayed, skipped, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
-	if err != nil {
-		t.Fatalf("replayWALAccepted() error = %v", err)
-	}
-	if recovered != 0 || replayed != 0 || skipped != 3 {
-		t.Fatalf("replayWALAccepted() recovered=%d replayed=%d skipped=%d, want 0/0/3", recovered, replayed, skipped)
-	}
-	if got := restarted.Idempotency.Size(); got != 3 {
-		t.Fatalf("legacy replay idempotency size = %d, want 3 (full WAL was decoded)", got)
-	}
-	puts := store.checkpoints()
-	if len(puts) != 1 || puts[0].SchemaVersion != model.SchemaWALCheckpointContiguous || puts[0].LastSequence != 3 {
-		t.Fatalf("legacy migration puts = %+v, want one v2 sequence-3 checkpoint", puts)
-	}
-}
-
-func TestReplayRejectsLegacyCheckpointBeyondWALTail(t *testing.T) {
-	env := newRecoveryEnv(t, 3)
-	env.writeBundles(t, len(env.bundles))
-	env.writeRoot(t)
-	env.writeCommittedManifest(t)
-	if err := env.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		SegmentID:     1,
-		LastSequence:  10,
-		LastOffset:    10_000,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
-	restarted, reopened := env.restartedEngine(t)
-	defer reopened.Close()
-	restarted.Idempotency = app.NewIdempotencyIndex()
-	store := &replayCheckpointStore{LocalStore: env.store}
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 3, MaxRecords: 3, MaxDelay: time.Hour}, nil)
-	defer svc.Shutdown(context.Background())
-
-	_, _, _, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
-	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
-		t.Fatalf("replayWALAccepted() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
-	}
-	if puts := store.checkpoints(); len(puts) != 0 {
-		t.Fatalf("checkpoint writes after missing tail = %+v, want none", puts)
-	}
-	if restarted.Idempotency.Size() != 0 {
-		t.Fatalf("legacy tail preflight replayed %d records before failing", restarted.Idempotency.Size())
-	}
-	cp, found, getErr := env.store.GetCheckpoint(context.Background())
-	if getErr != nil || !found || cp.SchemaVersion != model.SchemaWALCheckpoint || cp.LastSequence != 10 {
-		t.Fatalf("legacy checkpoint changed after failed validation: %+v found=%v err=%v", cp, found, getErr)
-	}
-}
-
-func TestReplayFailsWhenLegacyCheckpointMigrationCannotPersist(t *testing.T) {
-	env := newRecoveryEnv(t, 1)
-	env.writeBundles(t, 1)
-	env.writeRoot(t)
-	env.writeCommittedManifest(t)
-	pos := env.items[0].Record.WAL
-	if err := env.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		SegmentID:     pos.SegmentID,
-		LastSequence:  pos.Sequence,
-		LastOffset:    pos.Offset,
-		BatchID:       env.batchID,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
-	}
-	restarted, reopened := env.restartedEngine(t)
-	defer reopened.Close()
-	store := &replayCheckpointStore{LocalStore: env.store, failPuts: 1}
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
-	defer svc.Shutdown(context.Background())
-
-	_, _, _, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
-	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
-		t.Fatalf("replayWALAccepted() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
-	}
-	cp, found, getErr := env.store.GetCheckpoint(context.Background())
-	if getErr != nil || !found || cp.SchemaVersion != model.SchemaWALCheckpoint {
-		t.Fatalf("legacy checkpoint after failed migration = %+v found=%v err=%v", cp, found, getErr)
-	}
-}
-
-func TestReplayRejectsLegacyCheckpointWithPrunedPrefix(t *testing.T) {
-	walDir := filepath.Join(t.TempDir(), "wal")
-	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{MaxSegmentBytes: 128}))
-	if err != nil {
-		t.Fatalf("OpenDirWriter() error = %v", err)
-	}
-	var positions []model.WALPosition
-	for i := 0; i < 5; i++ {
-		pos, _, appendErr := writer.Append(context.Background(), make([]byte, 256))
-		if appendErr != nil {
-			t.Fatalf("Append(%d) error = %v", i, appendErr)
-		}
-		positions = append(positions, pos)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-	cutoff := positions[2].SegmentID
-	if removed, _, err := wal.PruneSegmentsBefore(walDir, cutoff, newBoundTestWALOptions(t, walDir, wal.Options{})); err != nil || removed == 0 {
-		t.Fatalf("PruneSegmentsBefore(%d) removed=%d err=%v", cutoff, removed, err)
-	}
-
-	local := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "proofs"))
+func TestReplayRejectsUnsupportedCheckpointSchema(t *testing.T) {
+	local := newBoundTestLocalStore(t, t.TempDir())
 	if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		SegmentID:     positions[len(positions)-1].SegmentID,
-		LastSequence:  positions[len(positions)-1].Sequence,
-		LastOffset:    positions[len(positions)-1].Offset,
+		CryptoSuite:   cryptosuite.INTLV1,
+		SchemaVersion: "trustdb.wal-checkpoint.v2",
+		LastSequence:  4,
 	}); err != nil {
-		t.Fatalf("PutCheckpoint(legacy) error = %v", err)
+		t.Fatalf("PutCheckpoint() error = %v", err)
 	}
 	store := &replayCheckpointStore{LocalStore: local}
-	svc := batch.New(app.LocalEngine{}, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := batch.New(app.LocalEngine{}, store, batch.Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 
-	_, _, _, err = replayWALAccepted(context.Background(), walDir, app.LocalEngine{}, svc, store, nil)
-	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
-		t.Fatalf("replayWALAccepted() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
+	_, _, _, err := replayWALAccepted(context.Background(), filepath.Join(t.TempDir(), "missing.wal"), app.LocalEngine{}, svc, store, nil)
+	if trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
+		t.Fatalf("replayWALAccepted() code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
 	}
 	if puts := store.checkpoints(); len(puts) != 0 {
-		t.Fatalf("checkpoint writes after missing prefix = %+v, want none", puts)
+		t.Fatalf("unsupported checkpoint triggered writes: %+v", puts)
 	}
-
-	unsafeLocal := checkpointUnsafeLocalStore{LocalStore: newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "unsafe-proofs"))}
-	if err := unsafeLocal.PutCheckpoint(context.Background(), model.WALCheckpoint{
-		SchemaVersion: model.SchemaWALCheckpoint,
-		SegmentID:     positions[len(positions)-1].SegmentID,
-		LastSequence:  positions[len(positions)-1].Sequence,
-		LastOffset:    positions[len(positions)-1].Offset,
-	}); err != nil {
-		t.Fatalf("PutCheckpoint(unsafe legacy) error = %v", err)
-	}
-	unsafeSvc := batch.New(app.LocalEngine{}, unsafeLocal, batch.Options{}, nil)
-	defer unsafeSvc.Shutdown(context.Background())
-	_, _, _, err = replayWALAccepted(context.Background(), walDir, app.LocalEngine{}, unsafeSvc, unsafeLocal, nil)
-	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
-		t.Fatalf("unsafe-store replay code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
-	}
-}
-
-func TestReplayLegacyEmptyWALMigrationSafety(t *testing.T) {
-	t.Run("nonzero fails closed", func(t *testing.T) {
-		local := newBoundTestLocalStore(t, t.TempDir())
-		if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{SchemaVersion: model.SchemaWALCheckpoint, LastSequence: 4}); err != nil {
-			t.Fatalf("PutCheckpoint() error = %v", err)
-		}
-		store := &replayCheckpointStore{LocalStore: local}
-		svc := batch.New(app.LocalEngine{}, store, batch.Options{}, nil)
-		defer svc.Shutdown(context.Background())
-		_, _, _, err := replayWALAccepted(context.Background(), filepath.Join(t.TempDir(), "missing.wal"), app.LocalEngine{}, svc, store, nil)
-		if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
-			t.Fatalf("replayWALAccepted() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
-		}
-		if puts := store.checkpoints(); len(puts) != 0 {
-			t.Fatalf("nonzero empty migration writes = %+v, want none", puts)
-		}
-	})
-
-	t.Run("zero migrates without pruning", func(t *testing.T) {
-		local := newBoundTestLocalStore(t, t.TempDir())
-		if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{SchemaVersion: model.SchemaWALCheckpoint}); err != nil {
-			t.Fatalf("PutCheckpoint() error = %v", err)
-		}
-		store := &replayCheckpointStore{LocalStore: local}
-		var hooks int
-		svc := batch.New(app.LocalEngine{}, store, batch.Options{OnCheckpointAdvanced: func(context.Context, model.WALCheckpoint) { hooks++ }}, nil)
-		defer svc.Shutdown(context.Background())
-		if _, _, _, err := replayWALAccepted(context.Background(), filepath.Join(t.TempDir(), "missing.wal"), app.LocalEngine{}, svc, store, nil); err != nil {
-			t.Fatalf("replayWALAccepted() error = %v", err)
-		}
-		puts := store.checkpoints()
-		if len(puts) != 1 || puts[0].SchemaVersion != model.SchemaWALCheckpointContiguous || puts[0].LastSequence != 0 {
-			t.Fatalf("zero empty migration writes = %+v, want one v2 zero", puts)
-		}
-		if hooks != 0 {
-			t.Fatalf("zero migration hooks = %d, want 0", hooks)
-		}
-	})
 }
 
 func TestReplayIgnoresCheckpointFromUnsafeFileStore(t *testing.T) {
@@ -622,6 +438,7 @@ func TestReplayIgnoresCheckpointFromUnsafeFileStore(t *testing.T) {
 	env.writeCommittedManifest(t)
 	top := env.items[len(env.items)-1].Record.WAL
 	if err := env.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     top.SegmentID,
 		LastSequence:  top.Sequence,
@@ -633,7 +450,7 @@ func TestReplayIgnoresCheckpointFromUnsafeFileStore(t *testing.T) {
 	defer reopened.Close()
 	restarted.Idempotency = app.NewIdempotencyIndex()
 	unsafeStore := checkpointUnsafeLocalStore{LocalStore: env.store}
-	svc := batch.New(restarted, unsafeStore, batch.Options{QueueSize: 2, MaxRecords: 2, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, unsafeStore, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 2, MaxRecords: 2, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	_, replayed, skipped, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, unsafeStore, nil)
@@ -667,6 +484,7 @@ func TestReplayUnsafeSharedStoreAcceptsCommittedProofFromAnotherNodeWAL(t *testi
 		t.Fatalf("PutBundle(remote) error = %v", err)
 	}
 	if err := store.PutRoot(context.Background(), model.BatchRoot{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       remoteBatchID,
 		BatchRoot:     remoteBundles[0].CommittedReceipt.BatchRoot,
@@ -676,6 +494,7 @@ func TestReplayUnsafeSharedStoreAcceptsCommittedProofFromAnotherNodeWAL(t *testi
 		t.Fatalf("PutRoot(remote) error = %v", err)
 	}
 	if err := store.PutManifest(context.Background(), model.BatchManifest{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaBatchManifest,
 		BatchID:          remoteBatchID,
 		State:            model.BatchStateCommitted,
@@ -693,7 +512,7 @@ func TestReplayUnsafeSharedStoreAcceptsCommittedProofFromAnotherNodeWAL(t *testi
 	restarted, reopened := env.restartedEngine(t)
 	defer reopened.Close()
 	restarted.Idempotency = app.NewIdempotencyIndex()
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	recovered, replayed, skipped, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
@@ -728,15 +547,24 @@ func TestReplayRejectsZeroTrustedCheckpointWithPrunedPrefix(t *testing.T) {
 	if removed, _, err := wal.PruneSegmentsBefore(walDir, positions[2].SegmentID, newBoundTestWALOptions(t, walDir, wal.Options{})); err != nil || removed == 0 {
 		t.Fatalf("PruneSegmentsBefore(%d) removed=%d err=%v", positions[2].SegmentID, removed, err)
 	}
+	replayWriter, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{MaxSegmentBytes: 128}))
+	if err != nil {
+		t.Fatalf("reopen WAL writer: %v", err)
+	}
+	defer replayWriter.Close()
 
 	local := newBoundTestLocalStore(t, filepath.Join(t.TempDir(), "proofs"))
-	if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{SchemaVersion: model.SchemaWALCheckpointContiguous}); err != nil {
+	if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{
+		SchemaVersion: model.SchemaWALCheckpointContiguous,
+		CryptoSuite:   cryptosuite.INTLV1,
+	}); err != nil {
 		t.Fatalf("PutCheckpoint(v2 zero) error = %v", err)
 	}
 	store := checkpointSafeLocalStore{LocalStore: local}
-	svc := batch.New(app.LocalEngine{}, store, batch.Options{}, nil)
+	engine := app.LocalEngine{WAL: replayWriter}
+	svc := batch.New(engine, store, batch.Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
-	_, _, _, err = replayWALAccepted(context.Background(), walDir, app.LocalEngine{}, svc, store, nil)
+	_, _, _, err = replayWALAccepted(context.Background(), walDir, engine, svc, store, nil)
 	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 		t.Fatalf("replayWALAccepted() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
 	}
@@ -777,6 +605,7 @@ func TestReplayRejectsCorruptTrustedCheckpointProof(t *testing.T) {
 			env.writeCommittedManifest(t)
 			pos := env.items[0].Record.WAL
 			if err := env.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
+				CryptoSuite:   cryptosuite.INTLV1,
 				SchemaVersion: model.SchemaWALCheckpointContiguous,
 				SegmentID:     pos.SegmentID,
 				LastSequence:  pos.Sequence,
@@ -794,7 +623,7 @@ func TestReplayRejectsCorruptTrustedCheckpointProof(t *testing.T) {
 			defer reopened.Close()
 			restarted.Idempotency = app.NewIdempotencyIndex()
 			store := checkpointSafeLocalStore{LocalStore: env.store}
-			svc := batch.New(restarted, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+			svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 			defer svc.Shutdown(context.Background())
 			_, _, _, err = replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
 			if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
@@ -825,7 +654,7 @@ func TestReplayRejectsCorruptClaimBeforeFirstSafeCheckpoint(t *testing.T) {
 	defer reopened.Close()
 	store := checkpointSafeLocalStore{LocalStore: env.store}
 	var hooks int
-	svc := batch.New(restarted, store, batch.Options{
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:  1,
 		MaxRecords: 1,
 		MaxDelay:   time.Hour,
@@ -854,6 +683,7 @@ func TestReplayRejectsTrustedCheckpointAgainstReplacedWAL(t *testing.T) {
 	original.writeCommittedManifest(t)
 	pos := original.items[0].Record.WAL
 	if err := original.store.PutCheckpoint(context.Background(), model.WALCheckpoint{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     pos.SegmentID,
 		LastSequence:  pos.Sequence,
@@ -867,7 +697,7 @@ func TestReplayRejectsTrustedCheckpointAgainstReplacedWAL(t *testing.T) {
 	restarted, reopened := replacement.restartedEngine(t)
 	defer reopened.Close()
 	store := checkpointSafeLocalStore{LocalStore: original.store}
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 	_, _, _, err := replayWALAccepted(context.Background(), replacement.walPath, restarted, svc, store, nil)
 	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
@@ -876,8 +706,15 @@ func TestReplayRejectsTrustedCheckpointAgainstReplacedWAL(t *testing.T) {
 }
 
 func TestReplayRejectsTrustedNonzeroCheckpointWithEmptyWAL(t *testing.T) {
+	walDir := filepath.Join(t.TempDir(), "wal")
+	writer, err := wal.OpenDirWriter(walDir, newBoundTestWALOptions(t, walDir, wal.Options{}))
+	if err != nil {
+		t.Fatalf("OpenDirWriter() error = %v", err)
+	}
+	defer writer.Close()
 	local := newBoundTestLocalStore(t, t.TempDir())
 	if err := local.PutCheckpoint(context.Background(), model.WALCheckpoint{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaWALCheckpointContiguous,
 		SegmentID:     1,
 		LastSequence:  1,
@@ -887,9 +724,10 @@ func TestReplayRejectsTrustedNonzeroCheckpointWithEmptyWAL(t *testing.T) {
 		t.Fatalf("PutCheckpoint(v2) error = %v", err)
 	}
 	store := checkpointSafeLocalStore{LocalStore: local}
-	svc := batch.New(app.LocalEngine{}, store, batch.Options{}, nil)
+	engine := app.LocalEngine{WAL: writer}
+	svc := batch.New(engine, store, batch.Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
-	_, _, _, err := replayWALAccepted(context.Background(), filepath.Join(t.TempDir(), "missing.wal"), app.LocalEngine{}, svc, store, nil)
+	_, _, _, err = replayWALAccepted(context.Background(), walDir, engine, svc, store, nil)
 	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
 		t.Fatalf("replayWALAccepted() code=%s err=%v, want data_loss", trusterr.CodeOf(err), err)
 	}
@@ -907,7 +745,7 @@ func TestReplayRejectsWrongCommittedManifestMember(t *testing.T) {
 	restarted, reopened := env.restartedEngine(t)
 	defer reopened.Close()
 	store := checkpointSafeLocalStore{LocalStore: env.store}
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	_, _, _, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
@@ -931,7 +769,7 @@ func TestReplayRejectsCommittedManifestWithWrongRoot(t *testing.T) {
 	defer reopened.Close()
 	store := checkpointSafeLocalStore{LocalStore: env.store}
 	var hooks int
-	svc := batch.New(restarted, store, batch.Options{
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:  1,
 		MaxRecords: 1,
 		MaxDelay:   time.Hour,
@@ -973,7 +811,7 @@ func TestReplayRejectsCommittedBundleWithWrongAuditPath(t *testing.T) {
 	defer reopened.Close()
 	store := checkpointSafeLocalStore{LocalStore: env.store}
 	var hooks int
-	svc := batch.New(restarted, store, batch.Options{
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:  2,
 		MaxRecords: 2,
 		MaxDelay:   time.Hour,
@@ -1006,7 +844,7 @@ func TestReplayRejectsCommittedBundleWithWrongWAL(t *testing.T) {
 	restarted, reopened := env.restartedEngine(t)
 	defer reopened.Close()
 	store := checkpointSafeLocalStore{LocalStore: env.store}
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 1, MaxRecords: 1, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 
 	_, _, _, err := replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
@@ -1041,7 +879,7 @@ func TestReplayRejectsDuplicateRecordIDAtDifferentWALPosition(t *testing.T) {
 	restarted, reopened := env.restartedEngine(t)
 	defer reopened.Close()
 	store := &replayCheckpointStore{LocalStore: env.store}
-	svc := batch.New(restarted, store, batch.Options{QueueSize: 2, MaxRecords: 2, MaxDelay: time.Hour}, nil)
+	svc := batch.New(restarted, store, batch.Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 2, MaxRecords: 2, MaxDelay: time.Hour}, nil)
 	defer svc.Shutdown(context.Background())
 	_, _, _, err = replayWALAccepted(context.Background(), env.walPath, restarted, svc, store, nil)
 	if trusterr.CodeOf(err) != trusterr.CodeDataLoss {
@@ -1075,6 +913,7 @@ func writeCommittedRecoverySubset(t *testing.T, env *recoveryEnv, batchID string
 		}
 	}
 	root := model.BatchRoot{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaBatchRoot,
 		BatchID:       batchID,
 		BatchRoot:     bundles[0].CommittedReceipt.BatchRoot,
@@ -1085,6 +924,7 @@ func writeCommittedRecoverySubset(t *testing.T, env *recoveryEnv, batchID string
 		t.Fatalf("PutRoot(%q) error = %v", batchID, err)
 	}
 	manifest := model.BatchManifest{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaBatchManifest,
 		BatchID:          batchID,
 		State:            model.BatchStateCommitted,

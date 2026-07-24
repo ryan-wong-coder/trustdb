@@ -15,6 +15,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/anchor"
 	"github.com/wowtrust/trustdb/internal/app"
 	"github.com/wowtrust/trustdb/internal/batch"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/httpapi"
@@ -211,7 +212,7 @@ func newTransportE2EEnv(t *testing.T) transportE2EEnv {
 	globalOutbox.Start(context.Background())
 	t.Cleanup(globalOutbox.Stop)
 
-	batchSvc := batch.New(engine, proofStore, batch.Options{
+	batchSvc := batch.New(engine, proofStore, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:        16,
 		MaxRecords:       1,
 		MaxDelay:         20 * time.Millisecond,

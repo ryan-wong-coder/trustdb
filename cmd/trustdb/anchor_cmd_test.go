@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/anchor"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
@@ -28,12 +29,14 @@ func seedOtsAnchor(t *testing.T, dir string, calendarURL string) model.STHAnchor
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
+	defer store.Close()
 
 	digest := make([]byte, 32)
 	for i := range digest {
 		digest[i] = byte(i + 1)
 	}
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       1,
@@ -60,6 +63,7 @@ func seedOtsAnchor(t *testing.T, dir string, calendarURL string) model.STHAnchor
 		t.Fatalf("marshal proof: %v", err)
 	}
 	ar := model.STHAnchorResult{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
 		SinkName:         anchor.OtsSinkName,
@@ -112,6 +116,9 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 	fileResult.AnchorID = anchor.DeterministicFileAnchorID(seeded.STH)
 	fileResult.Proof = []byte("file-proof-must-remain-unchanged")
 	putSTHAnchorResult(t, store, fileResult)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seeded proofstore: %v", err)
+	}
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -139,7 +146,9 @@ func TestAnchorUpgradeCommand_PersistsUpgradedProof(t *testing.T) {
 		t.Fatalf("per-calendar report missing Changed=true: %+v", report.Calendars)
 	}
 
-	keyed, ok := any(store).(proofstore.STHAnchorResultKeyedReader)
+	reopened := newBoundTestLocalStore(t, proofDir)
+	defer reopened.Close()
+	keyed, ok := any(reopened).(proofstore.STHAnchorResultKeyedReader)
 	if !ok {
 		t.Fatal("proofstore does not support keyed anchor result reads")
 	}
@@ -246,6 +255,7 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 	root := make([]byte, 32)
 	root[0] = 0x01
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       2,
@@ -257,6 +267,7 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
 	ar := model.STHAnchorResult{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
 		SinkName:         "file",
@@ -267,6 +278,9 @@ func TestAnchorUpgradeCommand_RejectsNonOtsSTH(t *testing.T) {
 		PublishedAtUnixN: time.Now().UnixNano(),
 	}
 	putSTHAnchorResult(t, store, ar)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seeded proofstore: %v", err)
+	}
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)
@@ -294,6 +308,7 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 
 	root := bytes.Repeat([]byte{0xaa}, 32)
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       2,
@@ -305,6 +320,7 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
 	result := model.STHAnchorResult{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		TreeSize:         sth.TreeSize,
 		SinkName:         "file",
@@ -315,6 +331,9 @@ func TestAnchorExportCommand_ExportsCBORForOfflineVerify(t *testing.T) {
 		PublishedAtUnixN: time.Now().UnixNano(),
 	}
 	putSTHAnchorResult(t, store, result)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seeded proofstore: %v", err)
+	}
 
 	var out, errOut bytes.Buffer
 	cmd := newRootCommand(&out, &errOut)

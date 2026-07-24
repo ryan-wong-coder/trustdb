@@ -1173,6 +1173,7 @@ func newGlobalLogEnqueueHook(rt *runtimeConfig, store proofstore.Store, worker *
 		}
 		item := model.GlobalLogOutboxItem{
 			SchemaVersion: model.SchemaGlobalLogOutbox,
+			CryptoSuite:   root.CryptoSuite,
 			BatchID:       root.BatchID,
 			BatchRoot:     root,
 			Status:        model.AnchorStatePending,
@@ -1219,6 +1220,7 @@ func backfillGlobalLogOutbox(ctx context.Context, store proofstore.Store) (int, 
 			}
 			item := model.GlobalLogOutboxItem{
 				SchemaVersion: model.SchemaGlobalLogOutbox,
+				CryptoSuite:   root.CryptoSuite,
 				BatchID:       root.BatchID,
 				BatchRoot:     root,
 				Status:        model.AnchorStatePending,
@@ -1455,13 +1457,6 @@ func validateSemanticModes(proofMode, recordIndexMode, artifactSyncMode string) 
 	return nil
 }
 
-// openWALWriter is the rotate-hook-free variant used by tests and existing
-// callers that only care about mode selection. It forwards to the options
-// form with just MaxSegmentBytes populated.
-func openWALWriter(walPath string, maxSegmentBytes int64) (*wal.Writer, string, error) {
-	return openWALWriterWithOptions(walPath, wal.Options{MaxSegmentBytes: maxSegmentBytes})
-}
-
 // openWALWriterWithOptions opens the server's segment-rotating WAL directory.
 // Regular files fail closed: serve does not automatically adopt or migrate the
 // old single-file layout.
@@ -1496,28 +1491,6 @@ func scanWALRecords(walPath string, minSegmentID uint64, opts wal.Options, visit
 		return wal.ScanDirFrom(walPath, minSegmentID, opts, visit)
 	}
 	return wal.Scan(walPath, opts, visit)
-}
-
-func inspectWALSequenceBounds(walPath string, opts wal.Options) (uint64, uint64, error) {
-	info, err := os.Stat(walPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, 0, nil
-		}
-		return 0, 0, err
-	}
-	if info.IsDir() {
-		inspection, err := wal.InspectDir(walPath, opts)
-		if err != nil {
-			return 0, 0, err
-		}
-		return inspection.FirstSequence, inspection.LastSequence, nil
-	}
-	inspection, err := wal.Inspect(walPath, opts)
-	if err != nil {
-		return 0, 0, err
-	}
-	return inspection.FirstSequence, inspection.LastSequence, nil
 }
 
 type preparedReplay struct {
@@ -1838,7 +1811,6 @@ var errStopManifestScan = errors.New("stop manifest scan")
 //  3. Enqueue records that are not yet covered by any committed manifest into
 //     the live batch service so they can be included in a fresh batch.
 func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngine, batchSvc *batch.Service, store proofstore.Store, metrics *observability.Metrics) (int, int, int, error) {
-	walBinding := engine.WAL.BindingOptions()
 	// Recovered batches can commit on the live worker while this function is
 	// still scanning. Defer checkpoint persistence (and therefore pruning)
 	// across the entire scan and prepared-manifest recovery window.
@@ -1848,45 +1820,23 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	if foundCheckpoint && checkpoint.SchemaVersion != "" &&
-		checkpoint.SchemaVersion != model.SchemaWALCheckpoint &&
-		checkpoint.SchemaVersion != model.SchemaWALCheckpointContiguous {
+	if foundCheckpoint && checkpoint.SchemaVersion != model.SchemaWALCheckpoint {
 		return 0, 0, 0, trusterr.New(trusterr.CodeFailedPrecondition, "unsupported wal checkpoint schema: "+checkpoint.SchemaVersion)
 	}
-	// v1 checkpoints were derived from batch min/max envelopes and could leap
-	// across gaps. Only a positive v2 value certifies a skippable committed
-	// prefix. A v2 zero marker is valid migration state, but still requires the
-	// retained WAL to begin at sequence one.
-	trustedCheckpoint := checkpointSafe && foundCheckpoint && checkpoint.SchemaVersion == model.SchemaWALCheckpointContiguous
+	if engine.WAL == nil {
+		return 0, 0, 0, trusterr.New(trusterr.CodeFailedPrecondition, "wal writer is required for replay")
+	}
+	walBinding := engine.WAL.BindingOptions()
+	trustedCheckpoint := checkpointSafe && foundCheckpoint
 	hasCheckpoint := trustedCheckpoint && checkpoint.LastSequence > 0
-	legacyCheckpoint := checkpointSafe && foundCheckpoint && checkpoint.SchemaVersion != model.SchemaWALCheckpointContiguous
 	requireFullPrefix := !hasCheckpoint
 	if hasCheckpoint && checkpoint.LastSequence > 0 && (checkpoint.SegmentID == 0 || checkpoint.LastOffset < 0) {
 		return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "contiguous wal checkpoint has an invalid position")
 	}
-	// A non-zero legacy marker needs tail validation before replay can enqueue
-	// anything. This intentionally rare migration path may inspect the WAL
-	// twice; normal no-checkpoint and checkpoint-unsafe startup stay single-pass.
-	if legacyCheckpoint && checkpoint.LastSequence > 0 {
-		firstSequence, lastSequence, err := inspectWALSequenceBounds(walPath, walBinding)
-		if err != nil {
-			return 0, 0, 0, trusterr.Wrap(trusterr.CodeDataLoss, "inspect wal before legacy checkpoint migration", err)
-		}
-		if firstSequence > 1 {
-			return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated because the retained wal prefix is missing")
-		}
-		if firstSequence == 0 {
-			return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated because the retained wal is empty")
-		}
-		if checkpoint.LastSequence > lastSequence {
-			return 0, 0, 0, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated beyond the retained wal tail")
-		}
-	}
 	// In directory mode we can skip entire segments that a committed
-	// checkpoint already covers. Legacy single-file WALs still go through
-	// the record-level skip below because they cannot skip by segment.
-	// Reading the checkpoint before the WAL also means a crash while
-	// appending a new segment cannot trick us into scanning deleted files.
+	// checkpoint already covers. Reading the checkpoint before the WAL also
+	// means a crash while appending a new segment cannot trick us into scanning
+	// deleted files.
 	var minSegmentID uint64
 	if hasCheckpoint && checkpoint.LastSequence > 0 {
 		minSegmentID = checkpoint.SegmentID
@@ -1955,7 +1905,6 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	var replayed int
 	var skipped int
 	var firstRetainedSequence uint64
-	var lastRetainedSequence uint64
 	var committedRunFrom model.WALPosition
 	var committedRunTo model.WALPosition
 	var committedRunBatchID string
@@ -1978,7 +1927,6 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 				return trusterr.New(trusterr.CodeDataLoss, "wal cannot be fully replayed because the retained prefix is missing")
 			}
 		}
-		lastRetainedSequence = record.Position.Sequence
 		// Records at or below the checkpoint are guaranteed to be covered
 		// by a committed manifest, so ReplayAccepted (CBOR decode + receipt
 		// re-signing) can be skipped. Durable restart idempotency is handled
@@ -2109,10 +2057,6 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	if requireFullPrefix && firstRetainedSequence == 0 && foundCheckpoint && checkpoint.LastSequence > 0 {
 		return recovered, replayed, skipped, trusterr.New(trusterr.CodeDataLoss, "wal cannot be fully replayed because the retained wal is empty")
 	}
-	if legacyCheckpoint && checkpoint.LastSequence > lastRetainedSequence {
-		return recovered, replayed, skipped, trusterr.New(trusterr.CodeDataLoss, "legacy wal checkpoint cannot be revalidated beyond the retained wal tail")
-	}
-
 	for _, prepared := range preparedManifests {
 		if prepared.count != len(prepared.manifest.RecordIDs) {
 			return recovered, replayed, skipped, trusterr.New(trusterr.CodeFailedPrecondition, "prepared manifest "+prepared.manifest.BatchID+" references missing record "+prepared.missingRecordID())
@@ -2126,9 +2070,7 @@ func replayWALAccepted(ctx context.Context, walPath string, engine app.LocalEngi
 	// Checkpoint persistence is best-effort. A failed flush remains dirty in
 	// the service and is retried by the next committed batch; replayed records
 	// are still correct and the unpruned WAL remains the recovery source.
-	if err := batchSvc.StartCheckpointAdvance(ctx); err != nil && legacyCheckpoint {
-		return recovered, replayed, skipped, trusterr.Wrap(trusterr.CodeDataLoss, "persist migrated wal checkpoint", err)
-	}
+	_ = batchSvc.StartCheckpointAdvance(ctx)
 	if metrics != nil {
 		if skipped > 0 {
 			metrics.WALReplayRecords.WithLabelValues("skipped").Add(float64(skipped))

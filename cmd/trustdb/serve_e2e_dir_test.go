@@ -20,6 +20,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/batch"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/httpapi"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
@@ -95,7 +96,7 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	defer ingestSvc.Shutdown(context.Background())
 
 	rt := &runtimeConfig{logger: silentLogger()}
-	batchSvc := batch.New(engine, proofStore, batch.Options{
+	batchSvc := batch.New(engine, proofStore, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:            16,
 		MaxRecords:           2,
 		MaxDelay:             50 * time.Millisecond,
@@ -136,9 +137,9 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 			t.Fatalf("Marshal(%d) error = %v", i, err)
 		}
 
-		resp, err := http.Post(server.URL+"/v1/claims", "application/cbor", bytes.NewReader(body))
+		resp, err := http.Post(server.URL+"/v2/claims", "application/cbor", bytes.NewReader(body))
 		if err != nil {
-			t.Fatalf("POST /v1/claims (%d) error = %v", i, err)
+			t.Fatalf("POST /v2/claims (%d) error = %v", i, err)
 		}
 		var decoded struct {
 			RecordID      string `json:"record_id"`
@@ -216,13 +217,13 @@ func TestServeDirectoryModeEndToEnd(t *testing.T) {
 	// Finally: the proof store is consistent. LatestRoot should reflect
 	// the most recent batch (tree_size = MaxRecords since every batch is
 	// size 2 and we submitted an even count).
-	rootResp, err := http.Get(server.URL + "/v1/roots/latest")
+	rootResp, err := http.Get(server.URL + "/v2/roots/latest")
 	if err != nil {
-		t.Fatalf("GET /v1/roots/latest error = %v", err)
+		t.Fatalf("GET /v2/roots/latest error = %v", err)
 	}
 	defer rootResp.Body.Close()
 	if rootResp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /v1/roots/latest status = %d", rootResp.StatusCode)
+		t.Fatalf("GET /v2/roots/latest status = %d", rootResp.StatusCode)
 	}
 }
 
@@ -327,7 +328,7 @@ func waitForHTTPProof(t *testing.T, baseURL, recordID string) {
 	var lastErr error
 	var lastStatus int
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/v1/proofs/" + recordID)
+		resp, err := http.Get(baseURL + "/v2/proofs/" + recordID)
 		if err == nil {
 			code := resp.StatusCode
 			lastStatus = code

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"testing"
 
@@ -41,8 +40,8 @@ func TestKeyGenerateSM2ProducesLifecycleResolvableDescriptors(t *testing.T) {
 	if _, _, err := resolver.ResolveLifecycleSignerFile(context.Background(), signerPath); err != nil {
 		t.Fatalf("ResolveLifecycleSignerFile() error = %v", err)
 	}
-	if _, _, err := resolver.ResolveSignerFile(context.Background(), signerPath); !errors.Is(err, cryptosuite.ErrUnavailableSuite) {
-		t.Fatalf("server signer gate error = %v, want unavailable suite", err)
+	if _, _, err := resolver.ResolveSignerFile(context.Background(), signerPath); err != nil {
+		t.Fatalf("ResolveSignerFile() error = %v", err)
 	}
 }
 

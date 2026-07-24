@@ -52,11 +52,13 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 	if err != nil {
 		t.Fatalf("open file proofstore: %v", err)
 	}
+	defer store.Close()
 
 	// Two manifests: one committed with 2 bundles, one prepared with a
 	// single bundle. The committed manifest's bundles also drive the
 	// total bundle count.
 	committed := model.BatchManifest{
+		CryptoSuite:     cryptosuite.INTLV1,
 		SchemaVersion:   model.SchemaBatchManifest,
 		BatchID:         "batch-1",
 		State:           model.BatchStateCommitted,
@@ -67,6 +69,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 		PreparedAtUnixN: 90,
 	}
 	prepared := model.BatchManifest{
+		CryptoSuite:     cryptosuite.INTLV1,
 		SchemaVersion:   model.SchemaBatchManifest,
 		BatchID:         "batch-2",
 		State:           model.BatchStatePrepared,
@@ -86,6 +89,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 	for _, recID := range []string{"rec-1", "rec-2", "rec-3"} {
 		bundle := model.ProofBundle{
 			SchemaVersion: model.SchemaProofBundle,
+			CryptoSuite:   cryptosuite.INTLV1,
 			RecordID:      recID,
 		}
 		if err := store.PutBundle(ctx, bundle); err != nil {
@@ -95,6 +99,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 
 	for i, ts := range []int64{100, 200} {
 		root := model.BatchRoot{
+			CryptoSuite:   cryptosuite.INTLV1,
 			SchemaVersion: model.SchemaBatchRoot,
 			BatchID:       []string{"batch-1", "batch-2"}[i],
 			BatchRoot:     []byte{byte(i)},
@@ -107,6 +112,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 	}
 
 	cp := model.WALCheckpoint{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaWALCheckpoint,
 		SegmentID:     3,
 		LastSequence:  42,
@@ -117,6 +123,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 	}
 
 	leaf := model.GlobalLogLeaf{
+		CryptoSuite:        cryptosuite.INTLV1,
 		SchemaVersion:      model.SchemaGlobalLogLeaf,
 		BatchID:            "batch-1",
 		BatchRoot:          []byte{0x01, 0x02},
@@ -130,6 +137,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 		t.Fatalf("PutGlobalLeaf: %v", err)
 	}
 	node := model.GlobalLogNode{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaGlobalLogNode,
 		Level:          0,
 		StartIndex:     0,
@@ -141,6 +149,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 		t.Fatalf("PutGlobalLogNode: %v", err)
 	}
 	if err := store.PutGlobalLogState(ctx, model.GlobalLogState{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaGlobalLogState,
 		TreeSize:       1,
 		RootHash:       bytes.Repeat([]byte{0xaa}, 32),
@@ -150,6 +159,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 		t.Fatalf("PutGlobalLogState: %v", err)
 	}
 	sth := model.SignedTreeHead{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaSignedTreeHead,
 		TreeAlg:        model.DefaultMerkleTreeAlg,
 		TreeSize:       1,
@@ -163,6 +173,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 		t.Fatalf("PutSignedTreeHead: %v", err)
 	}
 	tile := model.GlobalLogTile{
+		CryptoSuite:    cryptosuite.INTLV1,
 		SchemaVersion:  model.SchemaGlobalLogTile,
 		Level:          0,
 		StartIndex:     0,
@@ -176,6 +187,7 @@ func seedFileStore(t *testing.T, dir string) seedCounts {
 	}
 	anchorKey := model.STHAnchorScheduleKey{NodeID: sth.NodeID, LogID: sth.LogID, SinkName: "file"}
 	result := model.STHAnchorResult{
+		CryptoSuite:      cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		NodeID:           anchorKey.NodeID,
 		LogID:            anchorKey.LogID,
@@ -388,6 +400,9 @@ func TestMetastoreMigrateResumesAfterManifestOnlyInterruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("source GetManifest() error = %v", err)
 	}
+	if err := src.Close(); err != nil {
+		t.Fatalf("close source proofstore error = %v", err)
+	}
 	dst, err := proofstore.Open(newBoundTestProofstoreConfig(proofstore.BackendPebble, toDir))
 	if err != nil {
 		t.Fatalf("open interrupted destination error = %v", err)
@@ -497,6 +512,7 @@ func TestMetastoreMigrateOverwriteReplacesAnchorSchedule(t *testing.T) {
 	key := model.STHAnchorScheduleKey{NodeID: "node-1", LogID: "test-log", SinkName: "file"}
 	scheduler := any(dst).(proofstore.STHAnchorScheduleStore)
 	higher := model.SignedTreeHead{
+		CryptoSuite:   cryptosuite.INTLV1,
 		SchemaVersion: model.SchemaSignedTreeHead, TreeAlg: model.DefaultMerkleTreeAlg,
 		TreeSize: 4, RootHash: bytes.Repeat([]byte{0xdd}, 32), TimestampUnixN: 620,
 		NodeID: key.NodeID, LogID: key.LogID,

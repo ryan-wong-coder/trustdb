@@ -454,7 +454,7 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 	globalOutbox.Start(context.Background())
 	t.Cleanup(globalOutbox.Stop)
 
-	batchSvc := batch.New(engine, store, batch.Options{
+	batchSvc := batch.New(engine, store, batch.Options{CryptoSuite: cryptosuite.INTLV1,
 		QueueSize:        16,
 		MaxRecords:       1,
 		MaxDelay:         20 * time.Millisecond,
