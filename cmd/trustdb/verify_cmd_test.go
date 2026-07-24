@@ -4,14 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/emmansun/gmsm/smx509"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/wowtrust/trustdb/internal/anchor"
@@ -24,11 +31,12 @@ import (
 	"github.com/wowtrust/trustdb/internal/httpapi"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
+	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
-	"github.com/wowtrust/trustdb/internal/trusterr"
+	"github.com/wowtrust/trustdb/internal/verify"
 )
 
 func TestDecodeSingleJSONRejectsTrailingData(t *testing.T) {
@@ -55,6 +63,62 @@ func TestDecodeSingleJSONLimitBoundsResponseBody(t *testing.T) {
 	oversized := append(append([]byte(nil), data...), ' ')
 	if err := decodeSingleJSONLimit(bytes.NewReader(oversized), &dst, int64(len(data))); err == nil {
 		t.Fatal("decodeSingleJSONLimit oversized response error = nil")
+	}
+}
+
+func TestReadVerifyCertificateRootsAcceptsStrictDERAndPEM(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &smx509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "TrustDB verifier root"},
+		NotBefore:             time.Unix(100, 0),
+		NotAfter:              time.Unix(200, 0),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              smx509.KeyUsageCertSign,
+	}
+	der, err := smx509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	derPath := filepath.Join(directory, "root.der")
+	if err := os.WriteFile(derPath, der, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pemPath := filepath.Join(directory, "roots.pem")
+	pemData := append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...,
+	)
+	if err := os.WriteFile(pemPath, pemData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	roots, err := readVerifyCertificateRoots([]string{derPath, pemPath})
+	if err != nil {
+		t.Fatalf("readVerifyCertificateRoots() error = %v", err)
+	}
+	if len(roots) != 3 {
+		t.Fatalf("readVerifyCertificateRoots() count = %d, want 3", len(roots))
+	}
+	for index := range roots {
+		if !bytes.Equal(roots[index], der) {
+			t.Fatalf("root %d differs from input DER", index)
+		}
+	}
+
+	invalidPath := filepath.Join(directory, "invalid.pem")
+	if err := os.WriteFile(invalidPath, append(pemData, []byte("trailing")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readVerifyCertificateRoots([]string{invalidPath}); err == nil {
+		t.Fatal("readVerifyCertificateRoots() accepted trailing PEM data")
 	}
 }
 
@@ -146,10 +210,108 @@ func TestVerifyCmdRemoteSkipAnchor(t *testing.T) {
 	}
 }
 
-func TestSingleProofV1WriterIsReserved(t *testing.T) {
-	_, err := sproof.New(model.ProofBundle{CryptoSuite: cryptosuite.INTLV1}, sproof.Options{})
-	if trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("sproof.New() code=%s err=%v, want failed_precondition", trusterr.CodeOf(err), err)
+func TestVerifyCmdOfflineFailureEmitsStructuredStagesAndReturnsError(t *testing.T) {
+	ctx := context.Background()
+	server, _, clientPub, serverPub, contentPath, recordID := runServeForVerify(t, ctx)
+	bundle, global, anchorResult := fetchSingleProofInputs(t, ctx, server, recordID)
+	proof, err := sproof.New(bundle, sproof.Options{
+		GlobalProof:  &global,
+		AnchorResult: anchorResult,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofPath := filepath.Join(t.TempDir(), "offline.sproof")
+	if err := sproof.WriteFile(proofPath, proof); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(contentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content[0] ^= 1
+	tamperedContentPath := filepath.Join(t.TempDir(), "tampered-content.bin")
+	if err := os.WriteFile(tamperedContentPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, outBuf := newVerifyRuntime(t)
+	cmd := newVerifyCommand(rt)
+	cmd.SetArgs([]string{
+		"--file", tamperedContentPath,
+		"--sproof", proofPath,
+		"--client-public-key", writePubKey(t, "client-key", clientPub),
+		"--server-public-key", writePubKey(t, "server-key", serverPub),
+	})
+	cmd.SetContext(ctx)
+	verifyErr := cmd.Execute()
+	if verifyErr == nil || !strings.Contains(verifyErr.Error(), "content hash mismatch") {
+		t.Fatalf("verify error = %v, want original content hash mismatch", verifyErr)
+	}
+
+	var result sproof.OfflineResult
+	if err := json.Unmarshal(outBuf.Bytes(), &result); err != nil {
+		t.Fatalf("decode structured failure: %v (raw=%q)", err, outBuf.String())
+	}
+	if result.Valid {
+		t.Fatalf("structured failure result is valid: %+v", result)
+	}
+	var contentFailed bool
+	for _, stage := range result.Stages {
+		if stage.Name == string(verify.StageContent) && stage.Status == sproof.OfflineStageFailed {
+			contentFailed = true
+			break
+		}
+	}
+	if !contentFailed {
+		t.Fatalf("content failure stage is missing: %+v", result.Stages)
+	}
+}
+
+func TestVerifyCmdOfflineContainerFailureEmitsStructuredResult(t *testing.T) {
+	directory := t.TempDir()
+	contentPath := filepath.Join(directory, "content.bin")
+	if err := os.WriteFile(contentPath, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPath := writePubKey(t, "client-key", mustPub(t))
+	rt, outBuf := newVerifyRuntime(t)
+	cmd := newVerifyCommand(rt)
+	cmd.SetArgs([]string{
+		"--file", contentPath,
+		"--sproof", filepath.Join(directory, "missing.sproof"),
+		"--client-public-key", publicKeyPath,
+		"--server-public-key", publicKeyPath,
+	})
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("verify missing .sproof error = nil")
+	}
+
+	var result sproof.OfflineResult
+	if err := json.Unmarshal(outBuf.Bytes(), &result); err != nil {
+		t.Fatalf("decode structured container failure: %v (raw=%q)", err, outBuf.String())
+	}
+	if len(result.Stages) != 11 ||
+		result.Stages[0].Name != sproof.OfflineStageContainer ||
+		result.Stages[0].Status != sproof.OfflineStageFailed ||
+		result.Stages[1].Name != sproof.OfflineStageIdentity ||
+		result.Stages[1].Status != sproof.OfflineStageNotRun {
+		t.Fatalf("structured container stages = %+v", result.Stages)
+	}
+}
+
+func TestWriteOfflineVerificationResultPreservesVerificationAndWriteErrors(t *testing.T) {
+	verificationErr := errors.New("verification failed")
+	outputErr := errors.New("output failed")
+	rt := &runtimeConfig{out: failingWriter{err: outputErr}}
+
+	err := writeOfflineVerificationResult(rt, sproof.OfflineResult{}, verificationErr)
+	if !errors.Is(err, verificationErr) {
+		t.Fatalf("result error %v does not preserve verification error", err)
+	}
+	if !errors.Is(err, outputErr) {
+		t.Fatalf("result error %v does not preserve output error", err)
 	}
 }
 
@@ -261,6 +423,64 @@ func TestResolveVerifyClientPubPrefersExplicitKey(t *testing.T) {
 	}
 	if !bytes.Equal(got.Bytes, pub) {
 		t.Fatal("resolveVerifyClientPub did not return the explicit client public key")
+	}
+}
+
+func TestResolveVerifyClientPubUsesClaimSigningTime(t *testing.T) {
+	t.Parallel()
+
+	registryPublic, registryPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrySigner, err := trustcrypto.NewEd25519Signer("registry-key", registryPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryTrust, err := trustcrypto.NewEd25519PublicKey("registry-key", registryPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(t.TempDir(), "keys.tdkeys")
+	registry, err := keystore.Open(registryPath, registrySigner, registryTrust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPublic := mustPub(t)
+	_, clientDescriptor, err := readPublicKeyDescriptor(writePubKey(t, "client-key", clientPublic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.RegisterClientKey(
+		"tenant-1",
+		"client-1",
+		clientDescriptor,
+		time.Unix(100, 0),
+		time.Unix(150, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	registryPublicPath := writePubKey(t, "registry-key", registryPublic)
+	bundle := model.ProofBundle{
+		SignedClaim: model.SignedClaim{
+			Claim: model.ClientClaim{
+				TenantID:        "tenant-1",
+				ClientID:        "client-1",
+				KeyID:           "client-key",
+				ProducedAtUnixN: time.Unix(125, 0).UnixNano(),
+			},
+		},
+		AcceptedReceipt: model.AcceptedReceipt{
+			ReceivedAtUnixN: time.Unix(200, 0).UnixNano(),
+		},
+	}
+
+	resolved, err := resolveVerifyClientPub(bundle, "", registryPath, registryPublicPath)
+	if err != nil {
+		t.Fatalf("resolveVerifyClientPub() error = %v", err)
+	}
+	if !bytes.Equal(resolved.Bytes, clientPublic) {
+		t.Fatal("resolveVerifyClientPub() returned the wrong signing-time key")
 	}
 }
 
@@ -497,4 +717,12 @@ func mustPub(t *testing.T) ed25519.PublicKey {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	return pub
+}
+
+type failingWriter struct {
+	err error
+}
+
+func (w failingWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

@@ -24,7 +24,7 @@ func TestRegistryPinsCurrentAndReservedGenerations(t *testing.T) {
 		ModelV1:       {FamilyModel, 1, AvailabilityReserved, MigrationRetireOnCutover, 0},
 		ModelV2:       {FamilyModel, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
 		SingleProofV1: {FamilySingleProof, 1, AvailabilityReserved, MigrationRetireOnCutover, 16 << 20},
-		SingleProofV2: {FamilySingleProof, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxSingleProofBytesV2},
+		SingleProofV2: {FamilySingleProof, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxSingleProofBytesV2},
 		BackupV4:      {FamilyBackup, 4, AvailabilityAvailable, MigrationRetireOnCutover, 128 << 20},
 		BackupV5:      {FamilyBackup, 5, AvailabilityReserved, MigrationDestructiveCutover, MaxBackupEntryBytesV2},
 		WALV1:         {FamilyWAL, 1, AvailabilityReserved, MigrationRetireOnCutover, 0},
@@ -131,8 +131,11 @@ func TestRuntimeGatesRejectReservedFormatsAndSuites(t *testing.T) {
 	if _, _, err := RequireWritable(SingleProofV1, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
 		t.Fatalf("RequireWritable(retired sproof v1) error = %v, want ErrUnavailableFormat", err)
 	}
-	if _, _, err := RequireWritable(SingleProofV2, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
-		t.Fatalf("RequireWritable(unimplemented sproof v2) error = %v, want ErrUnavailableFormat", err)
+	if _, _, err := RequireWritable(SingleProofV2, cryptosuite.INTLV1); err != nil {
+		t.Fatalf("RequireWritable(sproof v2 INTL_V1) error = %v", err)
+	}
+	if _, _, err := RequireWritable(SingleProofV2, cryptosuite.CNSMV1); err != nil {
+		t.Fatalf("RequireWritable(sproof v2 CN_SM_V1) error = %v", err)
 	}
 	if _, _, err := RequireWritable(SDKV1, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
 		t.Fatalf("RequireWritable(retired SDK v1) error = %v, want ErrUnavailableFormat", err)
@@ -284,7 +287,7 @@ func TestRegistrySnapshotCanonicalCBORGolden(t *testing.T) {
 		t.Fatalf("marshal registry snapshot: %v", err)
 	}
 	digest := sha256.Sum256(encoded)
-	const wantSHA256 = "1aa845936223b439a3bba545fbaf551bc775842c6bafdd7eaee17d3ae4866d49"
+	const wantSHA256 = "3a48248d6e8817296b962fb215936cb2532b528b216a79fad04cd26892545a76"
 	if got := hex.EncodeToString(digest[:]); got != wantSHA256 {
 		t.Fatalf("registry snapshot SHA-256 = %s, want %s", got, wantSHA256)
 	}

@@ -20,9 +20,12 @@ import (
 )
 
 type TrustedKeys struct {
-	ClientPublicKey trustcrypto.PublicKeyDescriptor
-	ServerPublicKey trustcrypto.PublicKeyDescriptor
-	CryptoProvider  trustcrypto.Provider
+	ClientPublicKey           trustcrypto.PublicKeyDescriptor
+	ServerPublicKey           trustcrypto.PublicKeyDescriptor
+	AcceptedReceiptPublicKey  trustcrypto.PublicKeyDescriptor
+	CommittedReceiptPublicKey trustcrypto.PublicKeyDescriptor
+	SignedTreeHeadPublicKey   trustcrypto.PublicKeyDescriptor
+	CryptoProvider            trustcrypto.Provider
 }
 
 // Result is the outcome of ProofBundle. ProofLevel follows the centralized
@@ -48,6 +51,12 @@ type options struct {
 	global         *model.GlobalLogProof
 	anchor         *model.STHAnchorResult
 	anchorVerifier AnchorVerifier
+	namespace      *namespaceBinding
+}
+
+type namespaceBinding struct {
+	nodeID string
+	logID  string
 }
 
 // AnchorVerifier validates proof bytes for a dynamically configured sink.
@@ -71,6 +80,15 @@ func WithAnchorVerifier(verifier AnchorVerifier) Option {
 	return func(o *options) { o.anchorVerifier = verifier }
 }
 
+// WithExactNamespaceBinding makes the portable evidence envelope's NodeID and
+// LogID mandatory at the Global Log and anchor stages. It is intended for
+// formats such as .sproof v2 that carry an explicit outer namespace.
+func WithExactNamespaceBinding(nodeID, logID string) Option {
+	return func(o *options) {
+		o.namespace = &namespaceBinding{nodeID: nodeID, logID: logID}
+	}
+}
+
 func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts ...Option) (Result, error) {
 	provider := keys.CryptoProvider
 	if provider == nil {
@@ -81,47 +99,57 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		apply(&o)
 	}
 	if bundle.SchemaVersion != model.SchemaProofBundle {
-		return Result{}, fmt.Errorf("verify: unexpected proof bundle schema: %s", bundle.SchemaVersion)
+		return Result{}, failStage(StageProofBundle, fmt.Errorf("verify: unexpected proof bundle schema: %s", bundle.SchemaVersion))
 	}
 	suite, err := cryptosuite.RequireAvailable(provider.Suite())
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageProofBundle, err)
 	}
 	if err := modelsuite.Require(suite.ID, bundle); err != nil {
 		return Result{}, fmt.Errorf("verify: proof bundle crypto_suite: %w", err)
 	}
 	sum, n, err := trustcrypto.HashReaderWithProvider(provider, bundle.SignedClaim.Claim.Content.HashAlg, raw)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageContent, err)
 	}
 	if n != bundle.SignedClaim.Claim.Content.ContentLength {
-		return Result{}, fmt.Errorf("verify: content length mismatch: got %d want %d", n, bundle.SignedClaim.Claim.Content.ContentLength)
+		return Result{}, failStage(StageContent, fmt.Errorf("verify: content length mismatch: got %d want %d", n, bundle.SignedClaim.Claim.Content.ContentLength))
 	}
 	if !bytes.Equal(sum, bundle.SignedClaim.Claim.Content.ContentHash) {
-		return Result{}, fmt.Errorf("verify: content hash mismatch")
+		return Result{}, failStage(StageContent, fmt.Errorf("verify: content hash mismatch"))
 	}
 	verified, err := claim.VerifyWithProvider(context.Background(), bundle.SignedClaim, keys.ClientPublicKey, provider)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageClientClaim, err)
 	}
 	if verified.RecordID != bundle.RecordID || verified.RecordID != bundle.ServerRecord.RecordID {
-		return Result{}, fmt.Errorf("verify: record id mismatch")
+		return Result{}, failStage(StageBundleBindings, fmt.Errorf("verify: record id mismatch"))
 	}
 	if err := validateBundleBindings(bundle, verified, provider); err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageBundleBindings, err)
 	}
-	if err := receipt.VerifyAcceptedWithProvider(context.Background(), bundle.AcceptedReceipt, keys.ServerPublicKey, provider); err != nil {
-		return Result{}, err
+	if err := receipt.VerifyAcceptedWithProvider(
+		context.Background(),
+		bundle.AcceptedReceipt,
+		publicKeyOrFallback(keys.AcceptedReceiptPublicKey, keys.ServerPublicKey),
+		provider,
+	); err != nil {
+		return Result{}, failStage(StageAcceptedReceipt, err)
 	}
-	if err := receipt.VerifyCommittedWithProvider(context.Background(), bundle.CommittedReceipt, keys.ServerPublicKey, provider); err != nil {
-		return Result{}, err
+	if err := receipt.VerifyCommittedWithProvider(
+		context.Background(),
+		bundle.CommittedReceipt,
+		publicKeyOrFallback(keys.CommittedReceiptPublicKey, keys.ServerPublicKey),
+		provider,
+	); err != nil {
+		return Result{}, failStage(StageCommittedReceipt, err)
 	}
 	leaf, err := merkle.HashLeafForSuite(suite.ID, suite.Merkle.Algorithm, bundle.ServerRecord)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageBatchMerkle, err)
 	}
 	if !bytes.Equal(leaf, bundle.CommittedReceipt.LeafHash) {
-		return Result{}, fmt.Errorf("verify: leaf hash mismatch")
+		return Result{}, failStage(StageBatchMerkle, fmt.Errorf("verify: leaf hash mismatch"))
 	}
 	ok, err := merkle.VerifyForSuite(
 		suite.ID,
@@ -133,10 +161,10 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		bundle.CommittedReceipt.BatchRoot,
 	)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageBatchMerkle, err)
 	}
 	if !ok {
-		return Result{}, fmt.Errorf("verify: merkle proof failed")
+		return Result{}, failStage(StageBatchMerkle, fmt.Errorf("verify: merkle proof failed"))
 	}
 	evidence := prooflevel.EvidenceFor(prooflevel.L3)
 	result := Result{
@@ -145,18 +173,33 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		ProofLevel: prooflevel.Evaluate(evidence).String(),
 	}
 	if o.global != nil {
-		if err := VerifyGlobalLogProof(bundle, *o.global, keys.ServerPublicKey, provider); err != nil {
-			return Result{}, err
+		if o.namespace != nil {
+			if err := exactGlobalNamespace(*o.global, *o.namespace); err != nil {
+				return Result{}, failStage(StageGlobalLog, err)
+			}
+		}
+		if err := VerifyGlobalLogProof(
+			bundle,
+			*o.global,
+			publicKeyOrFallback(keys.SignedTreeHeadPublicKey, keys.ServerPublicKey),
+			provider,
+		); err != nil {
+			return Result{}, failStage(StageGlobalLog, err)
 		}
 		evidence.GlobalLogProof = true
 		result.ProofLevel = prooflevel.Evaluate(evidence).String()
 	}
 	if o.anchor != nil {
 		if o.global == nil {
-			return Result{}, fmt.Errorf("verify: L5 anchor requires a global log proof")
+			return Result{}, failStage(StageAnchor, fmt.Errorf("verify: L5 anchor requires a global log proof"))
+		}
+		if o.namespace != nil {
+			if err := exactAnchorNamespace(*o.anchor, *o.namespace); err != nil {
+				return Result{}, failStage(StageAnchor, err)
+			}
 		}
 		if err := AnchorConsistencyWithVerifier(*o.global, *o.anchor, o.anchorVerifier); err != nil {
-			return Result{}, err
+			return Result{}, failStage(StageAnchor, err)
 		}
 		evidence.STHAnchorResult = true
 		result.ProofLevel = prooflevel.Evaluate(evidence).String()
@@ -164,6 +207,36 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		result.AnchorID = o.anchor.AnchorID
 	}
 	return result, nil
+}
+
+func exactGlobalNamespace(proof model.GlobalLogProof, binding namespaceBinding) error {
+	if binding.nodeID == "" || proof.NodeID != binding.nodeID || proof.STH.NodeID != binding.nodeID {
+		return fmt.Errorf("verify: global proof node_id does not exactly match the evidence namespace")
+	}
+	if binding.logID == "" || proof.LogID != binding.logID || proof.STH.LogID != binding.logID {
+		return fmt.Errorf("verify: global proof log_id does not exactly match the evidence namespace")
+	}
+	return nil
+}
+
+func exactAnchorNamespace(result model.STHAnchorResult, binding namespaceBinding) error {
+	if binding.nodeID == "" || result.NodeID != binding.nodeID || result.STH.NodeID != binding.nodeID {
+		return fmt.Errorf("verify: anchor result node_id does not exactly match the evidence namespace")
+	}
+	if binding.logID == "" || result.LogID != binding.logID || result.STH.LogID != binding.logID {
+		return fmt.Errorf("verify: anchor result log_id does not exactly match the evidence namespace")
+	}
+	return nil
+}
+
+func publicKeyOrFallback(
+	specific trustcrypto.PublicKeyDescriptor,
+	fallback trustcrypto.PublicKeyDescriptor,
+) trustcrypto.PublicKeyDescriptor {
+	if len(specific.Bytes) == 0 {
+		return fallback
+	}
+	return specific
 }
 
 func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified, provider trustcrypto.Provider) error {
@@ -242,6 +315,21 @@ func VerifyGlobalLogProof(bundle model.ProofBundle, proof model.GlobalLogProof, 
 
 func GlobalLogConsistency(bundle model.ProofBundle, proof model.GlobalLogProof) error {
 	return globalLogConsistencyWithProvider(bundle, proof, trustcrypto.DefaultProvider())
+}
+
+// GlobalLogConsistencyForSuite recomputes the complete proof container with
+// the suite explicitly carried by V2 evidence. It performs no signature or
+// trust-root verification; callers must still verify the STH with a
+// verifier-local public key before granting L4.
+func GlobalLogConsistencyForSuite(bundle model.ProofBundle, proof model.GlobalLogProof) error {
+	if err := cryptosuite.RequireSame(bundle.CryptoSuite, proof.CryptoSuite, proof.STH.CryptoSuite); err != nil {
+		return fmt.Errorf("verify: global log crypto_suite mismatch: %w", err)
+	}
+	provider, err := trustcrypto.ProviderForSuite(bundle.CryptoSuite)
+	if err != nil {
+		return err
+	}
+	return globalLogConsistencyWithProvider(bundle, proof, provider)
 }
 
 func globalLogConsistencyWithProvider(bundle model.ProofBundle, proof model.GlobalLogProof, provider trustcrypto.Provider) error {

@@ -49,6 +49,21 @@ func Require(expected cryptosuite.ID, value any) error {
 			actual = append(actual, v.CommittedReceipt.CryptoSuite)
 		}
 		return require("proof bundle", actual...)
+	case model.SingleProof:
+		actual := []cryptosuite.ID{v.CryptoSuite, v.ProofBundle.CryptoSuite}
+		if v.GlobalProof != nil {
+			actual = append(actual, v.GlobalProof.CryptoSuite, v.GlobalProof.STH.CryptoSuite)
+		}
+		if v.AnchorResult != nil {
+			actual = append(actual, v.AnchorResult.CryptoSuite, v.AnchorResult.STH.CryptoSuite)
+		}
+		for i := range v.IdentityEvidence {
+			actual = append(actual, v.IdentityEvidence[i].CryptoSuite)
+			for j := range v.IdentityEvidence[i].CertificateStatuses {
+				actual = append(actual, v.IdentityEvidence[i].CertificateStatuses[j].CryptoSuite)
+			}
+		}
+		return require("single proof", actual...)
 	case model.RecordIndex:
 		return require("record index", v.CryptoSuite)
 	case model.RecordStatus:

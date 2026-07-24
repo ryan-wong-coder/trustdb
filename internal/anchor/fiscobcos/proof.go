@@ -108,6 +108,13 @@ func UnmarshalProof(data []byte) (AnchorProof, error) {
 	if err := ValidateProofStructure(proof); err != nil {
 		return AnchorProof{}, err
 	}
+	canonical, err := MarshalProof(proof)
+	if err != nil {
+		return AnchorProof{}, err
+	}
+	if !bytes.Equal(data, canonical) {
+		return AnchorProof{}, fmt.Errorf("%w: non-canonical deterministic CBOR", ErrInvalidProof)
+	}
 	return proof, nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/globallog"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -509,9 +510,14 @@ func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testi
 				ProofLevel: ProofLevelL3,
 				ProofBundle: ProofBundle{
 					SchemaVersion: model.SchemaProofBundle,
+					CryptoSuite:   cryptosuite.INTLV1,
 					RecordID:      "tr1record",
+					NodeID:        "node-1",
+					LogID:         "log-1",
 					CommittedReceipt: CommittedReceipt{
-						BatchID: "batch-1",
+						SchemaVersion: model.SchemaCommittedReceipt,
+						CryptoSuite:   cryptosuite.INTLV1,
+						BatchID:       "batch-1",
 					},
 				},
 			})
@@ -530,8 +536,16 @@ func TestClientExportSingleProofFallsBackToL3WhenGlobalProofUnavailable(t *testi
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if _, err := client.ExportSingleProof(context.Background(), "tr1record"); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("ExportSingleProof code=%s error=%v, want retired sproof writer rejection", trusterr.CodeOf(err), err)
+	proof, err := client.ExportSingleProof(context.Background(), "tr1record")
+	if err != nil {
+		t.Fatalf("ExportSingleProof error=%v", err)
+	}
+	if proof.SchemaVersion != model.SchemaSingleProof ||
+		proof.FormatVersion != sproof.FormatVersion ||
+		proof.ProofLevel != ProofLevelL3 ||
+		proof.GlobalProof != nil ||
+		proof.AnchorResult != nil {
+		t.Fatalf("ExportSingleProof = %+v, want standalone L3 v2 evidence", proof)
 	}
 }
 
@@ -600,8 +614,16 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClientWithTransport: %v", err)
 	}
-	if _, err := client.ExportSingleProof(context.Background(), bundle.RecordID); trusterr.CodeOf(err) != trusterr.CodeFailedPrecondition {
-		t.Fatalf("ExportSingleProof code=%s error=%v, want retired sproof writer rejection", trusterr.CodeOf(err), err)
+	proof, err := client.ExportSingleProof(context.Background(), bundle.RecordID)
+	if err != nil {
+		t.Fatalf("ExportSingleProof error=%v", err)
+	}
+	if proof.SchemaVersion != model.SchemaSingleProof ||
+		proof.FormatVersion != sproof.FormatVersion ||
+		proof.ProofLevel != ProofLevelL5 ||
+		proof.GlobalProof == nil ||
+		proof.AnchorResult == nil {
+		t.Fatalf("ExportSingleProof = %+v, want composed L5 v2 evidence", proof)
 	}
 	if transport.bundleCalls.Load() != 1 || transport.evidenceCalls.Load() != 1 {
 		t.Fatalf("calls bundle=%d evidence=%d", transport.bundleCalls.Load(), transport.evidenceCalls.Load())

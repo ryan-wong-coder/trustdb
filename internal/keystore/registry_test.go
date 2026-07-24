@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -313,6 +314,59 @@ func TestRegistryRejectsLegacyFormatAndUntrustedManifest(t *testing.T) {
 	}
 	if _, err := Open(path, nil, trustcrypto.PublicKeyDescriptor{}); err == nil {
 		t.Fatal("Open() accepted an existing registry without an external trust root")
+	}
+}
+
+func TestRegistryEvidenceRequiresExternalTrustAndCompleteFrames(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "keys.tdkeys")
+	signer, registryPublic := newINTLRegistrySigner(t)
+	registry, err := Open(path, signer, registryPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPublic, _ := mustINTLKey(t)
+	if _, err := registry.RegisterClientKey(
+		"tenant",
+		"client",
+		intlVerifierDescriptor("client-key", clientPublic),
+		time.Unix(100, 0),
+		time.Time{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := OpenEvidence(data, registryPublic)
+	if err != nil {
+		t.Fatalf("OpenEvidence() error = %v", err)
+	}
+	key, err := evidence.LookupClientKeyAt("tenant", "client", "client-key", time.Unix(101, 0))
+	if err != nil || !bytes.Equal(key.PublicKey, clientPublic) {
+		t.Fatalf("LookupClientKeyAt() key=%+v err=%v", key, err)
+	}
+
+	if _, err := OpenEvidence(data, trustcrypto.PublicKeyDescriptor{}); err == nil ||
+		!strings.Contains(err.Error(), "trusted registry public descriptor") {
+		t.Fatalf("OpenEvidence(empty trust) error = %v", err)
+	}
+	_, wrongRegistryPublic := newINTLRegistrySigner(t)
+	if _, err := OpenEvidence(data, wrongRegistryPublic); err == nil ||
+		!strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("OpenEvidence(wrong trust) error = %v", err)
+	}
+	if _, err := OpenEvidence(data[:len(data)-1], registryPublic); err == nil ||
+		!strings.Contains(err.Error(), "incomplete final frame") {
+		t.Fatalf("OpenEvidence(partial) error = %v", err)
+	}
+
+	tampered := append([]byte(nil), data...)
+	tampered[len(tampered)-1] ^= 0x01
+	if _, err := OpenEvidence(tampered, registryPublic); err == nil {
+		t.Fatal("OpenEvidence() accepted tampered registry evidence")
 	}
 }
 
