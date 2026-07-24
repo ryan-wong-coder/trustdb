@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
@@ -37,6 +38,7 @@ const (
 var requestBodyBufferPool = sync.Pool{New: func() any { return new([]byte) }}
 
 type Handler struct {
+	CryptoSuite   cryptosuite.ID
 	Submitter     submission.Submitter
 	Batch         BatchService
 	Global        GlobalLogService
@@ -45,6 +47,10 @@ type Handler struct {
 	Metrics       http.Handler
 	Statuses      RecordStatusService
 	StatusHub     *statusnotify.Hub
+}
+
+type cryptoSuiteProvider interface {
+	CryptoSuite() cryptosuite.ID
 }
 
 type BatchService interface {
@@ -384,6 +390,11 @@ func normalizeHandler(h Handler) Handler {
 	if h.Statuses == nil && h.Batch != nil {
 		if statuses, ok := h.Batch.(RecordStatusService); ok && !isTypedNil(statuses) {
 			h.Statuses = statuses
+		}
+	}
+	if h.CryptoSuite == "" && h.Batch != nil {
+		if provider, ok := h.Batch.(cryptoSuiteProvider); ok {
+			h.CryptoSuite = provider.CryptoSuite()
 		}
 	}
 	if h.StatusHub == nil {
@@ -823,7 +834,7 @@ func (h Handler) listRecords(w http.ResponseWriter, r *http.Request) {
 		writeError(w, trusterr.New(trusterr.CodeFailedPrecondition, "batch service is not configured"))
 		return
 	}
-	opts, err := parseRecordListOptions(r)
+	opts, err := parseRecordListOptions(r, h.CryptoSuite)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -971,7 +982,7 @@ func (h Handler) requireBatchTreeIndex(ctx context.Context, batchID string) erro
 	return nil
 }
 
-func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
+func parseRecordListOptions(r *http.Request, suiteID cryptosuite.ID) (model.RecordListOptions, error) {
 	limit := 100
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -1005,13 +1016,9 @@ func parseRecordListOptions(r *http.Request) (model.RecordListOptions, error) {
 		opts.BatchID = opts.Query
 		opts.Query = ""
 	}
-	hashRaw := firstQueryValue(r, "content_hash", "sha256")
-	if hashRaw == "" && looksLikeHexSHA256(opts.Query) {
-		hashRaw = opts.Query
-		opts.Query = ""
-	}
+	hashRaw := strings.TrimSpace(r.URL.Query().Get("content_hash"))
 	if hashRaw != "" {
-		hash, err := parseSHA256Hex(hashRaw)
+		hash, err := parseContentHashHex(hashRaw, suiteID)
 		if err != nil {
 			return model.RecordListOptions{}, err
 		}
@@ -1262,27 +1269,34 @@ func firstQueryValue(r *http.Request, names ...string) string {
 	return ""
 }
 
-func looksLikeHexSHA256(raw string) bool {
-	raw = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "sha256:")
-	if len(raw) != 64 {
-		return false
+func parseContentHashHex(raw string, suiteID cryptosuite.ID) ([]byte, error) {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "HTTP crypto_suite", err)
 	}
-	for _, r := range raw {
-		if r < '0' || r > '9' && r < 'a' || r > 'f' {
-			return false
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if algorithm, encoded, ok := strings.Cut(raw, ":"); ok {
+		if algorithm != suite.ContentHash.Algorithm {
+			return nil, trusterr.New(
+				trusterr.CodeInvalidArgument,
+				fmt.Sprintf("content_hash algorithm must be %s for crypto_suite %s", suite.ContentHash.Algorithm, suite.ID),
+			)
 		}
+		raw = encoded
 	}
-	return true
-}
-
-func parseSHA256Hex(raw string) ([]byte, error) {
-	raw = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "sha256:")
-	if len(raw) != 64 {
-		return nil, trusterr.New(trusterr.CodeInvalidArgument, "content_hash must be a 64-character sha256 hex string")
+	expectedHexLen := suite.ContentHash.DigestBytes * 2
+	if len(raw) != expectedHexLen {
+		return nil, trusterr.New(
+			trusterr.CodeInvalidArgument,
+			fmt.Sprintf("content_hash must be a %d-character %s hex string", expectedHexLen, suite.ContentHash.Algorithm),
+		)
 	}
 	hash, err := hex.DecodeString(raw)
-	if err != nil || len(hash) != 32 {
-		return nil, trusterr.New(trusterr.CodeInvalidArgument, "content_hash must be a valid sha256 hex string")
+	if err != nil || len(hash) != suite.ContentHash.DigestBytes {
+		return nil, trusterr.New(
+			trusterr.CodeInvalidArgument,
+			fmt.Sprintf("content_hash must be a valid %s hex string", suite.ContentHash.Algorithm),
+		)
 	}
 	return hash, nil
 }

@@ -588,6 +588,54 @@ func TestRecordEndpoints(t *testing.T) {
 	}
 }
 
+func TestRecordContentHashUsesBoundCryptoSuite(t *testing.T) {
+	t.Parallel()
+
+	hash := bytes.Repeat([]byte{0x5a}, cryptosuite.DigestSize)
+	batchSvc := &fakeBatchService{
+		suiteID: cryptosuite.CNSMV1,
+		records: []model.RecordIndex{
+			{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: cryptosuite.CNSMV1, RecordID: "rec-sm3", ContentHash: hash},
+			{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: cryptosuite.CNSMV1, RecordID: "rec-other", ContentHash: bytes.Repeat([]byte{0x6b}, cryptosuite.DigestSize)},
+		},
+	}
+	handler := New(nil, nil, batchSvc)
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/records?content_hash=sm3:"+strings.Repeat("5a", cryptosuite.DigestSize), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("SM3 content_hash status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var page recordsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode SM3 content_hash response: %v", err)
+	}
+	if len(page.Records) != 1 || page.Records[0].RecordID != "rec-sm3" {
+		t.Fatalf("SM3 content_hash records = %+v", page.Records)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?content_hash=sha256:"+strings.Repeat("5a", cryptosuite.DigestSize), nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "algorithm must be sm3") {
+		t.Fatalf("mixed-suite content_hash status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v2/records?sha256="+strings.Repeat("5a", cryptosuite.DigestSize), nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retired sha256 alias status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode retired sha256 alias response: %v", err)
+	}
+	if len(page.Records) != 2 {
+		t.Fatalf("retired sha256 alias filtered records: %+v", page.Records)
+	}
+}
+
 func TestCreateStatusSubscriptionAuthenticatesBeforeRecordLookups(t *testing.T) {
 	t.Parallel()
 
@@ -974,6 +1022,7 @@ func (f processorFunc) Submit(ctx context.Context, signed model.SignedClaim) (mo
 
 type fakeBatchService struct {
 	mu         sync.Mutex
+	suiteID    cryptosuite.ID
 	enqueued   string
 	proof      model.ProofBundle
 	roots      []model.BatchRoot
@@ -981,6 +1030,13 @@ type fakeBatchService struct {
 	manifests  map[string]model.BatchManifest
 	treeLeaves []model.BatchTreeLeaf
 	treeNodes  []model.BatchTreeNode
+}
+
+func (f *fakeBatchService) CryptoSuite() cryptosuite.ID {
+	if f.suiteID == "" {
+		return cryptosuite.INTLV1
+	}
+	return f.suiteID
 }
 
 type staticStatusRouteResolver struct {
