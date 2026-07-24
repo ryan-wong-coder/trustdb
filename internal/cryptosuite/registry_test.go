@@ -36,6 +36,8 @@ func TestRegistryPinsCanonicalSuites(t *testing.T) {
 			KeyEventHash:          "trustdb.key-event-hash.v1",
 			GlobalLogLeaf:         "trustdb.global-log-leaf.v1",
 			SignedTreeHead:        "trustdb.signed-tree-head.v1",
+			StatusRefresh:         "trustdb.status-refresh.v1",
+			StatusSubscription:    "trustdb.status-subscription.v1",
 			IdempotencyStorageKey: "trustdb.idempotency-storage-key.v1",
 		}) {
 		t.Fatalf("unexpected INTL_V1 descriptor: %#v", intl)
@@ -71,6 +73,8 @@ func TestRegistryPinsCanonicalSuites(t *testing.T) {
 			KeyEventHash:          "trustdb.key-event-hash.v2",
 			GlobalLogLeaf:         "trustdb.global-log-leaf.v2",
 			SignedTreeHead:        "trustdb.signed-tree-head.v2",
+			StatusRefresh:         "trustdb.status-refresh.v2",
+			StatusSubscription:    "trustdb.status-subscription.v2",
 			IdempotencyStorageKey: "trustdb.idempotency-storage-key.v2",
 		}) {
 		t.Fatalf("unexpected CN_SM_V1 descriptor: %#v", cn)
