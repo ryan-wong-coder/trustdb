@@ -89,8 +89,7 @@ func ValidatePublicationObservation(observation PublicationObservation) error {
 	if len(observation.CanonicalPayload) == 0 || len(observation.CanonicalPayload) > MaxPayloadBytes ||
 		len(observation.Transaction.EncodedTransaction) == 0 ||
 		len(observation.Transaction.EncodedTransaction) > maxRawTransactionBytes ||
-		len(observation.Transaction.Signature) == 0 ||
-		len(observation.Transaction.Signature) > maxSignatureBytes ||
+		len(observation.Transaction.Signature) != 65 ||
 		len(observation.Receipt.NormalizedRPCReceipt) == 0 ||
 		len(observation.Receipt.NormalizedRPCReceipt) > maxRawReceiptBytes ||
 		len(observation.Event.NormalizedRPCLog) == 0 ||

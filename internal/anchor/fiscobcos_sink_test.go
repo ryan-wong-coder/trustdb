@@ -225,7 +225,7 @@ func TestFISCOBCOSStandardSinkFailsClosedOnEndpointDisagreement(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = sink.Publish(context.Background(), testSTH(testScheduleKey(fiscobcos.SinkName), 8, 0x18))
-	if !errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrEndpointDisagreement) {
+	if errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrEndpointDisagreement) {
 		t.Fatalf("height disagreement error=%v", err)
 	}
 	state := drivers[0].(*fakeBCOSDriver).state
@@ -321,7 +321,7 @@ func TestFISCOBCOSStandardSinkRejectsReceiptOnlyResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = sink.Publish(context.Background(), testSTH(testScheduleKey(fiscobcos.SinkName), 8, 0x18))
-	if !errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrIncompleteChainEvidence) {
+	if errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrIncompleteChainEvidence) {
 		t.Fatalf("receipt-only error=%v", err)
 	}
 }
@@ -356,6 +356,63 @@ func (d *receiptOnlyDriver) GetReceiptWithProof(ctx context.Context, hash []byte
 	receipt.Observation.TransactionProofRPC = nil
 	receipt.Observation.ReceiptProofRPC = nil
 	return receipt, err
+}
+
+type statusMismatchDriver struct{ *fakeBCOSDriver }
+
+func (d *statusMismatchDriver) GetReceiptWithProof(ctx context.Context, hash []byte) (fiscobcos.ReceiptWithProof, error) {
+	receipt, err := d.fakeBCOSDriver.GetReceiptWithProof(ctx, hash)
+	receipt.Status = 10008
+	receipt.Observation.Status = 10008
+	receipt.Observation.StatusMessage = "invalid_signature"
+	return receipt, err
+}
+
+func TestFISCOBCOSPostSubmitValidationFailuresRemainRecoverOnly(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		wrap func(*fakeBCOSDriver) fiscobcos.Driver
+	}{
+		{name: "missing receipt proofs", wrap: func(driver *fakeBCOSDriver) fiscobcos.Driver {
+			return &receiptOnlyDriver{fakeBCOSDriver: driver}
+		}},
+		{name: "invalid receipt status", wrap: func(driver *fakeBCOSDriver) fiscobcos.Driver {
+			return &statusMismatchDriver{fakeBCOSDriver: driver}
+		}},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			trust, drivers := fakeBCOSFixture(t)
+			base := drivers[0].(*fakeBCOSDriver)
+			drivers[0] = test.wrap(base)
+			sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := proofstore.LocalStore{Root: t.TempDir()}
+			key := testScheduleKey(fiscobcos.SinkName)
+			sth := testSTH(key, 11, 0x1b)
+			offer(t, store, key, sth, 100, 100)
+			now := time.Unix(0, 100)
+			service := newTestService(t, store, sink, key, &now, func(config *Config) {
+				config.InitialBackoff = time.Nanosecond
+				config.MaxBackoff = time.Nanosecond
+			})
+			service.tick(context.Background())
+			now = now.Add(time.Second)
+			service = newTestService(t, store, sink, key, &now, nil)
+			service.tick(context.Background())
+			schedule, found, err := store.GetSTHAnchorSchedule(context.Background(), key)
+			if err != nil || !found || schedule.InFlight == nil || schedule.InFlight.TerminalFailure {
+				t.Fatalf("schedule=%+v found=%v error=%v, want recover-only InFlight", schedule, found, err)
+			}
+			base.state.mu.Lock()
+			defer base.state.mu.Unlock()
+			if base.state.submitCalls != 1 {
+				t.Fatalf("submit calls=%d, want exactly one after post-submit failure", base.state.submitCalls)
+			}
+		})
+	}
 }
 
 func TestFISCOBCOSServiceRestartDoesNotRepeatUnknownSideEffect(t *testing.T) {

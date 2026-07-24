@@ -130,8 +130,11 @@ func (s *FISCOBCOSStandardSink) Probe(ctx context.Context) ([]fiscobcos.ChainPro
 	}
 	sort.Slice(probes, func(i, j int) bool { return probes[i].Endpoint < probes[j].Endpoint })
 	for i := 1; i < len(probes); i++ {
-		if !sameChainProbe(probes[0], probes[i]) {
+		if !sameChainIdentity(probes[0], probes[i]) {
 			return nil, permanentDriverFailure("probe", probes[i].Endpoint, fiscobcos.ErrEndpointDisagreement)
+		}
+		if probes[0].Height != probes[i].Height {
+			return nil, transientDriverFailure("probe", probes[i].Endpoint, fiscobcos.ErrEndpointDisagreement)
 		}
 	}
 	return probes, nil
@@ -166,7 +169,7 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 		return model.STHAnchorResult{}, mapSinkError(classifyDriverFailure("submit_anchor", s.drivers[0].Endpoint(), err))
 	}
 	if err := validateTransactionAttempt(submission.Attempt); err != nil {
-		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
+		return model.STHAnchorResult{}, ambiguousDriverFailure("validate_submission", s.drivers[0].Endpoint(), err)
 	}
 	records, err := s.readAnchorQuorum(ctx, payload)
 	if err != nil {
@@ -177,10 +180,10 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 		return model.STHAnchorResult{}, ambiguousDriverFailure("get_receipt_with_proof", s.drivers[0].Endpoint(), err)
 	}
 	if receipt.Status != fiscobcos.ReceiptStatusOK {
-		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, fiscobcos.ErrInvalidReceiptStatus)
+		return model.STHAnchorResult{}, ambiguousDriverFailure("validate_receipt_status", s.drivers[0].Endpoint(), fiscobcos.ErrInvalidReceiptStatus)
 	}
 	if err := validateReceipt(s.trust, payload, submission.Attempt, receipt, records[0]); err != nil {
-		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
+		return model.STHAnchorResult{}, ambiguousDriverFailure("validate_receipt", s.drivers[0].Endpoint(), err)
 	}
 	header, consensus, err := s.readBlockQuorum(ctx, receipt.BlockNumber, receipt.BlockHash)
 	if err != nil {
@@ -188,11 +191,11 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 	}
 	observation, err := s.buildObservation(canonicalPayload, submission.Attempt, receipt, header, consensus)
 	if err != nil {
-		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
+		return model.STHAnchorResult{}, ambiguousDriverFailure("build_publication_observation", s.drivers[0].Endpoint(), err)
 	}
 	proofBytes, err := fiscobcos.MarshalPublicationObservation(observation)
 	if err != nil {
-		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
+		return model.STHAnchorResult{}, ambiguousDriverFailure("marshal_publication_observation", s.drivers[0].Endpoint(), err)
 	}
 	return model.STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
@@ -258,7 +261,7 @@ func (s *FISCOBCOSStandardSink) readAnchorQuorum(ctx context.Context, payload fi
 			return nil, ambiguousDriverFailure("read_anchor", driver.Endpoint(), fiscobcos.ErrIncompleteChainEvidence)
 		}
 		if err := fiscobcos.ValidateAnchorRecord(payload, record); err != nil {
-			return nil, permanentDriverFailure("read_anchor", driver.Endpoint(), err)
+			return nil, ambiguousDriverFailure("read_anchor", driver.Endpoint(), err)
 		}
 		records = append(records, cloneAnchorRecord(record))
 	}
@@ -403,12 +406,11 @@ func validateProbeForSink(probe fiscobcos.ChainProbe, trust fiscobcos.TrustConfi
 	return nil
 }
 
-func sameChainProbe(left, right fiscobcos.ChainProbe) bool {
+func sameChainIdentity(left, right fiscobcos.ChainProbe) bool {
 	return left.SDKVersion == right.SDKVersion && left.CryptoMode == right.CryptoMode &&
 		left.ChainID == right.ChainID && left.GroupID == right.GroupID &&
 		bytes.Equal(left.GenesisHash, right.GenesisHash) &&
 		bytes.Equal(left.CheckpointHash, right.CheckpointHash) &&
-		left.Height == right.Height &&
 		bytes.Equal(left.ContractCodeHash, right.ContractCodeHash)
 }
 
