@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -57,7 +58,8 @@ func TestAsyncMaterializerRetriesPreparedManifest(t *testing.T) {
 	items := []Accepted{{Signed: signed("retry-record"), Record: recordWithWAL("retry-record", 91), Accepted: accepted("retry-record")}}
 	engine := &retryMaterializeEngine{}
 	svc := New(engine, store, Options{
-		QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync,
 		MaterializerWorkers: 1, MaterializerQueueSize: 1, MaterializerPollInterval: 10 * time.Millisecond,
 		LoadBatchItems: func(context.Context, model.BatchManifest) ([]Accepted, error) { return cloneAcceptedItems(items), nil },
 	}, nil)
@@ -78,7 +80,7 @@ func TestAsyncMaterializerRetriesPreparedManifest(t *testing.T) {
 func TestAsyncMaterializerMarksPermanentFailure(t *testing.T) {
 	store := newBoundTestLocalStore(t, t.TempDir())
 	engine := &retryMaterializeEngine{permanent: true}
-	svc := New(engine, store, Options{QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync, MaterializerWorkers: 1, MaterializerQueueSize: 1, MaterializerPollInterval: 10 * time.Millisecond}, nil)
+	svc := New(engine, store, Options{CryptoSuite: cryptosuite.INTLV1, QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync, MaterializerWorkers: 1, MaterializerQueueSize: 1, MaterializerPollInterval: 10 * time.Millisecond}, nil)
 	defer svc.Shutdown(context.Background())
 	if err := svc.Enqueue(context.Background(), signed("failed-record"), recordWithWAL("failed-record", 92), accepted("failed-record")); err != nil {
 		t.Fatal(err)
@@ -97,7 +99,8 @@ func TestAsyncMaterializerKeepsItemsVisibleWhenScannerWinsPublicationRace(t *tes
 		svc.schedulePreparedManifests(context.Background())
 	}
 	svc = New(fakeEngine{}, store, Options{
-		QueueSize: 4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync,
+		CryptoSuite: cryptosuite.INTLV1,
+		QueueSize:   4, MaxRecords: 1, MaxDelay: time.Hour, ProofMode: ProofModeAsync,
 		MaterializerWorkers: 1, MaterializerQueueSize: 1, DeferMaterializerScan: true,
 	}, nil)
 	defer svc.Shutdown(context.Background())

@@ -143,6 +143,7 @@ type Service struct {
 	shutdownStarted chan struct{}
 	opts            Options
 	suiteID         cryptosuite.ID
+	configErr       error
 
 	mu      sync.RWMutex
 	closed  bool
@@ -205,8 +206,11 @@ type walCheckpointCallback struct {
 const maxCheckpointCoverageRuns = 4096
 
 func New(engine Engine, store Store, opts Options, metrics *observability.Metrics) *Service {
-	if opts.CryptoSuite == "" {
-		opts.CryptoSuite = cryptosuite.INTLV1
+	suite, suiteErr := cryptosuite.RequireAvailable(opts.CryptoSuite)
+	if suiteErr == nil {
+		opts.CryptoSuite = suite.ID
+	} else {
+		suiteErr = trusterr.Wrap(trusterr.CodeInvalidArgument, "batch crypto_suite", suiteErr)
 	}
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = 1024
@@ -236,6 +240,7 @@ func New(engine Engine, store Store, opts Options, metrics *observability.Metric
 		shutdownStarted:      make(chan struct{}),
 		opts:                 opts,
 		suiteID:              opts.CryptoSuite,
+		configErr:            suiteErr,
 		seq:                  opts.InitialSeq,
 		ingestDone:           make(chan struct{}),
 		shutdownDone:         make(chan struct{}),
@@ -287,6 +292,9 @@ func normalizeProofMode(mode string) string {
 }
 
 func (s *Service) Enqueue(ctx context.Context, signed model.SignedClaim, record model.ServerRecord, accepted model.AcceptedReceipt) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "batch enqueue canceled", err)
 	}
@@ -295,6 +303,9 @@ func (s *Service) Enqueue(ctx context.Context, signed model.SignedClaim, record 
 }
 
 func (s *Service) EnqueueRecovered(ctx context.Context, item Accepted) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if err := ctx.Err(); err != nil {
 		return trusterr.Wrap(trusterr.CodeDeadlineExceeded, "batch enqueue canceled", err)
 	}
@@ -1055,6 +1066,9 @@ func cloneAcceptedItems(items []Accepted) []Accepted {
 // root/index artifacts and leaves bundles lazy so the first Proof call remains
 // the materialization boundary.
 func (s *Service) RecoverManifest(ctx context.Context, manifest model.BatchManifest, items []Accepted) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	s.setRecordStatuses(items, model.RecordStatusProcessing, manifest.BatchID, false, "")
 	if manifest.State == model.BatchStateCommitted {
 		s.markRecordStatusesCommitted(items, manifest.BatchID, manifest.CommittedAtUnixN)
@@ -1657,6 +1671,9 @@ func (s *Service) DeferCheckpointAdvance() {
 // contiguous committed WAL frontier. Coverage observed while deferred stays
 // compressed in memory and cannot invoke the prune hook before this call.
 func (s *Service) StartCheckpointAdvance(ctx context.Context) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if !s.checkpointEnabled {
 		return nil
 	}
@@ -1680,6 +1697,9 @@ func (s *Service) StartCheckpointAdvance(ctx context.Context) error {
 // manifest. The range is kept in memory while checkpoint advancement is
 // deferred and is flushed by StartCheckpointAdvance.
 func (s *Service) RecordCommittedWALRange(ctx context.Context, from, to model.WALPosition, batchID string) error {
+	if s.configErr != nil {
+		return s.configErr
+	}
 	if !s.checkpointEnabled {
 		return nil
 	}

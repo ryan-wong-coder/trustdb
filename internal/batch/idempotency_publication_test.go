@@ -84,7 +84,7 @@ func (s *publishingCheckpointStore) snapshot() ([]string, []model.BatchManifest,
 
 func TestServicePublishesIdempotencyBeforeCheckpoint(t *testing.T) {
 	store := &publishingCheckpointStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
-	svc := New(fakeEngine{}, store, Options{}, nil)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "keyed")
 	if err := svc.persistBatch(context.Background(), "batch-keyed", time.Unix(0, 1).UTC(), []Accepted{item}); err != nil {
@@ -112,7 +112,7 @@ func TestServicePublicationFailurePreventsCheckpoint(t *testing.T) {
 		LocalStore: newBoundTestLocalStore(t, t.TempDir()),
 		publishErr: publishErr,
 	}
-	svc := New(fakeEngine{}, store, Options{}, nil)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "failed")
 	if err := svc.persistBatch(context.Background(), "batch-failed", time.Unix(0, 1).UTC(), []Accepted{item}); !errors.Is(err, publishErr) {
@@ -129,7 +129,7 @@ func TestServicePublicationFailurePreventsCheckpoint(t *testing.T) {
 
 func TestServiceKeepsEmptyIdempotencyKeyOptOut(t *testing.T) {
 	store := &publishingCheckpointStore{LocalStore: newBoundTestLocalStore(t, t.TempDir())}
-	svc := New(fakeEngine{}, store, Options{}, nil)
+	svc := New(fakeEngine{}, store, Options{CryptoSuite: cryptosuite.INTLV1}, nil)
 	defer svc.Shutdown(context.Background())
 	item := validIdempotencyAccepted(t, "")
 	if err := svc.persistBatch(context.Background(), "batch-unkeyed", time.Unix(0, 1).UTC(), []Accepted{item}); err != nil {
