@@ -54,7 +54,7 @@ func TestLocalProjectorMaterializesOlderBatchesWithoutBlockingEvidence(t *testin
 	}
 	anchored := sths[len(sths)-1]
 	result := model.STHAnchorResult{
-		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1, NodeID: nodeID, LogID: logID, TreeSize: anchored.TreeSize,
+		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, NodeID: nodeID, LogID: logID, TreeSize: anchored.TreeSize,
 		SinkName: sinkName, AnchorID: "anchor-5", RootHash: append([]byte(nil), anchored.RootHash...), STH: anchored, PublishedAtUnixN: 500,
 	}
 	if err := store.PutSTHAnchorResult(ctx, result); err != nil {

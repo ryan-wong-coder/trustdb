@@ -146,6 +146,7 @@ func (s *FileSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model
 		RootHash:         sth.RootHash,
 		STH:              sth,
 		Proof:            line, // JSONL line is the "proof" a verifier compares
+		EvidenceStage:    model.AnchorEvidenceStageOfflineVerified,
 		PublishedAtUnixN: now,
 	}, nil
 }

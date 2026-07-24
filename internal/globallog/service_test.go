@@ -177,6 +177,7 @@ func TestEvidenceUsesLatestCoveringAnchoredSTH(t *testing.T) {
 	anchored := sths[len(sths)-1]
 	result := model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
 		SchemaVersion:    model.SchemaSTHAnchorResult,
+		EvidenceStage:    model.AnchorEvidenceStageOfflineVerified,
 		NodeID:           anchored.NodeID,
 		LogID:            anchored.LogID,
 		TreeSize:         anchored.TreeSize,
@@ -247,7 +248,7 @@ func TestEvidenceUsesConfiguredAnchorSinkStream(t *testing.T) {
 	putResult := func(sth model.SignedTreeHead, sink string) {
 		t.Helper()
 		if err := writer.PutSTHAnchorResult(ctx, model.STHAnchorResult{CryptoSuite: cryptosuite.INTLV1,
-			SchemaVersion: model.SchemaSTHAnchorResult, NodeID: sth.NodeID, LogID: sth.LogID, TreeSize: sth.TreeSize,
+			SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, NodeID: sth.NodeID, LogID: sth.LogID, TreeSize: sth.TreeSize,
 			SinkName: sink, AnchorID: sink + "-anchor", RootHash: append([]byte(nil), sth.RootHash...), STH: sth, PublishedAtUnixN: int64(sth.TreeSize),
 		}); err != nil {
 			t.Fatalf("PutSTHAnchorResult %s: %v", sink, err)

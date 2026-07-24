@@ -94,6 +94,7 @@ func (s *PluginSink) Publish(ctx context.Context, sth model.SignedTreeHead) (mod
 	return model.STHAnchorResult{
 		AnchorID:         result.AnchorID,
 		Proof:            append([]byte(nil), result.Proof...),
+		EvidenceStage:    model.AnchorEvidenceStageOfflineVerified,
 		PublishedAtUnixN: result.PublishedAtUnixN,
 	}, nil
 }

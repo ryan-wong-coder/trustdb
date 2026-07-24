@@ -49,6 +49,7 @@ func (NoopSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.ST
 		AnchorID:         anchorID,
 		RootHash:         sth.RootHash,
 		STH:              sth,
+		EvidenceStage:    model.AnchorEvidenceStageOfflineVerified,
 		PublishedAtUnixN: time.Now().UTC().UnixNano(),
 	}, nil
 }

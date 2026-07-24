@@ -708,9 +708,9 @@ func TestGlobalAndAnchorListEndpoints(t *testing.T) {
 		},
 	}, fakeAnchorService{
 		results: []model.STHAnchorResult{
-			{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, AnchorID: "anchor-2", SinkName: "ots"},
-			{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 2, AnchorID: "anchor-2-file", SinkName: "file"},
-			{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 1, AnchorID: "anchor-1", SinkName: "ots"},
+			{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, TreeSize: 2, AnchorID: "anchor-2", SinkName: "ots"},
+			{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, TreeSize: 2, AnchorID: "anchor-2-file", SinkName: "file"},
+			{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, TreeSize: 1, AnchorID: "anchor-1", SinkName: "ots"},
 		},
 	})
 
@@ -964,7 +964,7 @@ func TestGlobalEvidenceEndpoint(t *testing.T) {
 	t.Parallel()
 	want := model.GlobalLogEvidence{
 		GlobalProof:  model.GlobalLogProof{SchemaVersion: model.SchemaGlobalLogProof, BatchID: "batch-1", TreeSize: 3},
-		AnchorResult: &model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 3, AnchorID: "anchor-3"},
+		AnchorResult: &model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, TreeSize: 3, AnchorID: "anchor-3"},
 	}
 	handler := NewWithGlobalAndAnchors(nil, nil, &fakeBatchService{}, fakeGlobalService{evidence: want}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v2/global-log/evidence/batch-1", nil)

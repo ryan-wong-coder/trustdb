@@ -285,7 +285,7 @@ func projectorResult(key model.STHAnchorScheduleKey, treeSize uint64) model.STHA
 		Signature: model.Signature{Alg: model.DefaultSignatureAlg, KeyID: "server-key", Signature: bytes.Repeat([]byte{byte(treeSize)}, 64)},
 	}
 	return model.STHAnchorResult{
-		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1, NodeID: key.NodeID, LogID: key.LogID, TreeSize: treeSize,
+		SchemaVersion: model.SchemaSTHAnchorResult, CryptoSuite: cryptosuite.INTLV1, EvidenceStage: model.AnchorEvidenceStageOfflineVerified, NodeID: key.NodeID, LogID: key.LogID, TreeSize: treeSize,
 		SinkName: key.SinkName, AnchorID: fmt.Sprintf("anchor-%d", treeSize), RootHash: append([]byte(nil), sth.RootHash...), STH: sth,
 		PublishedAtUnixN: int64(treeSize),
 	}

@@ -236,6 +236,7 @@ func TestClientOperationalEndpoints(t *testing.T) {
 					Result: &STHAnchorResult{
 						SchemaVersion: model.SchemaSTHAnchorResult,
 						CryptoSuite:   cryptosuite.INTLV1,
+						EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
 						TreeSize:      4,
 						AnchorID:      "anchor-4",
 						STH:           SignedTreeHead{CryptoSuite: cryptosuite.INTLV1},
@@ -251,6 +252,7 @@ func TestClientOperationalEndpoints(t *testing.T) {
 				Result: &STHAnchorResult{
 					SchemaVersion: model.SchemaSTHAnchorResult,
 					CryptoSuite:   cryptosuite.INTLV1,
+					EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
 					TreeSize:      4,
 					AnchorID:      "anchor-4",
 					STH:           SignedTreeHead{CryptoSuite: cryptosuite.INTLV1},
@@ -577,6 +579,7 @@ func TestClientExportSingleProofUsesComposedGlobalEvidence(t *testing.T) {
 	anchored := STHAnchorResult{
 		SchemaVersion: model.SchemaSTHAnchorResult,
 		CryptoSuite:   cryptosuite.INTLV1,
+		EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
 		NodeID:        bundle.NodeID,
 		LogID:         bundle.LogID,
 		TreeSize:      1,
