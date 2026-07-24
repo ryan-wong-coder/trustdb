@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -32,6 +33,7 @@ func TestHTTPClientListRecordIndexesMapsServerPage(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(recordPageResponse{
 			Records: []model.RecordIndex{{
 				SchemaVersion:      model.SchemaRecordIndex,
+				CryptoSuite:        cryptosuite.INTLV1,
 				RecordID:           "tr1record",
 				TenantID:           "tenant-a",
 				ClientID:           "client-a",
@@ -84,6 +86,7 @@ func TestHTTPClientListRecordIndexesSupportsExactRecordQuery(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(model.RecordIndex{
 			SchemaVersion:   model.SchemaRecordIndex,
+			CryptoSuite:     cryptosuite.INTLV1,
 			RecordID:        "tr1exact",
 			ReceivedAtUnixN: 123,
 			StorageURI:      "trustdb-local://sha256/abc",
@@ -186,9 +189,13 @@ func TestHTTPClientGetAnchorMapsImmutableResult(t *testing.T) {
 			"proof_level": "L5",
 			"result": &model.STHAnchorResult{
 				SchemaVersion: model.SchemaSTHAnchorResult,
+				CryptoSuite:   cryptosuite.INTLV1,
 				TreeSize:      7,
 				SinkName:      "ots",
 				AnchorID:      "anchor-7",
+				STH: model.SignedTreeHead{
+					CryptoSuite: cryptosuite.INTLV1,
+				},
 			},
 		})
 	}))

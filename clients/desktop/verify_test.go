@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,52 @@ func TestReadProofBundleFileRejectsOversizedInput(t *testing.T) {
 	err := readProofBundleFile(path, &bundle)
 	if err == nil || !strings.Contains(err.Error(), "payload too large") {
 		t.Fatalf("readProofBundleFile() error = %v, want payload too large", err)
+	}
+}
+
+func TestDesktopTrustedKeysPreserveRotatedSignatureKeyIDs(t *testing.T) {
+	t.Parallel()
+
+	clientPublic, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPublic, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := model.ProofBundle{
+		SignedClaim: model.SignedClaim{Signature: model.Signature{KeyID: "client-key"}},
+		AcceptedReceipt: model.AcceptedReceipt{
+			ServerSig: model.Signature{KeyID: "accepted-key"},
+		},
+		CommittedReceipt: model.CommittedReceipt{
+			ServerSig: model.Signature{KeyID: "committed-key"},
+		},
+	}
+	global := &model.GlobalLogProof{
+		STH: model.SignedTreeHead{Signature: model.Signature{KeyID: "sth-key"}},
+	}
+	keys, err := desktopTrustedKeys(bundle, clientPublic, serverPublic, global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, descriptor := range map[string]struct {
+		got  string
+		want string
+	}{
+		"client":    {got: keys.ClientPublicKey.KeyID, want: "client-key"},
+		"accepted":  {got: keys.AcceptedReceiptPublicKey.KeyID, want: "accepted-key"},
+		"committed": {got: keys.CommittedReceiptPublicKey.KeyID, want: "committed-key"},
+		"STH":       {got: keys.SignedTreeHeadPublicKey.KeyID, want: "sth-key"},
+	} {
+		if descriptor.got != descriptor.want {
+			t.Fatalf("%s key ID = %q, want %q", name, descriptor.got, descriptor.want)
+		}
+	}
+	if keys.ClientPublicKey.CryptoSuite != cryptosuite.INTLV1 ||
+		keys.SignedTreeHeadPublicKey.CryptoSuite != cryptosuite.INTLV1 {
+		t.Fatalf("desktop trust suites = client:%s STH:%s", keys.ClientPublicKey.CryptoSuite, keys.SignedTreeHeadPublicKey.CryptoSuite)
 	}
 }
 

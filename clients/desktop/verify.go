@@ -152,6 +152,10 @@ func (a *App) VerifyProof(req VerifyRequest) (*VerifyResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	trustedKeys, err := desktopTrustedKeys(bundle, clientPub, serverPub, globalProof)
+	if err != nil {
+		return nil, err
+	}
 
 	f, err := os.Open(req.FilePath)
 	if err != nil {
@@ -173,10 +177,7 @@ func (a *App) VerifyProof(req VerifyRequest) (*VerifyResponse, error) {
 		Bundle:       bundle,
 		GlobalProof:  globalProof,
 		AnchorResult: anchor,
-	}, sdk.TrustedKeys{
-		ClientPublicKey: clientPub,
-		ServerPublicKey: serverPub,
-	}, sdk.VerifyOptions{SkipAnchor: req.SkipAnchor, AnchorVerifier: pluginVerifier})
+	}, trustedKeys, sdk.VerifyOptions{SkipAnchor: req.SkipAnchor, AnchorVerifier: pluginVerifier})
 	if err != nil {
 		return &VerifyResponse{
 			Valid:        false,
@@ -199,6 +200,39 @@ func (a *App) VerifyProof(req VerifyRequest) (*VerifyResponse, error) {
 		Anchor:       anchor,
 		ContentBytes: bundle.SignedClaim.Claim.Content.ContentLength,
 	}, nil
+}
+
+func desktopTrustedKeys(
+	bundle model.ProofBundle,
+	clientPublicKey ed25519.PublicKey,
+	serverPublicKey ed25519.PublicKey,
+	globalProof *model.GlobalLogProof,
+) (sdk.TrustedKeys, error) {
+	client, err := sdk.NewINTLV1PublicKey(bundle.SignedClaim.Signature.KeyID, clientPublicKey)
+	if err != nil {
+		return sdk.TrustedKeys{}, fmt.Errorf("client verification key: %w", err)
+	}
+	accepted, err := sdk.NewINTLV1PublicKey(bundle.AcceptedReceipt.ServerSig.KeyID, serverPublicKey)
+	if err != nil {
+		return sdk.TrustedKeys{}, fmt.Errorf("accepted receipt verification key: %w", err)
+	}
+	committed, err := sdk.NewINTLV1PublicKey(bundle.CommittedReceipt.ServerSig.KeyID, serverPublicKey)
+	if err != nil {
+		return sdk.TrustedKeys{}, fmt.Errorf("committed receipt verification key: %w", err)
+	}
+	keys := sdk.TrustedKeys{
+		ClientPublicKey:           client,
+		AcceptedReceiptPublicKey:  accepted,
+		CommittedReceiptPublicKey: committed,
+	}
+	if globalProof != nil {
+		sth, err := sdk.NewINTLV1PublicKey(globalProof.STH.Signature.KeyID, serverPublicKey)
+		if err != nil {
+			return sdk.TrustedKeys{}, fmt.Errorf("signed tree head verification key: %w", err)
+		}
+		keys.SignedTreeHeadPublicKey = sth
+	}
+	return keys, nil
 }
 
 func (a *App) startAnchorPluginVerifier() (*anchorplugin.Process, error) {
