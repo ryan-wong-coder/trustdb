@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -360,13 +359,11 @@ func readOtsBodyLimit(r io.Reader) ([]byte, error) {
 // reported STHAnchorResult.AnchorID — a cheap tamper check before
 // attempting the (more expensive) proof replay.
 func DeterministicOtsAnchorID(sth model.SignedTreeHead) string {
-	h := sha256.New()
-	h.Write([]byte(OtsSinkName))
-	h.Write([]byte{0})
-	h.Write([]byte(fmt.Sprintf("%d", sth.TreeSize)))
-	h.Write([]byte{0})
-	h.Write(sth.RootHash)
-	return "ots-" + hex.EncodeToString(h.Sum(nil))[:32]
+	if sth.CryptoSuite != cryptosuite.INTLV1 {
+		return ""
+	}
+	id, _ := deterministicAnchorID(OtsSinkName, "ots2-", sth)
+	return id
 }
 
 // normaliseCalendars strips whitespace, drops empty entries, and

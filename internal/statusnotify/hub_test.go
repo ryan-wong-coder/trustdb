@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -68,7 +69,7 @@ func testResolverAndRequest(t testing.TB, route model.UpstreamNotificationRoute,
 		routes: map[string]model.UpstreamNotificationRoute{"tenant/client/key": route},
 		keys: map[string]model.ClientKey{"tenant/client/key": {
 			TenantID: "tenant", ClientID: "client", KeyID: "key", Alg: cryptosuite.SignatureEd25519,
-			PublicKey: publicKey, Status: model.KeyStatusValid,
+			CryptoSuite: cryptosuite.INTLV1, PublicKey: publicKey, Status: model.KeyStatusValid,
 		}},
 	}
 	request := CreateRequest{
@@ -79,6 +80,50 @@ func testResolverAndRequest(t testing.TB, route model.UpstreamNotificationRoute,
 		t.Fatal(err)
 	}
 	return resolver, request
+}
+
+func TestCNSMSubscriptionSignatureAndID(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := trustcrypto.GenerateSM2Key()
+	if err != nil {
+		t.Fatalf("GenerateSM2Key: %v", err)
+	}
+	signer, err := trustcrypto.NewSM2Signer("sm2-key", privateKey)
+	if err != nil {
+		t.Fatalf("NewSM2Signer: %v", err)
+	}
+	request := CreateRequest{
+		TenantID: "tenant-cn", ClientID: "client-cn", KeyID: "sm2-key",
+		RecordIDs: []string{"tr1-cn"}, SignedAtUnixN: time.Now().UTC().UnixNano(),
+		Nonce: "0123456789abcdef",
+	}
+	if err := SignCreateRequest(context.Background(), cryptosuite.CNSMV1, signer, &request); err != nil {
+		t.Fatalf("SignCreateRequest: %v", err)
+	}
+	clientKey := model.ClientKey{
+		TenantID: "tenant-cn", ClientID: "client-cn", KeyID: "sm2-key",
+		CryptoSuite: cryptosuite.CNSMV1, Alg: cryptosuite.SignatureSM2SM3,
+		PublicKey: publicKey, Status: model.KeyStatusValid,
+	}
+	if err := VerifyCreateRequest(request, clientKey, time.Now().UTC()); err != nil {
+		t.Fatalf("VerifyCreateRequest: %v", err)
+	}
+	first, err := subscriptionID(cryptosuite.CNSMV1, request)
+	if err != nil {
+		t.Fatalf("subscriptionID(CN_SM_V1): %v", err)
+	}
+	second, err := subscriptionID(cryptosuite.CNSMV1, request)
+	if err != nil || first != second || !strings.HasPrefix(first, subscriptionIDPrefix) {
+		t.Fatalf("CN subscription IDs first=%q second=%q err=%v", first, second, err)
+	}
+	intl, err := subscriptionID(cryptosuite.INTLV1, request)
+	if err != nil {
+		t.Fatalf("subscriptionID(INTL_V1): %v", err)
+	}
+	if intl == first {
+		t.Fatal("subscription ID did not bind crypto_suite")
+	}
 }
 
 func TestHubCoalescesWebhookRefreshes(t *testing.T) {

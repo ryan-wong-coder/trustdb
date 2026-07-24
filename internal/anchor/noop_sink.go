@@ -2,6 +2,7 @@ package anchor
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/model"
@@ -34,6 +35,10 @@ func (NoopSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.ST
 	if err := ctx.Err(); err != nil {
 		return model.STHAnchorResult{}, err
 	}
+	anchorID, err := deterministicAnchorID(NoopSinkName, "noop2-", sth)
+	if err != nil {
+		return model.STHAnchorResult{}, fmt.Errorf("%w: %v", ErrPermanent, err)
+	}
 	return model.STHAnchorResult{
 		SchemaVersion:    model.SchemaSTHAnchorResult,
 		CryptoSuite:      sth.CryptoSuite,
@@ -41,7 +46,7 @@ func (NoopSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.ST
 		LogID:            sth.LogID,
 		TreeSize:         sth.TreeSize,
 		SinkName:         NoopSinkName,
-		AnchorID:         DeterministicNoopAnchorID(sth),
+		AnchorID:         anchorID,
 		RootHash:         sth.RootHash,
 		STH:              sth,
 		PublishedAtUnixN: time.Now().UTC().UnixNano(),

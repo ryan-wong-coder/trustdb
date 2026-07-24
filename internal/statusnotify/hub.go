@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"container/heap"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -26,6 +25,8 @@ import (
 )
 
 const (
+	subscriptionIDDomain        = "trustdb.status-subscription-id.v2"
+	subscriptionIDPrefix        = "tss2"
 	defaultFlushInterval        = 50 * time.Millisecond
 	defaultTTL                  = 24 * time.Hour
 	maxTTL                      = 7 * 24 * time.Hour
@@ -150,9 +151,11 @@ func New(cfg Config) (*Hub, error) {
 	if cfg.Signer == nil {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "status notification signer is required")
 	}
-	if cfg.CryptoSuite == "" {
-		cfg.CryptoSuite = cryptosuite.INTLV1
+	suiteID, err := cryptosuite.RequireAvailable(cfg.CryptoSuite)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "status notification crypto_suite", err)
 	}
+	cfg.CryptoSuite = suiteID.ID
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = defaultFlushInterval
 	}
@@ -253,6 +256,9 @@ func (h *Hub) Create(_ context.Context, request CreateRequest) (Subscription, er
 	if err != nil {
 		return Subscription{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "upstream key is not currently valid", err)
 	}
+	if err := cryptosuite.RequireSame(h.cfg.CryptoSuite, clientKey.CryptoSuite); err != nil {
+		return Subscription{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "status subscription key crypto_suite", err)
+	}
 	if err := VerifyCreateRequest(request, clientKey, h.cfg.Clock().UTC()); err != nil {
 		return Subscription{}, err
 	}
@@ -279,7 +285,7 @@ func (h *Hub) Create(_ context.Context, request CreateRequest) (Subscription, er
 	if request.TTLSeconds > 0 {
 		ttl = time.Duration(request.TTLSeconds) * time.Second
 	}
-	id, err := subscriptionID(request)
+	id, err := subscriptionID(h.cfg.CryptoSuite, request)
 	if err != nil {
 		return Subscription{}, trusterr.Wrap(trusterr.CodeInternal, "derive subscription id", err)
 	}
@@ -759,7 +765,7 @@ func VerifyCreateRequest(request CreateRequest, clientKey model.ClientKey, now t
 	if request.Signature.KeyID != request.KeyID || request.Signature.KeyID != clientKey.KeyID {
 		return trusterr.New(trusterr.CodeInvalidArgument, "status subscription signature key_id does not match the registered key")
 	}
-	suite, err := cryptosuite.RequireAvailable(cryptosuite.INTLV1)
+	suite, err := cryptosuite.RequireAvailable(clientKey.CryptoSuite)
 	if err != nil {
 		return err
 	}
@@ -783,13 +789,24 @@ func VerifyCreateRequest(request CreateRequest, clientKey model.ClientKey, now t
 	return nil
 }
 
-func subscriptionID(request CreateRequest) (string, error) {
+func subscriptionID(suiteID cryptosuite.ID, request CreateRequest) (string, error) {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return "", err
+	}
 	encoded, err := cborx.Marshal(request)
 	if err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256(encoded)
-	return "tss1" + base64.RawURLEncoding.EncodeToString(digest[:18]), nil
+	input := make([]byte, 0, len(subscriptionIDDomain)+1+len(encoded))
+	input = append(input, subscriptionIDDomain...)
+	input = append(input, 0)
+	input = append(input, encoded...)
+	digest, err := trustcrypto.HashBytesForSuite(suite.ID, suite.RecordIDHash.Algorithm, input)
+	if err != nil {
+		return "", err
+	}
+	return subscriptionIDPrefix + base64.RawURLEncoding.EncodeToString(digest[:18]), nil
 }
 
 func cloneSubscription(subscription Subscription) Subscription {

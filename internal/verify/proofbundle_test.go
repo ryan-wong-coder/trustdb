@@ -119,6 +119,7 @@ func globalProofForBundle(t *testing.T, f proofBundleFixture) model.GlobalLogPro
 	}
 	sth, err := svc.AppendBatchRoot(ctx, model.BatchRoot{
 		SchemaVersion: model.SchemaBatchRoot,
+		CryptoSuite:   cryptosuite.INTLV1,
 		NodeID:        f.bundle.NodeID,
 		LogID:         f.bundle.LogID,
 		BatchID:       f.bundle.CommittedReceipt.BatchID,
