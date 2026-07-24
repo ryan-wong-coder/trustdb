@@ -90,7 +90,11 @@ else
     mkdir -p "${WORK_DIR}/cache"
     CACHE_DIR="${WORK_DIR}/cache"
 fi
+HOST_GOMODCACHE=${GOMODCACHE:-$(go env GOMODCACHE)}
+HOST_GOCACHE=${GOCACHE:-$(go env GOCACHE)}
 export HOME="${WORK_DIR}/home"
+export GOMODCACHE="${HOST_GOMODCACHE}"
+export GOCACHE="${HOST_GOCACHE}"
 
 python3 "${COMPAT}" verify-artifacts \
     --platform "${PLATFORM}" --crypto "${MODE}" --cache-dir "${CACHE_DIR}" \
