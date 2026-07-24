@@ -76,6 +76,22 @@ func TestReceiptTransactionIdentityChecksEveryField(t *testing.T) {
 	sender := bytes.Repeat([]byte{0x52}, 20)
 	contract := bytes.Repeat([]byte{0x53}, 20)
 	input := []byte{0x54, 0x55}
+	signature := bytes.Repeat([]byte{0x56}, 65)
+	attempt := fiscobcos.TransactionSubmission{
+		EncodedTransaction: []byte{0x01},
+		ChainID:            "chain0",
+		GroupID:            "group0",
+		To:                 contract,
+		Input:              input,
+		Signature:          signature,
+		Sender:             sender,
+		TransactionHash:    hash.Bytes(),
+		BlockLimit:         500,
+	}
+	trust := fiscobcos.TrustConfig{
+		ChainID: "chain0", GroupID: "group0",
+		Contract: fiscobcos.ContractBinding{Address: contract},
+	}
 	receipt := &types.Receipt{
 		TransactionHash: hash.Hex(),
 		From:            "0x" + hex.EncodeToString(sender),
@@ -84,13 +100,27 @@ func TestReceiptTransactionIdentityChecksEveryField(t *testing.T) {
 	}
 	transaction := &types.TransactionDetail{
 		Hash: hash.Hex(), From: receipt.From, To: receipt.To, Input: receipt.Input,
+		ChainID: "chain0", GroupID: "group0", BlockLimit: 500,
+		Signature: "0x" + hex.EncodeToString(signature),
 	}
-	if err := validateReceiptTransactionIdentity(receipt, transaction, hash, sender, contract); err != nil {
+	if err := validateReceiptTransactionIdentity(receipt, transaction, attempt, trust); err != nil {
 		t.Fatal(err)
 	}
-	transaction.Input = "0x00"
-	if err := validateReceiptTransactionIdentity(receipt, transaction, hash, sender, contract); err == nil {
-		t.Fatal("accepted receipt/transaction input mismatch")
+	for _, mutate := range []struct {
+		name string
+		fn   func(*types.TransactionDetail)
+	}{
+		{name: "input", fn: func(tx *types.TransactionDetail) { tx.Input = "0x00" }},
+		{name: "chain", fn: func(tx *types.TransactionDetail) { tx.ChainID = "wrong-chain" }},
+		{name: "group", fn: func(tx *types.TransactionDetail) { tx.GroupID = "wrong-group" }},
+		{name: "block limit", fn: func(tx *types.TransactionDetail) { tx.BlockLimit++ }},
+		{name: "signature", fn: func(tx *types.TransactionDetail) { tx.Signature = "0x00" }},
+	} {
+		tx := *transaction
+		mutate.fn(&tx)
+		if err := validateReceiptTransactionIdentity(receipt, &tx, attempt, trust); err == nil {
+			t.Fatalf("accepted mismatched %s", mutate.name)
+		}
 	}
 }
 

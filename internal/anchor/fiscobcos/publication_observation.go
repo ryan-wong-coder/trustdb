@@ -120,10 +120,22 @@ func ValidatePublicationObservation(observation PublicationObservation) error {
 		return err
 	}
 	if len(observation.Transaction.Sender) != 20 ||
+		observation.Transaction.ChainID != observation.ChainID ||
+		observation.Transaction.GroupID != observation.GroupID ||
+		!bytes.Equal(observation.Transaction.To, observation.Contract.Address) ||
+		len(observation.Transaction.Input) == 0 ||
+		len(observation.Transaction.Input) > MaxPayloadBytes+4 ||
 		len(observation.Transaction.TransactionHash) != 32 ||
 		observation.Transaction.BlockLimit == 0 ||
 		observation.Transaction.SubmittedAtUnixN <= 0 {
 		return fmt.Errorf("%w: incomplete transaction observation", ErrIncompleteChainEvidence)
+	}
+	expectedCallData, err := PublishCallData(payload)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(observation.Transaction.Input, expectedCallData) {
+		return fmt.Errorf("%w: transaction input does not match canonical payload", ErrContractMismatch)
 	}
 	if observation.Receipt.Status != ReceiptStatusOK ||
 		observation.Receipt.BlockNumber == 0 ||

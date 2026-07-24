@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 )
 
@@ -44,8 +46,16 @@ func (d *fakeBCOSDriver) SubmitAnchor(_ context.Context, request fiscobcos.Submi
 	defer d.state.mu.Unlock()
 	d.state.submitCalls++
 	txHash := sha256.Sum256(append(append([]byte(nil), request.Payload.AnchorID...), byte(d.state.submitCalls)))
+	callData, err := fiscobcos.PublishCallData(request.Payload)
+	if err != nil {
+		return fiscobcos.Submission{}, err
+	}
 	d.state.attempt = fiscobcos.TransactionSubmission{
 		EncodedTransaction: append([]byte("encoded-transaction-"), txHash[:]...),
+		ChainID:            d.probe.ChainID,
+		GroupID:            d.probe.GroupID,
+		To:                 bytes.Repeat([]byte{0x41}, 20),
+		Input:              callData,
 		Signature:          bytes.Repeat([]byte{0x51}, 65),
 		Sender:             bytes.Repeat([]byte{0x61}, 20),
 		TransactionHash:    txHash[:],
@@ -97,7 +107,7 @@ func (d *fakeBCOSDriver) ReadAnchor(context.Context, []byte) (fiscobcos.AnchorRe
 	defer d.state.mu.Unlock()
 	return cloneAnchorRecord(d.state.record), nil
 }
-func (d *fakeBCOSDriver) GetReceiptWithProof(context.Context, []byte) (fiscobcos.ReceiptWithProof, error) {
+func (d *fakeBCOSDriver) GetReceiptWithProof(context.Context, fiscobcos.TransactionSubmission) (fiscobcos.ReceiptWithProof, error) {
 	d.state.mu.Lock()
 	defer d.state.mu.Unlock()
 	return cloneReceipt(d.state.receipt), nil
@@ -149,6 +159,54 @@ func TestFISCOBCOSStandardSinkPublishesCompleteRawEvidence(t *testing.T) {
 	}
 	if err := fiscobcos.ValidateProofAgainstTrustConfig(sth, result, trust); err == nil {
 		t.Fatal("raw RPC observation must not decode as an offline anchor proof")
+	}
+}
+
+func TestFISCOBCOSStandardSinkSystemHealthAndEndpointMetrics(t *testing.T) {
+	t.Parallel()
+
+	trust, drivers := fakeBCOSFixture(t)
+	metrics := observability.NewMetrics()
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{
+		TrustConfig: trust, Drivers: drivers, Metrics: metrics,
+		Clock: func() time.Time { return time.Unix(20, 0) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := sink.System(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, capability := range system.Capabilities {
+		if capability == model.AnchorCapabilityVerify {
+			t.Fatal("raw FISCO BCOS observation advertised offline verification")
+		}
+	}
+	status, err := sink.Status(context.Background())
+	if err != nil || status.State != model.AnchorSystemStateHealthy ||
+		status.Details["height"] != "500" {
+		t.Fatalf("healthy status=%+v err=%v", status, err)
+	}
+	for index := range drivers {
+		label := fmt.Sprintf("%d", index)
+		if got := testutil.ToFloat64(metrics.AnchorProviderEndpointHealthy.WithLabelValues(fiscobcos.SinkName, label)); got != 1 {
+			t.Fatalf("endpoint %d healthy metric=%v, want 1", index, got)
+		}
+		if got := testutil.ToFloat64(metrics.AnchorProviderEndpointHeight.WithLabelValues(fiscobcos.SinkName, label)); got != 500 {
+			t.Fatalf("endpoint %d height metric=%v, want 500", index, got)
+		}
+	}
+	drivers[1].(*fakeBCOSDriver).probe.Height = 499
+	status, err = sink.Status(context.Background())
+	if err != nil || status.State != model.AnchorSystemStateDegraded {
+		t.Fatalf("degraded status=%+v err=%v", status, err)
+	}
+	for index := range drivers {
+		label := fmt.Sprintf("%d", index)
+		if got := testutil.ToFloat64(metrics.AnchorProviderEndpointHealthy.WithLabelValues(fiscobcos.SinkName, label)); got != 0 {
+			t.Fatalf("endpoint %d healthy metric=%v after disagreement, want 0", index, got)
+		}
 	}
 }
 
@@ -351,8 +409,8 @@ func TestFISCOBCOSStandardSinkDoesNotResubmitExistingAnchorWithoutEvidence(t *te
 
 type receiptOnlyDriver struct{ *fakeBCOSDriver }
 
-func (d *receiptOnlyDriver) GetReceiptWithProof(ctx context.Context, hash []byte) (fiscobcos.ReceiptWithProof, error) {
-	receipt, err := d.fakeBCOSDriver.GetReceiptWithProof(ctx, hash)
+func (d *receiptOnlyDriver) GetReceiptWithProof(ctx context.Context, attempt fiscobcos.TransactionSubmission) (fiscobcos.ReceiptWithProof, error) {
+	receipt, err := d.fakeBCOSDriver.GetReceiptWithProof(ctx, attempt)
 	receipt.Observation.TransactionProofRPC = nil
 	receipt.Observation.ReceiptProofRPC = nil
 	return receipt, err
@@ -360,12 +418,20 @@ func (d *receiptOnlyDriver) GetReceiptWithProof(ctx context.Context, hash []byte
 
 type statusMismatchDriver struct{ *fakeBCOSDriver }
 
-func (d *statusMismatchDriver) GetReceiptWithProof(ctx context.Context, hash []byte) (fiscobcos.ReceiptWithProof, error) {
-	receipt, err := d.fakeBCOSDriver.GetReceiptWithProof(ctx, hash)
+func (d *statusMismatchDriver) GetReceiptWithProof(ctx context.Context, attempt fiscobcos.TransactionSubmission) (fiscobcos.ReceiptWithProof, error) {
+	receipt, err := d.fakeBCOSDriver.GetReceiptWithProof(ctx, attempt)
 	receipt.Status = 10008
 	receipt.Observation.Status = 10008
 	receipt.Observation.StatusMessage = "invalid_signature"
 	return receipt, err
+}
+
+type attemptMismatchDriver struct{ *fakeBCOSDriver }
+
+func (d *attemptMismatchDriver) SubmitAnchor(ctx context.Context, request fiscobcos.SubmitRequest) (fiscobcos.Submission, error) {
+	submission, err := d.fakeBCOSDriver.SubmitAnchor(ctx, request)
+	submission.Attempt.ChainID = "wrong-chain"
+	return submission, err
 }
 
 func TestFISCOBCOSPostSubmitValidationFailuresRemainRecoverOnly(t *testing.T) {
@@ -378,6 +444,9 @@ func TestFISCOBCOSPostSubmitValidationFailuresRemainRecoverOnly(t *testing.T) {
 		}},
 		{name: "invalid receipt status", wrap: func(driver *fakeBCOSDriver) fiscobcos.Driver {
 			return &statusMismatchDriver{fakeBCOSDriver: driver}
+		}},
+		{name: "submission identity mismatch", wrap: func(driver *fakeBCOSDriver) fiscobcos.Driver {
+			return &attemptMismatchDriver{fakeBCOSDriver: driver}
 		}},
 	} {
 		test := test
@@ -522,6 +591,8 @@ func fakeSubmitRequest(t *testing.T, sth model.SignedTreeHead) fiscobcos.SubmitR
 
 func cloneAttempt(in fiscobcos.TransactionSubmission) fiscobcos.TransactionSubmission {
 	in.EncodedTransaction = append([]byte(nil), in.EncodedTransaction...)
+	in.To = append([]byte(nil), in.To...)
+	in.Input = append([]byte(nil), in.Input...)
 	in.Signature = append([]byte(nil), in.Signature...)
 	in.Sender = append([]byte(nil), in.Sender...)
 	in.TransactionHash = append([]byte(nil), in.TransactionHash...)

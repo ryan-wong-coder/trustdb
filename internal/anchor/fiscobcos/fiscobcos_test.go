@@ -497,7 +497,8 @@ func testResult(t *testing.T, proof AnchorProof, sth model.SignedTreeHead) model
 		t.Fatal(err)
 	}
 	return model.STHAnchorResult{
-		SchemaVersion: model.SchemaSTHAnchorResult, NodeID: sth.NodeID, LogID: sth.LogID,
+		SchemaVersion: model.SchemaSTHAnchorResult, EvidenceStage: model.AnchorEvidenceStageOfflineVerified,
+		NodeID: sth.NodeID, LogID: sth.LogID,
 		TreeSize: sth.TreeSize, SinkName: SinkName, AnchorID: AnchorIDString(payload), RootHash: append([]byte(nil), sth.RootHash...),
 		STH: sth, Proof: proofBytes, PublishedAtUnixN: 3,
 	}

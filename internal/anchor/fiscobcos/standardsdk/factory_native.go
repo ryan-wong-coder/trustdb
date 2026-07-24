@@ -223,6 +223,10 @@ func (d *nativeDriver) SubmitAnchor(ctx context.Context, request fiscobcos.Submi
 	}
 	return fiscobcos.Submission{Attempt: fiscobcos.TransactionSubmission{
 		EncodedTransaction: append([]byte(nil), encoded...),
+		ChainID:            d.trust.ChainID,
+		GroupID:            d.trust.GroupID,
+		To:                 append([]byte(nil), d.trust.Contract.Address...),
+		Input:              append([]byte(nil), callData...),
 		Signature:          append([]byte(nil), signature...),
 		Sender:             append([]byte(nil), d.sender...),
 		TransactionHash:    append([]byte(nil), digest...),
@@ -248,8 +252,8 @@ func (d *nativeDriver) ReadAnchor(ctx context.Context, anchorID []byte) (fiscobc
 	return fiscobcos.DecodeAnchorRecord(output)
 }
 
-func (d *nativeDriver) GetReceiptWithProof(ctx context.Context, transactionHash []byte) (fiscobcos.ReceiptWithProof, error) {
-	hash, err := strictHash(transactionHash)
+func (d *nativeDriver) GetReceiptWithProof(ctx context.Context, attempt fiscobcos.TransactionSubmission) (fiscobcos.ReceiptWithProof, error) {
+	hash, err := strictHash(attempt.TransactionHash)
 	if err != nil {
 		return fiscobcos.ReceiptWithProof{}, err
 	}
@@ -264,7 +268,7 @@ func (d *nativeDriver) GetReceiptWithProof(ctx context.Context, transactionHash 
 	if receipt == nil || transaction == nil || receipt.ReceiptProof == nil || transaction.TransactionProof == nil {
 		return fiscobcos.ReceiptWithProof{}, fiscobcos.ErrIncompleteChainEvidence
 	}
-	if err := validateReceiptTransactionIdentity(receipt, transaction, hash, d.sender, d.trust.Contract.Address); err != nil {
+	if err := validateReceiptTransactionIdentity(receipt, transaction, attempt, d.trust); err != nil {
 		return fiscobcos.ReceiptWithProof{}, err
 	}
 	if receipt.BlockNumber <= 0 {
@@ -450,9 +454,32 @@ func validateSubmittedReceipt(receipt *types.Receipt, digest, sender, contract, 
 	return nil
 }
 
-func validateReceiptTransactionIdentity(receipt *types.Receipt, transaction *types.TransactionDetail, expectedHash common.Hash, sender, contract []byte) error {
+func validateReceiptTransactionIdentity(receipt *types.Receipt, transaction *types.TransactionDetail, attempt fiscobcos.TransactionSubmission, trust fiscobcos.TrustConfig) error {
 	if receipt == nil || transaction == nil {
 		return fiscobcos.ErrIncompleteChainEvidence
+	}
+	expectedHash, err := strictHash(attempt.TransactionHash)
+	if err != nil ||
+		attempt.ChainID != trust.ChainID ||
+		attempt.GroupID != trust.GroupID ||
+		len(attempt.EncodedTransaction) == 0 ||
+		len(attempt.Sender) != 20 ||
+		len(attempt.To) != 20 ||
+		!bytes.Equal(attempt.To, trust.Contract.Address) ||
+		len(attempt.Input) == 0 ||
+		len(attempt.Signature) != 65 ||
+		attempt.BlockLimit == 0 {
+		return fiscobcos.ErrContractMismatch
+	}
+	if transaction.ChainID != attempt.ChainID ||
+		transaction.GroupID != attempt.GroupID ||
+		transaction.BlockLimit <= 0 ||
+		uint64(transaction.BlockLimit) != attempt.BlockLimit {
+		return fiscobcos.ErrContractMismatch
+	}
+	signature, err := decodeHex(transaction.Signature)
+	if err != nil || !bytes.Equal(signature, attempt.Signature) {
+		return fiscobcos.ErrContractMismatch
 	}
 	receiptHash, err := strictHex32(receipt.TransactionHash)
 	if err != nil || !bytes.Equal(receiptHash, expectedHash.Bytes()) {
@@ -463,27 +490,27 @@ func validateReceiptTransactionIdentity(receipt *types.Receipt, transaction *typ
 		return fiscobcos.ErrContractMismatch
 	}
 	receiptFrom, err := strictHexBytes(receipt.From, 20)
-	if err != nil || !bytes.Equal(receiptFrom, sender) {
+	if err != nil || !bytes.Equal(receiptFrom, attempt.Sender) {
 		return fiscobcos.ErrContractMismatch
 	}
 	transactionFrom, err := strictHexBytes(transaction.From, 20)
-	if err != nil || !bytes.Equal(transactionFrom, sender) {
+	if err != nil || !bytes.Equal(transactionFrom, attempt.Sender) {
 		return fiscobcos.ErrContractMismatch
 	}
 	receiptTo, err := strictHexBytes(receipt.To, 20)
-	if err != nil || !bytes.Equal(receiptTo, contract) {
+	if err != nil || !bytes.Equal(receiptTo, attempt.To) {
 		return fiscobcos.ErrContractMismatch
 	}
 	transactionTo, err := strictHexBytes(transaction.To, 20)
-	if err != nil || !bytes.Equal(transactionTo, contract) {
+	if err != nil || !bytes.Equal(transactionTo, attempt.To) {
 		return fiscobcos.ErrContractMismatch
 	}
 	receiptInput, err := decodeHex(receipt.Input)
-	if err != nil {
+	if err != nil || !bytes.Equal(receiptInput, attempt.Input) {
 		return fiscobcos.ErrContractMismatch
 	}
 	transactionInput, err := decodeHex(transaction.Input)
-	if err != nil || !bytes.Equal(receiptInput, transactionInput) {
+	if err != nil || !bytes.Equal(transactionInput, attempt.Input) {
 		return fiscobcos.ErrContractMismatch
 	}
 	return nil
@@ -526,12 +553,15 @@ func newSoftwareAccountSigner(config fiscobcos.AccountProviderConfig) (AccountSi
 	if err != nil {
 		return nil, fmt.Errorf("load FISCO BCOS software account key: %w", err)
 	}
-	text := strings.TrimSpace(string(data))
-	if len(text) != 64 {
+	defer clear(data)
+	encoded := bytes.TrimSpace(data)
+	if len(encoded) != 64 {
 		return nil, errors.New("FISCO BCOS software account key must contain exactly 32 hex-encoded bytes")
 	}
-	keyBytes, err := hex.DecodeString(text)
-	if err != nil {
+	keyBytes := make([]byte, hex.DecodedLen(len(encoded)))
+	defer clear(keyBytes)
+	decoded, err := hex.Decode(keyBytes, encoded)
+	if err != nil || decoded != 32 {
 		return nil, errors.New("FISCO BCOS software account key is not valid hex")
 	}
 	key, err := ethcrypto.ToECDSA(keyBytes)
@@ -618,7 +648,7 @@ func verifyCertificateReferences(config fiscobcos.TrustConfig, requireSoftwareAc
 		if err != nil {
 			return err
 		}
-		if _, err := readBoundedRegularFile(path, reference.privateKey); err != nil {
+		if err := checkBoundedRegularFile(path, reference.privateKey); err != nil {
 			return fmt.Errorf("verify FISCO BCOS local reference: %w", err)
 		}
 	}
@@ -740,31 +770,48 @@ func localPath(reference string) (string, error) {
 }
 
 func readBoundedRegularFile(path string, privateKey bool) ([]byte, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
-		return nil, errors.New("file is not a regular non-symlink file")
-	}
-	if privateKey && runtime.GOOS != "windows" && before.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("private key file permissions must deny group and other access")
-	}
-	file, err := os.Open(path)
+	file, size, err := openBoundedRegularFile(path, privateKey)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !os.SameFile(before, info) || !info.Mode().IsRegular() ||
-		info.Size() <= 0 || info.Size() > maxCertificateBytes {
-		return nil, errors.New("file is empty, oversized, changed during open, or not regular")
-	}
-	data := make([]byte, info.Size())
+	data := make([]byte, size)
 	if _, err := io.ReadFull(file, data); err != nil {
 		return nil, err
 	}
 	return data, nil
+}
+
+func checkBoundedRegularFile(path string, privateKey bool) error {
+	file, _, err := openBoundedRegularFile(path, privateKey)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func openBoundedRegularFile(path string, privateKey bool) (*os.File, int64, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, 0, errors.New("file is not a regular non-symlink file")
+	}
+	if privateKey && runtime.GOOS != "windows" && before.Mode().Perm()&0o077 != 0 {
+		return nil, 0, errors.New("private key file permissions must deny group and other access")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := file.Stat()
+	if err != nil || !os.SameFile(before, info) || !info.Mode().IsRegular() ||
+		info.Size() <= 0 || info.Size() > maxCertificateBytes {
+		file.Close()
+		return nil, 0, errors.New("file is empty, oversized, changed during open, or not regular")
+	}
+	return file, info.Size(), nil
 }
 
 func decodeSDKHexJSON(data []byte) ([]byte, error) {

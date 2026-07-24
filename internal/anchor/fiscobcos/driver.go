@@ -102,6 +102,10 @@ type SubmitRequest struct {
 
 type TransactionSubmission struct {
 	EncodedTransaction []byte `cbor:"encoded_transaction" json:"encoded_transaction"`
+	ChainID            string `cbor:"chain_id" json:"chain_id"`
+	GroupID            string `cbor:"group_id" json:"group_id"`
+	To                 []byte `cbor:"to" json:"to"`
+	Input              []byte `cbor:"input" json:"input"`
 	Signature          []byte `cbor:"signature" json:"signature"`
 	Sender             []byte `cbor:"sender" json:"sender"`
 	TransactionHash    []byte `cbor:"transaction_hash" json:"transaction_hash"`
@@ -178,7 +182,7 @@ type Driver interface {
 	ProbeChain(context.Context) (ChainProbe, error)
 	SubmitAnchor(context.Context, SubmitRequest) (Submission, error)
 	ReadAnchor(context.Context, []byte) (AnchorRecord, error)
-	GetReceiptWithProof(context.Context, []byte) (ReceiptWithProof, error)
+	GetReceiptWithProof(context.Context, TransactionSubmission) (ReceiptWithProof, error)
 	GetBlockHeader(context.Context, uint64) (BlockHeader, error)
 	GetConsensusSnapshot(context.Context, uint64) (ConsensusSnapshot, error)
 	Close() error

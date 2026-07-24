@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 const minimumFISCOBCOSEndpoints = 2
@@ -106,6 +108,7 @@ func (s *FISCOBCOSStandardSink) Probe(ctx context.Context) ([]fiscobcos.ChainPro
 		probe fiscobcos.ChainProbe
 		err   error
 	}
+	s.setEndpointProbeMetrics(nil, false)
 	results := make(chan result, len(s.drivers))
 	for _, driver := range s.drivers {
 		driver := driver
@@ -137,7 +140,27 @@ func (s *FISCOBCOSStandardSink) Probe(ctx context.Context) ([]fiscobcos.ChainPro
 			return nil, transientDriverFailure("probe", probes[i].Endpoint, fiscobcos.ErrEndpointDisagreement)
 		}
 	}
+	s.setEndpointProbeMetrics(probes, true)
 	return probes, nil
+}
+
+func (s *FISCOBCOSStandardSink) setEndpointProbeMetrics(probes []fiscobcos.ChainProbe, healthy bool) {
+	if s == nil || s.metrics == nil ||
+		s.metrics.AnchorProviderEndpointHealthy == nil ||
+		s.metrics.AnchorProviderEndpointHeight == nil {
+		return
+	}
+	for index := range s.drivers {
+		label := strconv.Itoa(index)
+		value := 0.0
+		if healthy {
+			value = 1
+		}
+		s.metrics.AnchorProviderEndpointHealthy.WithLabelValues(fiscobcos.SinkName, label).Set(value)
+		if index < len(probes) {
+			s.metrics.AnchorProviderEndpointHeight.WithLabelValues(fiscobcos.SinkName, label).Set(float64(probes[index].Height))
+		}
+	}
 }
 
 func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTreeHead) (model.STHAnchorResult, error) {
@@ -168,14 +191,14 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 	if err != nil {
 		return model.STHAnchorResult{}, mapSinkError(classifyDriverFailure("submit_anchor", s.drivers[0].Endpoint(), err))
 	}
-	if err := validateTransactionAttempt(submission.Attempt); err != nil {
+	if err := validateTransactionAttempt(submission.Attempt, s.trust, payload); err != nil {
 		return model.STHAnchorResult{}, ambiguousDriverFailure("validate_submission", s.drivers[0].Endpoint(), err)
 	}
 	records, err := s.readAnchorQuorum(ctx, payload)
 	if err != nil {
 		return model.STHAnchorResult{}, mapSinkError(err)
 	}
-	receipt, err := s.drivers[0].GetReceiptWithProof(ctx, submission.Attempt.TransactionHash)
+	receipt, err := s.drivers[0].GetReceiptWithProof(ctx, submission.Attempt)
 	if err != nil {
 		return model.STHAnchorResult{}, ambiguousDriverFailure("get_receipt_with_proof", s.drivers[0].Endpoint(), err)
 	}
@@ -245,6 +268,76 @@ func (s *FISCOBCOSStandardSink) Close() error {
 		s.closeErr = errors.Join(errs...)
 	})
 	return s.closeErr
+}
+
+func (s *FISCOBCOSStandardSink) System(context.Context) (model.AnchorSystem, error) {
+	if s == nil {
+		return model.AnchorSystem{}, trusterr.New(trusterr.CodeFailedPrecondition, "FISCO BCOS anchor sink is not configured")
+	}
+	return model.AnchorSystem{
+		SchemaVersion: model.SchemaAnchorSystem,
+		SystemID:      "fisco-bcos-standard",
+		SinkName:      fiscobcos.SinkName,
+		DisplayName:   "FISCO BCOS standard-crypto anchor",
+		Kind:          model.AnchorSystemKindEvidenceBlockchain,
+		Network:       s.trust.ChainID,
+		Provider:      "FISCO BCOS",
+		Capabilities: []string{
+			model.AnchorCapabilityPublish,
+			model.AnchorCapabilityEvidenceRead,
+			model.AnchorCapabilitySystemStatusRead,
+		},
+		Assurance: model.AnchorAssurance{
+			Decentralized: true,
+			Finality:      "PBFT observation; offline proof verification pending",
+			Custody:       s.trust.AccountProvider.Provider,
+		},
+		Metadata: map[string]string{
+			"chain_id":       s.trust.ChainID,
+			"group_id":       s.trust.GroupID,
+			"crypto_mode":    string(s.trust.CryptoMode),
+			"sdk_version":    fiscobcos.StandardSDKVersion,
+			"endpoint_count": strconv.Itoa(len(s.drivers)),
+		},
+	}, nil
+}
+
+func (s *FISCOBCOSStandardSink) Status(ctx context.Context) (model.AnchorSystemStatus, error) {
+	status := model.AnchorSystemStatus{
+		SchemaVersion:   model.SchemaAnchorSystemStatus,
+		SystemID:        "fisco-bcos-standard",
+		State:           model.AnchorSystemStateUnavailable,
+		ObservedAtUnixN: s.clock().UTC().UnixNano(),
+		Message:         "provider identity probe failed",
+	}
+	probes, err := s.Probe(ctx)
+	if err != nil {
+		switch {
+		case errors.Is(err, fiscobcos.ErrStaleEndpoint), errors.Is(err, fiscobcos.ErrEndpointDisagreement):
+			status.State = model.AnchorSystemStateDegraded
+			status.Message = "provider endpoints have not converged"
+		case errors.Is(err, fiscobcos.ErrWrongNetwork), errors.Is(err, fiscobcos.ErrContractMismatch):
+			status.Message = "provider trust identity mismatch"
+		}
+		return status, nil
+	}
+	status.State = model.AnchorSystemStateHealthy
+	status.Message = "all configured endpoints agree"
+	status.Details = map[string]string{
+		"chain_id":       s.trust.ChainID,
+		"group_id":       s.trust.GroupID,
+		"height":         strconv.FormatUint(probes[0].Height, 10),
+		"endpoint_count": strconv.Itoa(len(probes)),
+	}
+	return status, nil
+}
+
+func (*FISCOBCOSStandardSink) ListResources(context.Context, model.AnchorResourceListOptions) (model.AnchorSystemResourcePage, error) {
+	return model.AnchorSystemResourcePage{}, trusterr.New(trusterr.CodeFailedPrecondition, "FISCO BCOS explorer resources are not exposed by the anchor driver")
+}
+
+func (*FISCOBCOSStandardSink) Resource(context.Context, string, string) (model.AnchorSystemResource, bool, error) {
+	return model.AnchorSystemResource{}, false, trusterr.New(trusterr.CodeFailedPrecondition, "FISCO BCOS explorer resources are not exposed by the anchor driver")
 }
 
 func (s *FISCOBCOSStandardSink) readAnchorQuorum(ctx context.Context, payload fiscobcos.AnchorPayload) ([]fiscobcos.AnchorRecord, error) {
@@ -334,8 +427,16 @@ func payloadForSTH(sth model.SignedTreeHead) (fiscobcos.AnchorPayload, error) {
 	return matched[0], nil
 }
 
-func validateTransactionAttempt(attempt fiscobcos.TransactionSubmission) error {
-	if len(attempt.EncodedTransaction) == 0 || len(attempt.Signature) == 0 ||
+func validateTransactionAttempt(attempt fiscobcos.TransactionSubmission, trust fiscobcos.TrustConfig, payload fiscobcos.AnchorPayload) error {
+	callData, err := fiscobcos.PublishCallData(payload)
+	if err != nil {
+		return err
+	}
+	if len(attempt.EncodedTransaction) == 0 || len(attempt.Signature) != 65 ||
+		attempt.ChainID != trust.ChainID ||
+		attempt.GroupID != trust.GroupID ||
+		!bytes.Equal(attempt.To, trust.Contract.Address) ||
+		!bytes.Equal(attempt.Input, callData) ||
 		len(attempt.Sender) != 20 || len(attempt.TransactionHash) != 32 ||
 		attempt.BlockLimit == 0 || attempt.SubmittedAtUnixN <= 0 {
 		return fiscobcos.ErrIncompleteChainEvidence
