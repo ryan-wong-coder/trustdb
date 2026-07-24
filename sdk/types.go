@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/model"
@@ -58,10 +59,61 @@ const (
 )
 
 type Identity struct {
-	TenantID   string
-	ClientID   string
-	KeyID      string
-	PrivateKey ed25519.PrivateKey
+	TenantID string
+	ClientID string
+	KeyID    string
+	Signer   Signer
+}
+
+// NewIdentity binds tenant/client identity to a suite-aware signer.
+func NewIdentity(tenantID, clientID string, signer Signer) (Identity, error) {
+	id := Identity{TenantID: tenantID, ClientID: clientID, Signer: signer}
+	if signer != nil {
+		id.KeyID = signer.Descriptor().KeyID
+	}
+	if _, _, err := id.signingMaterial(); err != nil {
+		return Identity{}, err
+	}
+	return id, nil
+}
+
+// NewINTLV1Identity is the simple Ed25519 software-key convenience
+// constructor. The resulting identity is explicitly bound to INTL_V1.
+func NewINTLV1Identity(tenantID, clientID, keyID string, privateKey ed25519.PrivateKey) (Identity, error) {
+	signer, err := NewINTLV1SoftwareSigner(keyID, privateKey)
+	if err != nil {
+		return Identity{}, err
+	}
+	return NewIdentity(tenantID, clientID, signer)
+}
+
+// NewCNSMV1Identity is the development/reference SM2 software-key
+// constructor. Production applications should pass a callback signer to
+// NewIdentity so private key material never enters SDK memory.
+func NewCNSMV1Identity(tenantID, clientID, keyID string, privateKey []byte) (Identity, error) {
+	signer, err := NewCNSMV1SoftwareSigner(keyID, privateKey)
+	if err != nil {
+		return Identity{}, err
+	}
+	return NewIdentity(tenantID, clientID, signer)
+}
+
+func (id Identity) signingMaterial() (KeyDescriptor, *sdkSignerAdapter, error) {
+	if id.TenantID == "" || id.ClientID == "" {
+		return KeyDescriptor{}, nil, fmt.Errorf("sdk: tenant_id and client_id are required")
+	}
+	adapter, err := signerAdapter(id.Signer)
+	if err != nil {
+		return KeyDescriptor{}, nil, err
+	}
+	if id.KeyID == "" || id.KeyID != adapter.descriptor.KeyID {
+		return KeyDescriptor{}, nil, fmt.Errorf(
+			"sdk: identity key_id %q does not match signer key_id %q",
+			id.KeyID,
+			adapter.descriptor.KeyID,
+		)
+	}
+	return adapter.descriptor.Clone(), adapter, nil
 }
 
 type FileClaimOptions struct {
@@ -174,8 +226,11 @@ type AnchorStatus struct {
 }
 
 type TrustedKeys struct {
-	ClientPublicKey ed25519.PublicKey
-	ServerPublicKey ed25519.PublicKey
+	ClientPublicKey           KeyDescriptor
+	ServerPublicKey           KeyDescriptor
+	AcceptedReceiptPublicKey  KeyDescriptor
+	CommittedReceiptPublicKey KeyDescriptor
+	SignedTreeHeadPublicKey   KeyDescriptor
 }
 
 type VerifyOptions struct {

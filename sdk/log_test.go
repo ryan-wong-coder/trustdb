@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
-	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
@@ -25,12 +24,8 @@ func TestBuildSignedLogClaimDefaultsTraceAndVerifies(t *testing.T) {
 	}
 	parents := []string{"tr1parent"}
 	custom := map[string]string{"tenant_stream": "billing"}
-	signed, err := BuildSignedLogClaimBytes([]byte(`{"level":"info","msg":"paid"}`), Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogClaimOptions{
+	identity := mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv)
+	signed, err := BuildSignedLogClaimBytes([]byte(`{"level":"info","msg":"paid"}`), identity, LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
 		Nonce:          bytes.Repeat([]byte{0x24}, 16),
 		IdempotencyKey: "idem-log-1",
@@ -45,7 +40,7 @@ func TestBuildSignedLogClaimDefaultsTraceAndVerifies(t *testing.T) {
 	parents[0] = "mutated"
 	custom["tenant_stream"] = "mutated"
 
-	recordID, err := VerifySignedClaim(signed, pub)
+	recordID, err := VerifySignedClaim(signed, mustINTLV1PublicKey(t, "client-key-1", pub))
 	if err != nil {
 		t.Fatalf("VerifySignedClaim: %v", err)
 	}
@@ -77,7 +72,7 @@ func TestBuildSignedLogClaimBytesMatchesReaderPath(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	raw := []byte(`{"level":"info","msg":"equivalent"}`)
-	id := Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey}
+	id := mustINTLV1Identity(t, "tenant-1", "client-1", "key-1", privateKey)
 	opts := LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
 		Nonce:          bytes.Repeat([]byte{0x24}, 16),
@@ -124,7 +119,7 @@ func TestMergedLogClaimOptionsBuildOwnsCallerData(t *testing.T) {
 	}
 	signed, err := BuildSignedLogClaimBytes(
 		[]byte(`{"level":"info"}`),
-		Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey},
+		mustINTLV1Identity(t, "tenant-1", "client-1", "key-1", privateKey),
 		mergeLogClaimOptions(defaults, override),
 	)
 	if err != nil {
@@ -158,7 +153,7 @@ func TestBuildSignedLogClaimDefaultCustomMetadataRemainsNonNil(t *testing.T) {
 	}
 	signed, err := BuildSignedLogClaimBytes(
 		[]byte(`{"level":"info"}`),
-		Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey},
+		mustINTLV1Identity(t, "tenant-1", "client-1", "key-1", privateKey),
 		LogClaimOptions{
 			ProducedAt:     time.Unix(20, 0),
 			Nonce:          bytes.Repeat([]byte{0x24}, 16),
@@ -178,12 +173,7 @@ func BenchmarkBuildSignedLogClaimBytesDefault(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	id := Identity{
-		TenantID:   "tenant-benchmark",
-		ClientID:   "client-benchmark",
-		KeyID:      "key-benchmark",
-		PrivateKey: privateKey,
-	}
+	id := mustINTLV1Identity(b, "tenant-benchmark", "client-benchmark", "key-benchmark", privateKey)
 	opts := LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
 		Nonce:          bytes.Repeat([]byte{0x24}, 16),
@@ -205,12 +195,7 @@ func BenchmarkBuildMergedSignedLogClaimBytesDefault(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	id := Identity{
-		TenantID:   "tenant-benchmark",
-		ClientID:   "client-benchmark",
-		KeyID:      "key-benchmark",
-		PrivateKey: privateKey,
-	}
+	id := mustINTLV1Identity(b, "tenant-benchmark", "client-benchmark", "key-benchmark", privateKey)
 	defaults := LogClaimOptions{EventType: "payment.audit", Source: "billing-api"}
 	override := LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
@@ -273,30 +258,16 @@ func TestClientSubmitLogBatchPreservesOrder(t *testing.T) {
 		}
 		results := make([]submitClaimsBatchItemEnvelope, len(batch.Claims))
 		for index, signed := range batch.Claims {
-			logID := signed.Claim.Metadata.Custom["log_id"]
 			if signed.Claim.Metadata.EventType != "payment.audit" {
 				t.Fatalf("event type = %q", signed.Claim.Metadata.EventType)
 			}
 			if signed.Claim.IdempotencyKey == "" {
 				t.Fatal("idempotency key is empty")
 			}
+			envelope := validSubmitClaimEnvelope(signed)
 			results[index] = submitClaimsBatchItemEnvelope{
-				Index: index,
-				Result: &submitClaimEnvelope{
-					RecordID:      "tr1" + logID,
-					Status:        "accepted",
-					ProofLevel:    ProofLevelL2,
-					BatchEnqueued: true,
-					ServerRecord: ServerRecord{
-						SchemaVersion: model.SchemaServerRecord,
-						RecordID:      "tr1" + logID,
-					},
-					AcceptedReceipt: AcceptedReceipt{
-						SchemaVersion: model.SchemaAcceptedReceipt,
-						RecordID:      "tr1" + logID,
-						Status:        "accepted",
-					},
-				},
+				Index:  index,
+				Result: &envelope,
 			}
 		}
 		writeJSONForTest(t, w, http.StatusAccepted, submitClaimsBatchEnvelope{Results: results, Submitted: len(results)})
@@ -312,25 +283,24 @@ func TestClientSubmitLogBatchPreservesOrder(t *testing.T) {
 		{Body: []byte(`{"n":2}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "two"}}},
 		{Body: []byte(`{"n":3}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "three"}}},
 	}
-	result, err := client.SubmitLogBatch(context.Background(), entries, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogSubmitOptions{
-		Claim:       LogClaimOptions{EventType: "payment.audit", Source: "billing-api"},
-		Concurrency: 2,
-	})
+	result, err := client.SubmitLogBatch(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv),
+		LogSubmitOptions{
+			Claim:       LogClaimOptions{EventType: "payment.audit", Source: "billing-api"},
+			Concurrency: 2,
+		})
 	if err != nil {
 		t.Fatalf("SubmitLogBatch: %v", err)
 	}
 	if result.Submitted != 3 || result.Failed != 0 {
 		t.Fatalf("result = %+v", result)
 	}
-	want := []string{"tr1one", "tr1two", "tr1three"}
-	for i, recordID := range want {
-		if got := result.Results[i].Result.RecordID; got != recordID {
-			t.Fatalf("result[%d].record_id = %q", i, got)
+	want := []string{"one", "two", "three"}
+	for i, logID := range want {
+		if got := result.Results[i].Result.SignedClaim.Claim.Metadata.Custom["log_id"]; got != logID {
+			t.Fatalf("result[%d].log_id = %q", i, got)
 		}
 	}
 }
@@ -361,11 +331,8 @@ func TestClientSubmitLogBatchReportsPartialFailure(t *testing.T) {
 				failed++
 				continue
 			}
-			results[index].Result = &submitClaimEnvelope{
-				RecordID:   "tr1" + logID,
-				Status:     "accepted",
-				ProofLevel: ProofLevelL2,
-			}
+			envelope := validSubmitClaimEnvelope(signed)
+			results[index].Result = &envelope
 			submitted++
 		}
 		writeJSONForTest(t, w, http.StatusMultiStatus, submitClaimsBatchEnvelope{Results: results, Submitted: submitted, Failed: failed})
@@ -379,12 +346,7 @@ func TestClientSubmitLogBatchReportsPartialFailure(t *testing.T) {
 	result, err := client.SubmitLogBatch(context.Background(), []LogEntry{
 		{Body: []byte(`{"n":1}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "ok"}}},
 		{Body: []byte(`{"n":2}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "bad"}}},
-	}, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogSubmitOptions{Concurrency: 2})
+	}, mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv), LogSubmitOptions{Concurrency: 2})
 
 	var batchErr *LogBatchError
 	if !errors.As(err, &batchErr) {
@@ -413,12 +375,7 @@ func TestClientSubmitLogStream(t *testing.T) {
 		if err := cborx.DecodeReaderLimit(r.Body, &signed, 1<<20); err != nil {
 			t.Fatalf("DecodeReaderLimit: %v", err)
 		}
-		logID := signed.Claim.Metadata.Custom["log_id"]
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:   "tr1" + logID,
-			Status:     "accepted",
-			ProofLevel: ProofLevelL2,
-		})
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(signed))
 	}))
 	defer server.Close()
 
@@ -427,16 +384,15 @@ func TestClientSubmitLogStream(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	entries := make(chan LogEntry)
-	out, err := client.SubmitLogStream(context.Background(), entries, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogStreamOptions{
-		Claim:       LogClaimOptions{Source: "stream-test"},
-		Concurrency: 2,
-		QueueSize:   2,
-	})
+	out, err := client.SubmitLogStream(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv),
+		LogStreamOptions{
+			Claim:       LogClaimOptions{Source: "stream-test"},
+			Concurrency: 2,
+			QueueSize:   2,
+		})
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}
@@ -447,21 +403,21 @@ func TestClientSubmitLogStream(t *testing.T) {
 		entries <- LogEntry{Body: []byte(`{"n":3}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "three"}}}
 	}()
 
-	var recordIDs []string
+	var logIDs []string
 	for item := range out {
 		if item.Err != nil {
 			t.Fatalf("stream item error: %v", item.Err)
 		}
-		recordIDs = append(recordIDs, item.Result.RecordID)
+		logIDs = append(logIDs, item.Result.SignedClaim.Claim.Metadata.Custom["log_id"])
 	}
-	sort.Strings(recordIDs)
-	want := []string{"tr1one", "tr1three", "tr1two"}
-	if len(recordIDs) != len(want) {
-		t.Fatalf("record ids = %v", recordIDs)
+	sort.Strings(logIDs)
+	want := []string{"one", "three", "two"}
+	if len(logIDs) != len(want) {
+		t.Fatalf("log ids = %v", logIDs)
 	}
 	for i := range want {
-		if recordIDs[i] != want[i] {
-			t.Fatalf("record ids = %v", recordIDs)
+		if logIDs[i] != want[i] {
+			t.Fatalf("log ids = %v", logIDs)
 		}
 	}
 }
@@ -478,12 +434,7 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 		if err := cborx.DecodeReaderLimit(r.Body, &signed, 1<<20); err != nil {
 			t.Fatalf("DecodeReaderLimit: %v", err)
 		}
-		logID := signed.Claim.Metadata.Custom["log_id"]
-		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
-			RecordID:   "tr1" + logID,
-			Status:     "accepted",
-			ProofLevel: ProofLevelL2,
-		})
+		writeJSONForTest(t, w, http.StatusAccepted, validSubmitClaimEnvelope(signed))
 	}))
 	defer server.Close()
 
@@ -492,12 +443,12 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	entries := make(chan LogEntry, 1)
-	out, err := client.SubmitLogStream(nil, entries, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogStreamOptions{Concurrency: 1, QueueSize: 1})
+	out, err := client.SubmitLogStream(
+		nil,
+		entries,
+		mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv),
+		LogStreamOptions{Concurrency: 1, QueueSize: 1},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}
@@ -514,12 +465,17 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 	if got[0].Err != nil {
 		t.Fatalf("stream item error: %v", got[0].Err)
 	}
-	if got[0].Result.RecordID != "tr1nilctx" {
+	if got[0].Result.RecordID == "" ||
+		got[0].Result.SignedClaim.Claim.Metadata.Custom["log_id"] != "nilctx" {
 		t.Fatalf("stream result = %+v", got[0].Result)
 	}
 }
 
 func TestClientSubmitLogStreamNativeCancellationUnblocksFullResultBuffer(t *testing.T) {
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
 	secondReceived := make(chan struct{})
 	transport := &stubStreamTransport{
 		results:        []signedClaimStreamItemResult{{Index: 0}, {Index: 1}},
@@ -531,7 +487,12 @@ func TestClientSubmitLogStreamNativeCancellationUnblocksFullResultBuffer(t *test
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	entries := make(chan LogEntry)
-	out, err := client.SubmitLogStream(ctx, entries, Identity{}, LogStreamOptions{QueueSize: 1})
+	out, err := client.SubmitLogStream(
+		ctx,
+		entries,
+		mustINTLV1Identity(t, "tenant", "client", "key", privateKey),
+		LogStreamOptions{QueueSize: 1},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}
@@ -624,12 +585,12 @@ func TestSubmitLogBatchFallbackTransportPreservesResults(t *testing.T) {
 			},
 		}
 	}
-	result, err := client.SubmitLogBatch(context.Background(), entries, Identity{
-		TenantID:   "tenant-test",
-		ClientID:   "client-test",
-		KeyID:      "key-test",
-		PrivateKey: privateKey,
-	}, LogSubmitOptions{Concurrency: 2})
+	result, err := client.SubmitLogBatch(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-test", "client-test", "key-test", privateKey),
+		LogSubmitOptions{Concurrency: 2},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogBatch: %v", err)
 	}
@@ -669,8 +630,8 @@ func (stubTransport) Endpoint() string { return "stub" }
 func (stubTransport) CheckHealth(context.Context) HealthStatus {
 	return HealthStatus{OK: true, ServerURL: "stub"}
 }
-func (stubTransport) SubmitSignedClaim(context.Context, SignedClaim) (SubmitResult, error) {
-	return SubmitResult{}, nil
+func (stubTransport) SubmitSignedClaim(_ context.Context, signed SignedClaim) (SubmitResult, error) {
+	return validSDKSubmitResult(signed, "tr1-stub"), nil
 }
 func (stubTransport) GetRecord(context.Context, string) (RecordIndex, error) {
 	return RecordIndex{}, nil

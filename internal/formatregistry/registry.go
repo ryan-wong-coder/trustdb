@@ -134,7 +134,7 @@ var registry = map[string]Descriptor{
 	NATSV2: descriptor(FamilyNATS, NATSV2, 2, AvailabilityAvailable, EncodingNATSJetStreamCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
 
 	SDKV1: descriptor(FamilySDK, SDKV1, 1, AvailabilityReserved, EncodingGoSDKCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "", MigrationRetireOnCutover, 16<<20),
-	SDKV2: descriptor(FamilySDK, SDKV2, 2, AvailabilityAvailable, EncodingGoSDKCBOR, []cryptosuite.ID{cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
+	SDKV2: descriptor(FamilySDK, SDKV2, 2, AvailabilityAvailable, EncodingGoSDKCBOR, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}, "crypto_suite", MigrationDestructiveCutover, MaxTransportMessageBytesV2),
 }
 
 func descriptor(

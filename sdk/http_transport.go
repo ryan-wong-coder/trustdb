@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -18,23 +17,26 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
-	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/statusnotify"
-	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/transporttls"
 )
 
 type httpTransport struct {
-	baseURL    string
-	httpClient *http.Client
-	userAgent  string
-	tlsConfig  *TLSConfig
-	tlsManager *transporttls.Manager
+	baseURL     string
+	httpClient  *http.Client
+	userAgent   string
+	tlsConfig   *TLSConfig
+	tlsManager  *transporttls.Manager
+	cryptoSuite CryptoSuite
 }
 
 func (t *httpTransport) Endpoint() string {
 	return t.baseURL
+}
+
+func (t *httpTransport) CryptoSuite() CryptoSuite {
+	return t.cryptoSuite
 }
 
 func (t *httpTransport) Close() error {
@@ -154,6 +156,10 @@ func (t *httpTransport) CreateStatusSubscription(ctx context.Context, opts Creat
 	if opts.TTL < 0 {
 		return StatusSubscription{}, &Error{Op: "create status subscription", Message: "subscription TTL must not be negative"}
 	}
+	descriptor, signer, err := opts.Identity.signingMaterial()
+	if err != nil {
+		return StatusSubscription{}, &Error{Op: "create status subscription", Err: err}
+	}
 	ttlSeconds := int64(0)
 	if opts.TTL > 0 {
 		ttlSeconds = int64((opts.TTL + time.Second - 1) / time.Second)
@@ -161,21 +167,18 @@ func (t *httpTransport) CreateStatusSubscription(ctx context.Context, opts Creat
 	request := statusnotify.CreateRequest{
 		TenantID:      opts.Identity.TenantID,
 		ClientID:      opts.Identity.ClientID,
-		KeyID:         opts.Identity.KeyID,
+		KeyID:         descriptor.KeyID,
 		RecordIDs:     append([]string(nil), opts.RecordIDs...),
 		Channels:      opts.Channels,
 		TTLSeconds:    ttlSeconds,
 		SignedAtUnixN: time.Now().UTC().UnixNano(),
-	}
-	if len(opts.Identity.PrivateKey) != ed25519.PrivateKeySize {
-		return StatusSubscription{}, &Error{Op: "create status subscription", Message: "identity private key is invalid"}
 	}
 	nonce := make([]byte, 18)
 	if _, err := rand.Read(nonce); err != nil {
 		return StatusSubscription{}, err
 	}
 	request.Nonce = base64.RawURLEncoding.EncodeToString(nonce)
-	if err := statusnotify.SignCreateRequest(ctx, cryptosuite.INTLV1, trustcrypto.MustNewEd25519Signer(opts.Identity.KeyID, opts.Identity.PrivateKey), &request); err != nil {
+	if err := statusnotify.SignCreateRequest(nonNilContext(ctx), descriptor.CryptoSuite, signer, &request); err != nil {
 		return StatusSubscription{}, err
 	}
 	body, err := json.Marshal(request)
@@ -205,6 +208,7 @@ func (t *httpTransport) GetStatusSubscriptionStatuses(ctx context.Context, subsc
 func (t *httpTransport) SubscribeStatusRefresh(ctx context.Context, subscriptionID string) (<-chan StatusRefresh, <-chan error, error) {
 	path := "/v2/status-subscriptions/" + url.PathEscape(subscriptionID) + "/events"
 	endpoint := t.endpoint(path, nil)
+	ctx = nonNilContext(ctx)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, nil, &Error{Op: "subscribe status refresh", URL: endpoint, Err: err}

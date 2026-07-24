@@ -2,15 +2,51 @@ package sdk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/sproof"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/verify"
 	"github.com/wowtrust/trustdb/sdk/anchorplugin"
 )
+
+type OfflineStageStatus = sproof.OfflineStageStatus
+type OfflineStageResult = sproof.OfflineStageResult
+type OfflineVerifyResult = sproof.OfflineResult
+type OfflineIdentityReport = sproof.IdentityReport
+
+const (
+	OfflineStagePassed     = sproof.OfflineStagePassed
+	OfflineStageFailed     = sproof.OfflineStageFailed
+	OfflineStageNotPresent = sproof.OfflineStageNotPresent
+	OfflineStageSkipped    = sproof.OfflineStageSkipped
+	OfflineStageNotRun     = sproof.OfflineStageNotRun
+)
+
+// OfflineIdentityTrust is verifier-local trust. Public keys or certificates
+// embedded in an evidence file never populate this structure automatically.
+type OfflineIdentityTrust struct {
+	ClientPublicKeys         []KeyDescriptor
+	ServerPublicKeys         []KeyDescriptor
+	ClientCertificateRoots   [][]byte
+	ServerCertificateRoots   [][]byte
+	RegistryPublicKey        KeyDescriptor
+	RequireEvidence          bool
+	RequireCertificateStatus bool
+}
+
+type OfflineTrust struct {
+	Proof    TrustedKeys
+	Identity OfflineIdentityTrust
+}
+
+type OfflineVerifyOptions struct {
+	SkipAnchor bool
+}
 
 func ReadSingleProofFile(path string) (SingleProof, error) {
 	return sproof.ReadFile(path)
@@ -55,6 +91,34 @@ func VerifyArtifacts(raw io.Reader, artifacts ProofArtifacts, keys TrustedKeys, 
 	return verifyProofBundle(raw, artifacts.Bundle, keys, verifyOpts...)
 }
 
+// VerifySingleProofOffline verifies content, signatures, Merkle paths,
+// identity lifecycle/certificate evidence, and optional anchors without
+// server, DNS, network, CA, or external provider access.
+func VerifySingleProofOffline(
+	raw io.Reader,
+	proof SingleProof,
+	trust OfflineTrust,
+	opts OfflineVerifyOptions,
+) (OfflineVerifyResult, error) {
+	provider, err := trustcrypto.ProviderForSuite(proof.CryptoSuite)
+	if err != nil {
+		return OfflineVerifyResult{}, err
+	}
+	proofKeys, err := internalTrustedKeys(proof.CryptoSuite, trust.Proof)
+	if err != nil {
+		return OfflineVerifyResult{}, err
+	}
+	proofKeys.CryptoProvider = provider
+	identity, err := internalIdentityTrust(proof.CryptoSuite, trust.Identity)
+	if err != nil {
+		return OfflineVerifyResult{}, err
+	}
+	return sproof.VerifyOffline(raw, proof, sproof.OfflineTrust{
+		Proof:    proofKeys,
+		Identity: identity,
+	}, sproof.OfflineOptions{SkipAnchor: opts.SkipAnchor})
+}
+
 type sdkAnchorVerifier struct{ verifier AnchorVerifier }
 
 func (v sdkAnchorVerifier) VerifyAnchor(sth model.SignedTreeHead, result model.STHAnchorResult) error {
@@ -87,18 +151,23 @@ func anchorPluginSTH(sth model.SignedTreeHead) anchorplugin.SignedTreeHead {
 }
 
 func verifyProofBundle(raw io.Reader, bundle ProofBundle, keys TrustedKeys, opts ...verify.Option) (VerifyResult, error) {
-	clientKey, err := trustcrypto.NewEd25519PublicKey(bundle.SignedClaim.Claim.KeyID, keys.ClientPublicKey)
+	trusted, err := internalTrustedKeys(bundle.CryptoSuite, keys)
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	serverKey, err := trustcrypto.NewEd25519PublicKey("", keys.ServerPublicKey)
+	if len(trusted.ClientPublicKey.Bytes) == 0 {
+		return VerifyResult{}, errors.New("sdk: client public key is required")
+	}
+	if len(trusted.ServerPublicKey.Bytes) == 0 &&
+		(len(trusted.AcceptedReceiptPublicKey.Bytes) == 0 || len(trusted.CommittedReceiptPublicKey.Bytes) == 0) {
+		return VerifyResult{}, errors.New("sdk: server public key or both receipt-specific public keys are required")
+	}
+	provider, err := trustcrypto.ProviderForSuite(bundle.CryptoSuite)
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	result, err := verify.ProofBundle(raw, bundle, verify.TrustedKeys{
-		ClientPublicKey: clientKey,
-		ServerPublicKey: serverKey,
-	}, opts...)
+	trusted.CryptoProvider = provider
+	result, err := verify.ProofBundle(raw, bundle, trusted, opts...)
 	if err != nil {
 		return VerifyResult{}, err
 	}
@@ -109,4 +178,97 @@ func verifyProofBundle(raw io.Reader, bundle ProofBundle, keys TrustedKeys, opts
 		AnchorSink: result.AnchorSink,
 		AnchorID:   result.AnchorID,
 	}, nil
+}
+
+func internalTrustedKeys(suite CryptoSuite, keys TrustedKeys) (verify.TrustedKeys, error) {
+	if _, err := cryptosuite.RequireAvailable(suite); err != nil {
+		return verify.TrustedKeys{}, err
+	}
+	client, err := optionalInternalDescriptor(suite, "client public key", keys.ClientPublicKey)
+	if err != nil {
+		return verify.TrustedKeys{}, err
+	}
+	server, err := optionalInternalDescriptor(suite, "server public key", keys.ServerPublicKey)
+	if err != nil {
+		return verify.TrustedKeys{}, err
+	}
+	accepted, err := optionalInternalDescriptor(suite, "accepted receipt public key", keys.AcceptedReceiptPublicKey)
+	if err != nil {
+		return verify.TrustedKeys{}, err
+	}
+	committed, err := optionalInternalDescriptor(suite, "committed receipt public key", keys.CommittedReceiptPublicKey)
+	if err != nil {
+		return verify.TrustedKeys{}, err
+	}
+	sth, err := optionalInternalDescriptor(suite, "signed tree head public key", keys.SignedTreeHeadPublicKey)
+	if err != nil {
+		return verify.TrustedKeys{}, err
+	}
+	return verify.TrustedKeys{
+		ClientPublicKey:           client,
+		ServerPublicKey:           server,
+		AcceptedReceiptPublicKey:  accepted,
+		CommittedReceiptPublicKey: committed,
+		SignedTreeHeadPublicKey:   sth,
+	}, nil
+}
+
+func requiredInternalDescriptor(suite CryptoSuite, name string, descriptor KeyDescriptor) (trustcrypto.PublicKeyDescriptor, error) {
+	internal, err := optionalInternalDescriptor(suite, name, descriptor)
+	if err != nil {
+		return trustcrypto.PublicKeyDescriptor{}, err
+	}
+	if len(internal.Bytes) == 0 {
+		return trustcrypto.PublicKeyDescriptor{}, fmt.Errorf("sdk: %s is required", name)
+	}
+	return internal, nil
+}
+
+func optionalInternalDescriptor(suite CryptoSuite, name string, descriptor KeyDescriptor) (trustcrypto.PublicKeyDescriptor, error) {
+	if len(descriptor.PublicKey) == 0 {
+		return trustcrypto.PublicKeyDescriptor{}, nil
+	}
+	if err := descriptor.Validate(); err != nil {
+		return trustcrypto.PublicKeyDescriptor{}, fmt.Errorf("sdk: %s: %w", name, err)
+	}
+	if err := cryptosuite.RequireSame(suite, descriptor.CryptoSuite); err != nil {
+		return trustcrypto.PublicKeyDescriptor{}, fmt.Errorf("sdk: %s crypto_suite: %w", name, err)
+	}
+	return descriptor.internalPublicKey(), nil
+}
+
+func internalIdentityTrust(suite CryptoSuite, trust OfflineIdentityTrust) (sproof.IdentityTrust, error) {
+	client, err := internalDescriptorList(suite, "client identity public keys", trust.ClientPublicKeys)
+	if err != nil {
+		return sproof.IdentityTrust{}, err
+	}
+	server, err := internalDescriptorList(suite, "server identity public keys", trust.ServerPublicKeys)
+	if err != nil {
+		return sproof.IdentityTrust{}, err
+	}
+	registry, err := optionalInternalDescriptor(suite, "registry public key", trust.RegistryPublicKey)
+	if err != nil {
+		return sproof.IdentityTrust{}, err
+	}
+	return sproof.IdentityTrust{
+		ClientPublicKeys:         client,
+		ServerPublicKeys:         server,
+		ClientCertificateRoots:   cloneBytesList(trust.ClientCertificateRoots),
+		ServerCertificateRoots:   cloneBytesList(trust.ServerCertificateRoots),
+		RegistryPublicKey:        registry,
+		RequireEvidence:          trust.RequireEvidence,
+		RequireCertificateStatus: trust.RequireCertificateStatus,
+	}, nil
+}
+
+func internalDescriptorList(suite CryptoSuite, name string, descriptors []KeyDescriptor) ([]trustcrypto.PublicKeyDescriptor, error) {
+	out := make([]trustcrypto.PublicKeyDescriptor, len(descriptors))
+	for index := range descriptors {
+		descriptor, err := requiredInternalDescriptor(suite, fmt.Sprintf("%s[%d]", name, index), descriptors[index])
+		if err != nil {
+			return nil, err
+		}
+		out[index] = descriptor
+	}
+	return out, nil
 }

@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -18,21 +20,21 @@ func TestHTTPStatusSubscriptionSDK(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/records/tr1/status", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(model.RecordStatus{SchemaVersion: model.SchemaRecordStatus, RecordID: "tr1", Status: model.RecordStatusCommitted, ProofLevel: "L3"})
+		_ = json.NewEncoder(w).Encode(model.RecordStatus{SchemaVersion: model.SchemaRecordStatus, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1", Status: model.RecordStatusCommitted, ProofLevel: "L3"})
 	})
 	mux.HandleFunc("POST /v2/records/status:batchGet", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, RecordID: "tr1", Status: model.RecordStatusCommitted}}, "missing_record_ids": []string{"missing"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1", Status: model.RecordStatusCommitted}}, "missing_record_ids": []string{"missing"}})
 	})
 	mux.HandleFunc("POST /v2/status-subscriptions", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(StatusSubscription{ID: "tss1sdk", TenantID: "tenant", ClientID: "client", KeyID: "key", RecordIDs: []string{"tr1"}})
 	})
 	mux.HandleFunc("GET /v2/status-subscriptions/tss1sdk/statuses", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, RecordID: "tr1", Status: model.RecordStatusCommitted}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1", Status: model.RecordStatusCommitted}}})
 	})
 	mux.HandleFunc("GET /v2/status-subscriptions/tss1sdk/events", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		notification, _ := json.Marshal(model.StatusRefresh{SchemaVersion: model.SchemaStatusRefresh, SubscriptionID: "tss1sdk", TenantID: "tenant", ClientID: "client", Version: 7, RefreshRequired: true, EmittedAtUnixN: time.Now().UnixNano()})
+		notification, _ := json.Marshal(model.StatusRefresh{SchemaVersion: model.SchemaStatusRefresh, CryptoSuite: cryptosuite.INTLV1, SubscriptionID: "tss1sdk", TenantID: "tenant", ClientID: "client", Version: 7, RefreshRequired: true, EmittedAtUnixN: time.Now().UnixNano()})
 		_, _ = fmt.Fprintf(w, "event: refresh_required\ndata: %s\n\n", notification)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
@@ -62,7 +64,10 @@ func TestHTTPStatusSubscriptionSDK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	subscription, err := client.CreateStatusSubscription(ctx, CreateStatusSubscriptionOptions{Identity: Identity{TenantID: "tenant", ClientID: "client", KeyID: "key", PrivateKey: privateKey}, RecordIDs: []string{"tr1"}})
+	subscription, err := client.CreateStatusSubscription(ctx, CreateStatusSubscriptionOptions{
+		Identity:  mustINTLV1Identity(t, "tenant", "client", "key", privateKey),
+		RecordIDs: []string{"tr1"},
+	})
 	if err != nil || subscription.ID != "tss1sdk" {
 		t.Fatalf("CreateStatusSubscription() = %+v err=%v", subscription, err)
 	}
@@ -86,4 +91,68 @@ func TestHTTPStatusSubscriptionSDK(t *testing.T) {
 	if err := client.DeleteStatusSubscription(ctx, subscription.ID); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestStatusRefreshSuiteFailureCancelsUpstream(t *testing.T) {
+	t.Parallel()
+
+	transport := &cancelProbeStatusTransport{canceled: make(chan struct{})}
+	client, err := NewClientWithTransport(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, errorsCh, err := client.SubscribeStatusRefresh(nil, "tss1-cancel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case streamErr := <-errorsCh:
+		var sdkErr *Error
+		if !errors.As(streamErr, &sdkErr) || sdkErr.Code != "FAILED_PRECONDITION" {
+			t.Fatalf("stream error=%v, want FAILED_PRECONDITION", streamErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for suite validation error")
+	}
+	select {
+	case <-transport.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("validated stream did not cancel its upstream context")
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("validated event channel remained open")
+	}
+}
+
+type cancelProbeStatusTransport struct {
+	stubTransport
+	canceled chan struct{}
+}
+
+func (*cancelProbeStatusTransport) CreateStatusSubscription(context.Context, CreateStatusSubscriptionOptions) (StatusSubscription, error) {
+	return StatusSubscription{}, nil
+}
+
+func (*cancelProbeStatusTransport) DeleteStatusSubscription(context.Context, string) error {
+	return nil
+}
+
+func (*cancelProbeStatusTransport) GetStatusSubscriptionStatuses(context.Context, string) (RecordStatusBatch, error) {
+	return RecordStatusBatch{}, nil
+}
+
+func (t *cancelProbeStatusTransport) SubscribeStatusRefresh(ctx context.Context, _ string) (<-chan StatusRefresh, <-chan error, error) {
+	events := make(chan StatusRefresh, 1)
+	errorsCh := make(chan error)
+	events <- StatusRefresh{
+		SchemaVersion: model.SchemaStatusRefresh,
+		CryptoSuite:   cryptosuite.CNSMV1,
+	}
+	go func() {
+		<-ctx.Done()
+		close(t.canceled)
+		close(events)
+		close(errorsCh)
+	}()
+	return events, errorsCh, nil
 }

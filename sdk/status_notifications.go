@@ -2,7 +2,6 @@ package sdk
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +10,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/wowtrust/trustdb/internal/cborx"
-	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
@@ -21,7 +20,7 @@ const MaxStatusRefreshBytes = 64 << 10
 // DecodeAndVerifyStatusRefreshJSON is intended for a configured webhook
 // receiver. It validates the TrustDB server signature before returning the
 // refresh hint; callers then pull the subscription's current statuses.
-func DecodeAndVerifyStatusRefreshJSON(reader io.Reader, serverPublicKey ed25519.PublicKey) (StatusRefresh, error) {
+func DecodeAndVerifyStatusRefreshJSON(reader io.Reader, serverPublicKey KeyDescriptor) (StatusRefresh, error) {
 	raw, err := readAllLimit(reader, MaxStatusRefreshBytes)
 	if err != nil {
 		return StatusRefresh{}, err
@@ -36,7 +35,7 @@ func DecodeAndVerifyStatusRefreshJSON(reader io.Reader, serverPublicKey ed25519.
 	return notification, nil
 }
 
-func DecodeAndVerifyStatusRefreshCBOR(data []byte, serverPublicKey ed25519.PublicKey) (StatusRefresh, error) {
+func DecodeAndVerifyStatusRefreshCBOR(data []byte, serverPublicKey KeyDescriptor) (StatusRefresh, error) {
 	if len(data) > MaxStatusRefreshBytes {
 		return StatusRefresh{}, fmt.Errorf("sdk: status refresh is too large: %d", len(data))
 	}
@@ -50,14 +49,17 @@ func DecodeAndVerifyStatusRefreshCBOR(data []byte, serverPublicKey ed25519.Publi
 	return notification, nil
 }
 
-func VerifyStatusRefresh(notification StatusRefresh, serverPublicKey ed25519.PublicKey) error {
+func VerifyStatusRefresh(notification StatusRefresh, serverPublicKey KeyDescriptor) error {
 	if notification.SchemaVersion != model.SchemaStatusRefresh || notification.SubscriptionID == "" ||
 		notification.TenantID == "" || notification.ClientID == "" || notification.Version == 0 ||
 		!notification.RefreshRequired || notification.EmittedAtUnixN <= 0 {
 		return errors.New("sdk: invalid status refresh notification")
 	}
-	if len(serverPublicKey) != ed25519.PublicKeySize {
-		return errors.New("sdk: invalid server public key")
+	if err := serverPublicKey.Validate(); err != nil {
+		return fmt.Errorf("sdk: invalid server public key: %w", err)
+	}
+	if err := modelsuite.Require(serverPublicKey.CryptoSuite, notification); err != nil {
+		return fmt.Errorf("sdk: status refresh crypto_suite: %w", err)
 	}
 	payload := notification
 	payload.ServerSig = model.Signature{}
@@ -65,12 +67,15 @@ func VerifyStatusRefresh(notification StatusRefresh, serverPublicKey ed25519.Pub
 	if err != nil {
 		return err
 	}
-	input, err := trustcrypto.SignatureInputForSuite(cryptosuite.INTLV1, trustcrypto.SignaturePurposeStatusRefresh, encoded)
+	input, err := trustcrypto.SignatureInputForSuite(serverPublicKey.CryptoSuite, trustcrypto.SignaturePurposeStatusRefresh, encoded)
 	if err != nil {
 		return err
 	}
-	descriptor := trustcrypto.MustNewEd25519PublicKey(notification.ServerSig.KeyID, serverPublicKey)
-	if err := trustcrypto.VerifySignatureForSuite(context.Background(), cryptosuite.INTLV1, descriptor, input, notification.ServerSig); err != nil {
+	descriptor := serverPublicKey.internalPublicKey()
+	if descriptor.KeyID != notification.ServerSig.KeyID {
+		return fmt.Errorf("sdk: status refresh signature key_id %q does not match trusted key %q", notification.ServerSig.KeyID, descriptor.KeyID)
+	}
+	if err := trustcrypto.VerifySignatureForSuite(context.Background(), serverPublicKey.CryptoSuite, descriptor, input, notification.ServerSig); err != nil {
 		return fmt.Errorf("sdk: verify status refresh: %w", err)
 	}
 	return nil
@@ -81,7 +86,8 @@ func VerifyStatusRefresh(notification StatusRefresh, serverPublicKey ed25519.Pub
 // hint, while a different queue group would receive its own copy. Core NATS
 // notifications are wake-up hints, so reconnecting callers should immediately
 // pull current subscription statuses.
-func SubscribeNATSStatusRefresh(ctx context.Context, conn *nats.Conn, subject, queueGroup string, serverPublicKey ed25519.PublicKey) (<-chan StatusRefresh, <-chan error, error) {
+func SubscribeNATSStatusRefresh(ctx context.Context, conn *nats.Conn, subject, queueGroup string, serverPublicKey KeyDescriptor) (<-chan StatusRefresh, <-chan error, error) {
+	ctx = nonNilContext(ctx)
 	if conn == nil || conn.IsClosed() {
 		return nil, nil, errors.New("sdk: NATS connection is unavailable")
 	}
@@ -96,21 +102,27 @@ func SubscribeNATSStatusRefresh(ctx context.Context, conn *nats.Conn, subject, q
 	events := make(chan StatusRefresh, 1)
 	errorsCh := make(chan error, 1)
 	messages := make(chan *nats.Msg, 64)
+	closed := conn.StatusChanged(nats.CLOSED)
 	subscription, err := conn.ChanQueueSubscribe(subject, queueGroup, messages)
 	if err != nil {
+		conn.RemoveStatusListener(closed)
 		return nil, nil, fmt.Errorf("sdk: subscribe NATS status refresh: %w", err)
 	}
 	if err := conn.Flush(); err != nil {
 		_ = subscription.Unsubscribe()
+		conn.RemoveStatusListener(closed)
 		return nil, nil, fmt.Errorf("sdk: flush NATS subscription: %w", err)
 	}
 	go func() {
+		defer conn.RemoveStatusListener(closed)
 		defer subscription.Unsubscribe()
 		defer close(events)
 		defer close(errorsCh)
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-closed:
 				return
 			case message := <-messages:
 				if message == nil {

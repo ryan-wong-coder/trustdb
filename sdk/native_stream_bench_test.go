@@ -37,12 +37,12 @@ func TestNativeLogStreamUsesConfiguredSigningConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClientWithTransport: %v", err)
 	}
-	out, err := client.SubmitLogStream(context.Background(), entries, Identity{
-		TenantID:   "tenant-test",
-		ClientID:   "client-test",
-		KeyID:      "key-test",
-		PrivateKey: privateKey,
-	}, LogStreamOptions{Concurrency: 4, QueueSize: 4})
+	out, err := client.SubmitLogStream(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-test", "client-test", "key-test", privateKey),
+		LogStreamOptions{Concurrency: 4, QueueSize: 4},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}
@@ -78,12 +78,7 @@ func benchmarkNativeLogStreamSigning(b *testing.B, concurrency int) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	identity := Identity{
-		TenantID:   "tenant-benchmark",
-		ClientID:   "client-benchmark",
-		KeyID:      "key-benchmark",
-		PrivateKey: privateKey,
-	}
+	identity := mustINTLV1Identity(b, "tenant-benchmark", "client-benchmark", "key-benchmark", privateKey)
 	entries := make([]LogEntry, 256)
 	for index := range entries {
 		entries[index] = LogEntry{
@@ -183,7 +178,10 @@ func (echoSignedClaimStreamTransport) SubmitSignedClaimStream(_ context.Context,
 	go func() {
 		defer close(out)
 		for item := range in {
-			out <- signedClaimStreamItemResult{Index: item.Index}
+			out <- signedClaimStreamItemResult{
+				Index:  item.Index,
+				Result: validSDKSubmitResult(item.SignedClaim, "tr1-native-stream"),
+			}
 		}
 	}()
 	return out, nil

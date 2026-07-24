@@ -159,7 +159,7 @@ func TestBenchMatrixCommandWritesCaseReports(t *testing.T) {
 	env := newBenchPebbleE2EEnv(t)
 	tmp := t.TempDir()
 	keyPath := filepath.Join(tmp, "client.key")
-	if err := writeKey(keyPath, env.identity.PrivateKey); err != nil {
+	if err := writeKey(keyPath, env.privateKey); err != nil {
 		t.Fatalf("writeKey: %v", err)
 	}
 	matrixPath := filepath.Join(tmp, "matrix.json")
@@ -228,7 +228,7 @@ func TestBenchCIArtifactFlow(t *testing.T) {
 	gate := loadBenchSmokeGateConfig(t)
 	tmp := t.TempDir()
 	keyPath := filepath.Join(tmp, "client.key")
-	if err := writeKey(keyPath, env.identity.PrivateKey); err != nil {
+	if err := writeKey(keyPath, env.privateKey); err != nil {
 		t.Fatalf("writeKey: %v", err)
 	}
 
@@ -364,6 +364,7 @@ type benchPebbleE2EEnv struct {
 	httpURL    string
 	grpcTarget string
 	identity   sdk.Identity
+	privateKey []byte
 }
 
 func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
@@ -494,15 +495,20 @@ func newBenchPebbleE2EEnv(t *testing.T) benchPebbleE2EEnv {
 		}
 	})
 
+	identity, err := sdk.NewINTLV1Identity(
+		"tenant-bench-e2e",
+		"client-bench-e2e",
+		"client-key",
+		clientPriv,
+	)
+	if err != nil {
+		t.Fatalf("NewINTLV1Identity: %v", err)
+	}
 	return benchPebbleE2EEnv{
 		httpURL:    httpServer.URL,
 		grpcTarget: grpcListener.Addr().String(),
-		identity: sdk.Identity{
-			TenantID:   "tenant-bench-e2e",
-			ClientID:   "client-bench-e2e",
-			KeyID:      "client-key",
-			PrivateKey: clientPriv,
-		},
+		identity:   identity,
+		privateKey: append([]byte(nil), clientPriv...),
 	}
 }
 

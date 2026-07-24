@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/sdk"
@@ -72,7 +73,7 @@ func TestRunBenchIngest(t *testing.T) {
 	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
 		Endpoint:      "bench://fake",
 		Transport:     "http",
-		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Identity:      mustSDKINTLV1Identity(t, "tenant-bench", "client-bench", "key-bench", priv),
 		Count:         4,
 		Concurrency:   2,
 		PayloadBytes:  128,
@@ -122,7 +123,7 @@ func TestRunBenchIngestSplitsImmediateAndPostProofQueries(t *testing.T) {
 	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
 		Endpoint:      "bench://fake",
 		Transport:     "http",
-		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Identity:      mustSDKINTLV1Identity(t, "tenant-bench", "client-bench", "key-bench", priv),
 		Count:         1,
 		Concurrency:   1,
 		PayloadBytes:  128,
@@ -166,7 +167,7 @@ func TestRunBenchIngestSeparatesDisabledProofLevel(t *testing.T) {
 	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
 		Endpoint:      "bench://fake",
 		Transport:     "http",
-		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Identity:      mustSDKINTLV1Identity(t, "tenant-bench", "client-bench", "key-bench", priv),
 		Count:         1,
 		Concurrency:   1,
 		PayloadBytes:  128,
@@ -270,7 +271,11 @@ func (f *fakeBenchVisibilityTransport) GetRecord(_ context.Context, recordID str
 	if f.recordCalls[recordID] == 1 {
 		return model.RecordIndex{}, &sdk.Error{StatusCode: 404, Code: "NOT_FOUND", Message: "record not visible yet"}
 	}
-	return model.RecordIndex{RecordID: recordID, BatchID: "batch-bench-1"}, nil
+	return model.RecordIndex{
+		CryptoSuite: cryptosuite.INTLV1,
+		RecordID:    recordID,
+		BatchID:     "batch-bench-1",
+	}, nil
 }
 
 func (f *fakeBenchTransport) Endpoint() string { return "bench://fake" }
@@ -283,20 +288,72 @@ func (f *fakeBenchTransport) SubmitSignedClaim(_ context.Context, signed sdk.Sig
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.submits++
-	recordID := fmt.Sprintf("tr-bench-%03d", f.submits)
+	provider, err := trustcrypto.ProviderForSuite(signed.CryptoSuite)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	suite, err := cryptosuite.RequireAvailable(signed.CryptoSuite)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	canonical, err := claim.Canonical(signed.Claim)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, canonical)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	recordID, err := claim.RecordIDWithProvider(provider, canonical, signed.Signature)
+	if err != nil {
+		return sdk.SubmitResult{}, err
+	}
+	position := model.WALPosition{SegmentID: 1, Offset: int64(f.submits), Sequence: uint64(f.submits)}
 	return sdk.SubmitResult{
 		RecordID:      recordID,
 		Status:        "accepted",
 		ProofLevel:    sdk.ProofLevelL2,
 		BatchEnqueued: true,
 		ServerRecord: model.ServerRecord{
-			RecordID: recordID,
+			SchemaVersion:       model.SchemaServerRecord,
+			CryptoSuite:         cryptosuite.INTLV1,
+			RecordID:            recordID,
+			TenantID:            signed.Claim.TenantID,
+			ClientID:            signed.Claim.ClientID,
+			KeyID:               signed.Claim.KeyID,
+			ClaimHash:           claimHash,
+			ClientSignatureHash: signatureHash,
+			ReceivedAtUnixN:     int64(f.submits),
+			WAL:                 position,
 		},
+		AcceptedReceipt: model.AcceptedReceipt{
+			SchemaVersion:   model.SchemaAcceptedReceipt,
+			CryptoSuite:     cryptosuite.INTLV1,
+			RecordID:        recordID,
+			Status:          model.RecordStatusAccepted,
+			ServerID:        "bench-server",
+			ReceivedAtUnixN: int64(f.submits),
+			WAL:             position,
+			ServerSig: model.Signature{
+				Alg:       cryptosuite.SignatureEd25519,
+				KeyID:     "bench-server-key",
+				Signature: bytes.Repeat([]byte{0x5a}, ed25519.SignatureSize),
+			},
+		},
+		SignedClaim: signed,
 	}, nil
 }
 
 func (f *fakeBenchTransport) GetRecord(_ context.Context, recordID string) (sdk.RecordIndex, error) {
-	return model.RecordIndex{RecordID: recordID, BatchID: "batch-bench-1"}, nil
+	return model.RecordIndex{
+		CryptoSuite: cryptosuite.INTLV1,
+		RecordID:    recordID,
+		BatchID:     "batch-bench-1",
+	}, nil
 }
 
 func (f *fakeBenchTransport) ListRecords(context.Context, sdk.ListRecordsOptions) (sdk.RecordPage, error) {
@@ -310,6 +367,7 @@ func (f *fakeBenchTransport) ListRootsPage(context.Context, sdk.ListPageOptions)
 func (f *fakeBenchTransport) GetProofBundle(_ context.Context, recordID string) (sdk.ProofBundle, error) {
 	return model.ProofBundle{
 		SchemaVersion: model.SchemaProofBundle,
+		CryptoSuite:   cryptosuite.INTLV1,
 		RecordID:      recordID,
 		CommittedReceipt: model.CommittedReceipt{
 			BatchID: "batch-bench-1",
@@ -429,7 +487,7 @@ func TestBenchClientUsesSuppliedPrivateKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKey() error = %v", err)
 	}
-	identity := sdk.Identity{TenantID: "tenant", ClientID: "client", KeyID: "key", PrivateKey: priv}
+	identity := mustSDKINTLV1Identity(t, "tenant", "client", "key", priv)
 	client, err := sdk.NewClientWithTransport(&fakeBenchTransport{})
 	if err != nil {
 		t.Fatalf("NewClientWithTransport() error = %v", err)
@@ -449,4 +507,17 @@ func TestBenchClientUsesSuppliedPrivateKey(t *testing.T) {
 	if len(pub) != ed25519.PublicKeySize {
 		t.Fatalf("public key length = %d", len(pub))
 	}
+}
+
+func mustSDKINTLV1Identity(
+	t testing.TB,
+	tenantID, clientID, keyID string,
+	privateKey ed25519.PrivateKey,
+) sdk.Identity {
+	t.Helper()
+	identity, err := sdk.NewINTLV1Identity(tenantID, clientID, keyID, privateKey)
+	if err != nil {
+		t.Fatalf("NewINTLV1Identity() error = %v", err)
+	}
+	return identity
 }

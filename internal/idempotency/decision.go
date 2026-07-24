@@ -35,61 +35,8 @@ func BuildDecisionWithProvider(
 	record model.ServerRecord,
 	accepted model.AcceptedReceipt,
 ) (model.IdempotencyDecision, error) {
-	if provider == nil {
-		return model.IdempotencyDecision{}, errors.New("idempotency: crypto provider is required")
-	}
-	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	suite, identity, claimHash, err := validateAcceptedResponseWithProvider(provider, signed, record, accepted, true)
 	if err != nil {
-		return model.IdempotencyDecision{}, err
-	}
-	if signed.SchemaVersion != model.SchemaSignedClaim {
-		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: unexpected signed claim schema %q", signed.SchemaVersion)
-	}
-	if signed.Signature.KeyID != signed.Claim.KeyID {
-		return model.IdempotencyDecision{}, errors.New("idempotency: signature key_id does not match claim key_id")
-	}
-	if signed.Signature.Alg != suite.Signature.Algorithm ||
-		len(signed.Signature.Signature) == 0 ||
-		(suite.ID == cryptosuite.INTLV1 && len(signed.Signature.Signature) != ed25519.SignatureSize) {
-		return model.IdempotencyDecision{}, errors.New("idempotency: valid client signature metadata is required")
-	}
-	if signed.Claim.IdempotencyKey == "" {
-		return model.IdempotencyDecision{}, errors.New("idempotency: idempotency_key is required")
-	}
-	claimCBOR, err := claim.Canonical(signed.Claim)
-	if err != nil {
-		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: canonicalize claim: %w", err)
-	}
-	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, claimCBOR)
-	if err != nil {
-		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: hash claim: %w", err)
-	}
-	if !bytes.Equal(record.ClaimHash, claimHash) {
-		return model.IdempotencyDecision{}, errors.New("idempotency: server record claim hash does not match signed claim")
-	}
-	recordID, err := claim.RecordIDWithProvider(provider, claimCBOR, signed.Signature)
-	if err != nil {
-		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: derive record id: %w", err)
-	}
-	if record.RecordID != recordID {
-		return model.IdempotencyDecision{}, errors.New("idempotency: server record id does not match signed claim")
-	}
-	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
-	if err != nil {
-		return model.IdempotencyDecision{}, fmt.Errorf("idempotency: hash client signature: %w", err)
-	}
-	if !bytes.Equal(record.ClientSignatureHash, signatureHash) {
-		return model.IdempotencyDecision{}, errors.New("idempotency: server record signature hash does not match signed claim")
-	}
-	if record.KeyID != signed.Claim.KeyID {
-		return model.IdempotencyDecision{}, errors.New("idempotency: server record key_id does not match signed claim")
-	}
-	identity := model.IdempotencyIdentity{
-		TenantID:       signed.Claim.TenantID,
-		ClientID:       signed.Claim.ClientID,
-		IdempotencyKey: signed.Claim.IdempotencyKey,
-	}
-	if err := validateResponseBindings(suite, identity, claimHash, record, accepted); err != nil {
 		return model.IdempotencyDecision{}, err
 	}
 	decision := model.IdempotencyDecision{
@@ -105,6 +52,87 @@ func BuildDecisionWithProvider(
 		return model.IdempotencyDecision{}, err
 	}
 	return decision, nil
+}
+
+// ValidateAcceptedResponseWithProvider verifies that an accepted response is
+// completely and exactly bound to the submitted signed claim. It validates
+// the durable identity, claim/signature hashes, record ID, WAL/timestamp, and
+// receipt signature metadata without treating idempotency as mandatory.
+func ValidateAcceptedResponseWithProvider(
+	provider trustcrypto.Provider,
+	signed model.SignedClaim,
+	record model.ServerRecord,
+	accepted model.AcceptedReceipt,
+) error {
+	_, _, _, err := validateAcceptedResponseWithProvider(provider, signed, record, accepted, false)
+	return err
+}
+
+func validateAcceptedResponseWithProvider(
+	provider trustcrypto.Provider,
+	signed model.SignedClaim,
+	record model.ServerRecord,
+	accepted model.AcceptedReceipt,
+	requireIdempotency bool,
+) (cryptosuite.Suite, model.IdempotencyIdentity, []byte, error) {
+	if provider == nil {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: crypto provider is required")
+	}
+	suite, err := cryptosuite.RequireAvailable(provider.Suite())
+	if err != nil {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, err
+	}
+	if signed.SchemaVersion != model.SchemaSignedClaim {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, fmt.Errorf("idempotency: unexpected signed claim schema %q", signed.SchemaVersion)
+	}
+	if signed.Signature.KeyID != signed.Claim.KeyID {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: signature key_id does not match claim key_id")
+	}
+	if signed.Signature.Alg != suite.Signature.Algorithm ||
+		len(signed.Signature.Signature) == 0 ||
+		(suite.ID == cryptosuite.INTLV1 && len(signed.Signature.Signature) != ed25519.SignatureSize) {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: valid client signature metadata is required")
+	}
+	if requireIdempotency && signed.Claim.IdempotencyKey == "" {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: idempotency_key is required")
+	}
+	claimCBOR, err := claim.Canonical(signed.Claim)
+	if err != nil {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, fmt.Errorf("idempotency: canonicalize claim: %w", err)
+	}
+	claimHash, err := trustcrypto.HashBytesWithProvider(provider, suite.ClaimHash.Algorithm, claimCBOR)
+	if err != nil {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, fmt.Errorf("idempotency: hash claim: %w", err)
+	}
+	if !bytes.Equal(record.ClaimHash, claimHash) {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: server record claim hash does not match signed claim")
+	}
+	recordID, err := claim.RecordIDWithProvider(provider, claimCBOR, signed.Signature)
+	if err != nil {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, fmt.Errorf("idempotency: derive record id: %w", err)
+	}
+	if record.RecordID != recordID {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: server record id does not match signed claim")
+	}
+	signatureHash, err := trustcrypto.HashBytesWithProvider(provider, suite.SignatureHash.Algorithm, signed.Signature.Signature)
+	if err != nil {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, fmt.Errorf("idempotency: hash client signature: %w", err)
+	}
+	if !bytes.Equal(record.ClientSignatureHash, signatureHash) {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: server record signature hash does not match signed claim")
+	}
+	if record.KeyID != signed.Claim.KeyID {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, errors.New("idempotency: server record key_id does not match signed claim")
+	}
+	identity := model.IdempotencyIdentity{
+		TenantID:       signed.Claim.TenantID,
+		ClientID:       signed.Claim.ClientID,
+		IdempotencyKey: signed.Claim.IdempotencyKey,
+	}
+	if err := validateResponseBindings(suite, identity, claimHash, record, accepted); err != nil {
+		return cryptosuite.Suite{}, model.IdempotencyIdentity{}, nil, err
+	}
+	return suite, identity, claimHash, nil
 }
 
 // ValidateDecision checks all bindings available from the compact durable
@@ -159,6 +187,9 @@ func validateResponseBindings(
 	}
 	if record.KeyID == "" {
 		return errors.New("idempotency: server record key_id is required")
+	}
+	if record.ReceivedAtUnixN <= 0 {
+		return errors.New("idempotency: server record received_at_unix_n must be positive")
 	}
 	if !bytes.Equal(record.ClaimHash, claimHash) {
 		return errors.New("idempotency: server record claim_hash does not match decision")

@@ -40,6 +40,52 @@ func TestNATSIngressClientSubmitSignedClaim(t *testing.T) {
 	}
 }
 
+func TestNATSIngressClientSubmitSignedClaimCNSMV1(t *testing.T) {
+	_, privateKey, err := GenerateCNSMV1SoftwareKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := mustCNSMV1Identity(t, "tenant-cn", "client-cn", "client-sm2", privateKey)
+	signed, err := BuildSignedFileClaim(strings.NewReader("CN-SM NATS"), identity, FileClaimOptions{
+		Nonce:          []byte("0123456789abcdef"),
+		IdempotencyKey: "cn-nats-submit",
+		EventType:      "file.snapshot",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := startSDKNATSFixture(t, sdkNATSSubmitterFunc(func(_ context.Context, received model.SignedClaim) (submission.Outcome, error) {
+		if received.CryptoSuite != cryptosuite.CNSMV1 ||
+			received.Claim.CryptoSuite != cryptosuite.CNSMV1 ||
+			received.Signature.Alg != cryptosuite.SignatureSM2SM3 {
+			t.Fatalf("received non-CN claim: %+v", received)
+		}
+		outcome := acceptedSDKNATSOutcome()
+		outcome.ServerRecord.CryptoSuite = cryptosuite.CNSMV1
+		outcome.AcceptedReceipt.CryptoSuite = cryptosuite.CNSMV1
+		return outcome, nil
+	}))
+	cfg := sdkNATSClientConfig(fixture.runtime.Conn().ConnectedUrl(), fixture.cfg)
+	cfg.CryptoSuite = cryptosuite.CNSMV1
+	client, err := NewNATSIngressClient(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := client.SubmitSignedClaim(ctx, signed)
+	if err != nil {
+		t.Fatalf("SubmitSignedClaim: %v", err)
+	}
+	if result.ServerRecord.CryptoSuite != cryptosuite.CNSMV1 ||
+		result.AcceptedReceipt.CryptoSuite != cryptosuite.CNSMV1 ||
+		result.SignedClaim.CryptoSuite != cryptosuite.CNSMV1 {
+		t.Fatalf("result lost CN suite: %+v", result)
+	}
+}
+
 func TestNATSIngressClientWaitResultCoversLiveCommit(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -510,6 +556,7 @@ func openSDKNATSClientWithoutCleanup(t *testing.T, fixture sdkNATSFixture) *NATS
 
 func sdkNATSClientConfig(url string, serverCfg trustconfig.NATS) NATSIngressConfig {
 	return NATSIngressConfig{
+		CryptoSuite:    cryptosuite.INTLV1,
 		URLs:           []string{url},
 		Stream:         serverCfg.Stream,
 		Subject:        serverCfg.Subject,

@@ -81,9 +81,6 @@ func TestRegistryPinsCurrentAndReservedGenerations(t *testing.T) {
 			}
 		} else {
 			wantSuites := []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}
-			if descriptor.Identifier == SDKV2 {
-				wantSuites = []cryptosuite.ID{cryptosuite.INTLV1}
-			}
 			if !reflect.DeepEqual(descriptor.AllowedSuites, wantSuites) || descriptor.SuiteField != "crypto_suite" {
 				t.Fatalf("crypto-agile descriptor %q has unexpected suite binding: %#v", descriptor.Identifier, descriptor)
 			}
@@ -143,8 +140,8 @@ func TestRuntimeGatesRejectReservedFormatsAndSuites(t *testing.T) {
 	if _, _, err := RequireWritable(SDKV2, cryptosuite.INTLV1); err != nil {
 		t.Fatalf("RequireWritable(SDK v2 INTL_V1) error = %v", err)
 	}
-	if _, _, err := RequireWritable(SDKV2, cryptosuite.CNSMV1); !errors.Is(err, ErrSuiteNotAllowed) {
-		t.Fatalf("RequireWritable(SDK v2 CN_SM_V1) error = %v, want ErrSuiteNotAllowed", err)
+	if _, _, err := RequireWritable(SDKV2, cryptosuite.CNSMV1); err != nil {
+		t.Fatalf("RequireWritable(SDK v2 CN_SM_V1) error = %v", err)
 	}
 	if err := RequireSuite(ModelV2, cryptosuite.CNSMV1); err != nil {
 		t.Fatalf("RequireSuite(reserved planned combination) error = %v", err)
@@ -287,7 +284,7 @@ func TestRegistrySnapshotCanonicalCBORGolden(t *testing.T) {
 		t.Fatalf("marshal registry snapshot: %v", err)
 	}
 	digest := sha256.Sum256(encoded)
-	const wantSHA256 = "3a48248d6e8817296b962fb215936cb2532b528b216a79fad04cd26892545a76"
+	const wantSHA256 = "fa5d594edb95cc7ea15877f3df780eb3e1fa89eb52b2a333c5b91baaa677cdb3"
 	if got := hex.EncodeToString(digest[:]); got != wantSHA256 {
 		t.Fatalf("registry snapshot SHA-256 = %s, want %s", got, wantSHA256)
 	}

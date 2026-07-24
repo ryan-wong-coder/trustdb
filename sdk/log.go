@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
@@ -94,24 +95,54 @@ func NewJSONLogEntry(v any, opts LogClaimOptions) (LogEntry, error) {
 
 // BuildSignedLogClaim hashes a log stream and signs it as a TrustDB claim.
 func BuildSignedLogClaim(raw io.Reader, id Identity, opts LogClaimOptions) (SignedClaim, error) {
+	return BuildSignedLogClaimContext(context.Background(), raw, id, opts)
+}
+
+// BuildSignedLogClaimContext is the cancellation-aware variant used by
+// submission, batching, and streaming paths. Cancellation is observed between
+// Reader calls; it cannot forcibly interrupt an arbitrary Reader while that
+// Reader is blocked inside Read.
+func BuildSignedLogClaimContext(ctx context.Context, raw io.Reader, id Identity, opts LogClaimOptions) (SignedClaim, error) {
 	if raw == nil {
 		return SignedClaim{}, errors.New("sdk: log content reader is nil")
 	}
-	if err := validateLogClaimIdentity(id); err != nil {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return SignedClaim{}, err
+	}
+	descriptor, signer, err := id.signingMaterial()
+	if err != nil {
+		return SignedClaim{}, err
+	}
+	provider, err := trustcrypto.ProviderForSuite(descriptor.CryptoSuite)
+	if err != nil {
+		return SignedClaim{}, err
+	}
+	suite, err := cryptosuite.RequireAvailable(descriptor.CryptoSuite)
+	if err != nil {
 		return SignedClaim{}, err
 	}
 	hashAlg := opts.HashAlg
 	if hashAlg == "" {
-		hashAlg = model.DefaultHashAlg
+		hashAlg = suite.ContentHash.Algorithm
 	}
-	contentHash, n, err := trustcrypto.HashReader(hashAlg, raw)
+	contentHash, n, err := trustcrypto.HashReaderWithProvider(provider, hashAlg, readerWithContext(ctx, raw))
 	if err != nil {
 		return SignedClaim{}, err
 	}
-	return buildSignedLogClaim(hashAlg, contentHash, n, id, opts)
+	return buildSignedLogClaim(ctx, descriptor, signer, hashAlg, contentHash, n, id, opts)
 }
 
-func buildSignedLogClaim(hashAlg string, contentHash []byte, contentLength int64, id Identity, opts LogClaimOptions) (SignedClaim, error) {
+func buildSignedLogClaim(
+	ctx context.Context,
+	descriptor KeyDescriptor,
+	signer *sdkSignerAdapter,
+	hashAlg string,
+	contentHash []byte,
+	contentLength int64,
+	id Identity,
+	opts LogClaimOptions,
+) (SignedClaim, error) {
 	var err error
 	producedAt := opts.ProducedAt
 	if producedAt.IsZero() {
@@ -153,10 +184,11 @@ func buildSignedLogClaim(hashAlg string, contentHash []byte, contentLength int64
 		MediaType:     mediaType,
 		StorageURI:    opts.StorageURI,
 	}
-	c, err := claim.NewFileClaim(
+	c, err := claim.NewFileClaimForSuite(
+		descriptor.CryptoSuite,
 		id.TenantID,
 		id.ClientID,
-		id.KeyID,
+		descriptor.KeyID,
 		producedAt,
 		nonce,
 		idempotencyKey,
@@ -166,47 +198,69 @@ func buildSignedLogClaim(hashAlg string, contentHash []byte, contentLength int64
 	if err != nil {
 		return SignedClaim{}, err
 	}
-	return claim.Sign(c, id.PrivateKey)
-}
-
-func validateLogClaimIdentity(id Identity) error {
-	if len(id.PrivateKey) != trustcrypto.Ed25519PrivateKeySize {
-		return fmt.Errorf("sdk: invalid ed25519 private key size: %d", len(id.PrivateKey))
+	provider, err := trustcrypto.ProviderForSuite(descriptor.CryptoSuite)
+	if err != nil {
+		return SignedClaim{}, err
 	}
-	return nil
+	return claim.SignWithProvider(nonNilContext(ctx), provider, c, signer)
 }
 
 // BuildSignedLogClaimBytes hashes an in-memory log payload and signs it.
 func BuildSignedLogClaimBytes(raw []byte, id Identity, opts LogClaimOptions) (SignedClaim, error) {
+	return BuildSignedLogClaimBytesContext(context.Background(), raw, id, opts)
+}
+
+// BuildSignedLogClaimBytesContext is the cancellation-aware in-memory path.
+func BuildSignedLogClaimBytesContext(ctx context.Context, raw []byte, id Identity, opts LogClaimOptions) (SignedClaim, error) {
 	if raw == nil {
 		return SignedClaim{}, errors.New("sdk: log content body is nil")
 	}
-	if err := validateLogClaimIdentity(id); err != nil {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return SignedClaim{}, err
+	}
+	descriptor, signer, err := id.signingMaterial()
+	if err != nil {
+		return SignedClaim{}, err
+	}
+	provider, err := trustcrypto.ProviderForSuite(descriptor.CryptoSuite)
+	if err != nil {
+		return SignedClaim{}, err
+	}
+	suite, err := cryptosuite.RequireAvailable(descriptor.CryptoSuite)
+	if err != nil {
 		return SignedClaim{}, err
 	}
 	hashAlg := opts.HashAlg
 	if hashAlg == "" {
-		hashAlg = model.DefaultHashAlg
+		hashAlg = suite.ContentHash.Algorithm
 	}
-	contentHash, err := trustcrypto.HashBytes(hashAlg, raw)
+	contentHash, err := trustcrypto.HashBytesWithProvider(provider, hashAlg, raw)
 	if err != nil {
 		return SignedClaim{}, err
 	}
-	return buildSignedLogClaim(hashAlg, contentHash, int64(len(raw)), id, opts)
+	return buildSignedLogClaim(ctx, descriptor, signer, hashAlg, contentHash, int64(len(raw)), id, opts)
 }
 
 // BuildSignedJSONLogClaim marshals a structured value to JSON and signs it.
 func BuildSignedJSONLogClaim(v any, id Identity, opts LogClaimOptions) (SignedClaim, error) {
+	return BuildSignedJSONLogClaimContext(context.Background(), v, id, opts)
+}
+
+func BuildSignedJSONLogClaimContext(ctx context.Context, v any, id Identity, opts LogClaimOptions) (SignedClaim, error) {
 	entry, err := NewJSONLogEntry(v, opts)
 	if err != nil {
 		return SignedClaim{}, err
 	}
-	return BuildSignedLogClaimBytes(entry.Body, id, entry.Options)
+	return BuildSignedLogClaimBytesContext(ctx, entry.Body, id, entry.Options)
 }
 
 // SubmitLog builds, signs, and submits one streaming log payload.
 func (c *Client) SubmitLog(ctx context.Context, raw io.Reader, id Identity, opts LogClaimOptions) (SubmitResult, error) {
-	signed, err := BuildSignedLogClaim(raw, id, opts)
+	if err := c.requireIdentitySuite("submit log", id); err != nil {
+		return SubmitResult{}, err
+	}
+	signed, err := BuildSignedLogClaimContext(ctx, raw, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -223,7 +277,10 @@ func (c *Client) SubmitLogBytes(ctx context.Context, raw []byte, id Identity, op
 	if raw == nil {
 		return SubmitResult{}, errors.New("sdk: log content body is nil")
 	}
-	signed, err := BuildSignedLogClaimBytes(raw, id, opts)
+	if err := c.requireIdentitySuite("submit log bytes", id); err != nil {
+		return SubmitResult{}, err
+	}
+	signed, err := BuildSignedLogClaimBytesContext(ctx, raw, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -237,11 +294,19 @@ func (c *Client) SubmitLogBytes(ctx context.Context, raw []byte, id Identity, op
 
 // SubmitJSONLog marshals, signs, and submits one structured JSON log payload.
 func (c *Client) SubmitJSONLog(ctx context.Context, v any, id Identity, opts LogClaimOptions) (SubmitResult, error) {
-	entry, err := NewJSONLogEntry(v, opts)
+	if err := c.requireIdentitySuite("submit JSON log", id); err != nil {
+		return SubmitResult{}, err
+	}
+	signed, err := BuildSignedJSONLogClaimContext(ctx, v, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	return c.SubmitLogBytes(ctx, entry.Body, id, entry.Options)
+	result, err := c.SubmitSignedClaim(ctx, signed)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	result.SignedClaim = signed
+	return result, nil
 }
 
 // SubmitLogBatch submits log entries concurrently and returns per-entry results.
@@ -253,6 +318,9 @@ func (c *Client) SubmitLogBatch(ctx context.Context, entries []LogEntry, id Iden
 		if err := validateMultiLogDefaults("batch", opts.Claim); err != nil {
 			return LogBatchResult{Results: make([]LogSubmitItemResult, len(entries))}, err
 		}
+	}
+	if err := c.requireIdentitySuite("submit log batch", id); err != nil {
+		return LogBatchResult{Results: make([]LogSubmitItemResult, len(entries))}, err
 	}
 	if native, ok := c.transport.(signedClaimBatchTransport); ok {
 		return c.submitLogBatchNative(ctx, entries, id, opts, native)
@@ -344,7 +412,7 @@ func (c *Client) submitLogBatchNative(ctx context.Context, entries []LogEntry, i
 			done[index] = true
 			return
 		}
-		claim, err := buildSignedLogEntry(entries[index], id, opts.Claim)
+		claim, err := buildSignedLogEntry(workCtx, entries[index], id, opts.Claim)
 		if err != nil {
 			result.Results[index] = LogSubmitItemResult{Index: index, Err: err}
 			done[index] = true
@@ -401,6 +469,11 @@ func (c *Client) submitLogBatchNative(ctx context.Context, entries []LogEntry, i
 			return result, fmt.Errorf("sdk: native log batch returned out-of-range result index %d", item.Index)
 		}
 		originalIndex := originalIndexes[item.Index]
+		if item.Err == nil {
+			if err := c.validateSubmitResult("submit log batch", signed[item.Index], item.Result); err != nil {
+				item.Err = err
+			}
+		}
 		result.Results[originalIndex] = LogSubmitItemResult{Index: originalIndex, Result: item.Result, Err: item.Err}
 		done[originalIndex] = true
 	}
@@ -421,6 +494,9 @@ func (c *Client) SubmitLogStream(ctx context.Context, entries <-chan LogEntry, i
 		return nil, errors.New("sdk: log entry stream is nil")
 	}
 	if err := validateMultiLogDefaults("stream", opts.Claim); err != nil {
+		return nil, err
+	}
+	if err := c.requireIdentitySuite("submit log stream", id); err != nil {
 		return nil, err
 	}
 	if native, ok := c.transport.(signedClaimStreamTransport); ok {
@@ -517,6 +593,7 @@ func (c *Client) submitLogStreamNative(ctx context.Context, entries <-chan LogEn
 		}
 	}
 	jobs := make(chan indexedLogEntry)
+	var expected sync.Map
 	var workers sync.WaitGroup
 	var completion sync.WaitGroup
 	workers.Add(workerCount)
@@ -526,11 +603,13 @@ func (c *Client) submitLogStreamNative(ctx context.Context, entries <-chan LogEn
 			defer workers.Done()
 			defer completion.Done()
 			for job := range jobs {
-				signed, err := buildSignedLogEntry(job.entry, id, opts.Claim)
+				signed, err := buildSignedLogEntry(workCtx, job.entry, id, opts.Claim)
 				if err == nil {
+					expected.Store(job.index, signed)
 					select {
 					case signedIn <- signedClaimStreamItem{Index: job.index, SignedClaim: signed}:
 					case <-workCtx.Done():
+						expected.Delete(job.index)
 						return
 					}
 					continue
@@ -574,6 +653,16 @@ func (c *Client) submitLogStreamNative(ctx context.Context, entries <-chan LogEn
 		defer completion.Done()
 		defer cancel()
 		for item := range nativeOut {
+			if item.Err == nil {
+				expectedValue, found := expected.LoadAndDelete(item.Index)
+				if !found {
+					item.Err = fmt.Errorf("sdk: native log stream returned unknown result index %d", item.Index)
+				} else if err := c.validateSubmitResult("submit log stream", expectedValue.(SignedClaim), item.Result); err != nil {
+					item.Err = err
+				}
+			} else {
+				expected.Delete(item.Index)
+			}
 			if !emit(LogSubmitItemResult{Index: item.Index, Result: item.Result, Err: item.Err}) {
 				return
 			}
@@ -600,7 +689,7 @@ func (c *Client) submitLogEntry(ctx context.Context, entry LogEntry, id Identity
 	if err := ctx.Err(); err != nil {
 		return SubmitResult{}, err
 	}
-	signed, err := buildSignedLogEntry(entry, id, defaults)
+	signed, err := buildSignedLogEntry(ctx, entry, id, defaults)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -612,15 +701,15 @@ func (c *Client) submitLogEntry(ctx context.Context, entry LogEntry, id Identity
 	return result, nil
 }
 
-func buildSignedLogEntry(entry LogEntry, id Identity, defaults LogClaimOptions) (SignedClaim, error) {
+func buildSignedLogEntry(ctx context.Context, entry LogEntry, id Identity, defaults LogClaimOptions) (SignedClaim, error) {
 	if entry.Reader == nil && entry.Body != nil {
-		return BuildSignedLogClaimBytes(entry.Body, id, mergeLogClaimOptions(defaults, entry.Options))
+		return BuildSignedLogClaimBytesContext(ctx, entry.Body, id, mergeLogClaimOptions(defaults, entry.Options))
 	}
 	raw, err := logEntryReader(entry)
 	if err != nil {
 		return SignedClaim{}, err
 	}
-	return BuildSignedLogClaim(raw, id, mergeLogClaimOptions(defaults, entry.Options))
+	return BuildSignedLogClaimContext(ctx, raw, id, mergeLogClaimOptions(defaults, entry.Options))
 }
 
 func logEntryReader(entry LogEntry) (io.Reader, error) {
@@ -691,6 +780,17 @@ func normalizeLogConcurrency(concurrency int) int {
 		return defaultHTTPConcurrency
 	}
 	return concurrency
+}
+
+func (c *Client) requireIdentitySuite(op string, identity Identity) error {
+	descriptor, _, err := identity.signingMaterial()
+	if err != nil {
+		return err
+	}
+	if descriptor.CryptoSuite != c.cryptoSuite {
+		return c.mismatch(op, descriptor.CryptoSuite)
+	}
+	return nil
 }
 
 func copyStringSlice(in []string) []string {

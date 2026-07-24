@@ -12,6 +12,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/natsingress"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
@@ -26,6 +29,7 @@ const (
 // ConnectionOptions can carry authentication, TLS, proxy, and callback options;
 // TrustDB still enforces the configured connection and drain time bounds.
 type NATSIngressConfig struct {
+	CryptoSuite       CryptoSuite
 	URLs              []string
 	Stream            string
 	Subject           string
@@ -40,7 +44,12 @@ type NATSIngressConfig struct {
 // TrustDB. Callers should normally replace URLs and connection options for the
 // target deployment.
 func DefaultNATSIngressConfig() NATSIngressConfig {
+	return DefaultNATSIngressConfigForSuite(cryptosuite.INTLV1)
+}
+
+func DefaultNATSIngressConfigForSuite(expectedSuite CryptoSuite) NATSIngressConfig {
 	return NATSIngressConfig{
+		CryptoSuite:    expectedSuite,
 		URLs:           []string{"nats://127.0.0.1:4222"},
 		Stream:         "TRUSTDB_INGRESS_V2",
 		Subject:        "trustdb.ingress.v2.claims",
@@ -70,6 +79,7 @@ type NATSIngressClient struct {
 	conn          *nats.Conn
 	js            jetstream.JetStream
 	drainTimeout  time.Duration
+	cryptoSuite   CryptoSuite
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -131,6 +141,7 @@ func NewNATSIngressClient(ctx context.Context, cfg NATSIngressConfig) (*NATSIngr
 		conn:          conn,
 		js:            js,
 		drainTimeout:  normalized.DrainTimeout,
+		cryptoSuite:   normalized.CryptoSuite,
 		closeDone:     make(chan struct{}),
 	}, nil
 }
@@ -154,6 +165,15 @@ func (c *NATSIngressClient) PublishSignedClaim(ctx context.Context, signed Signe
 	}
 	if c.conn.IsClosed() || c.conn.IsDraining() {
 		return NATSSubmission{}, &Error{Op: "publish NATS claim", URL: c.endpoint, Err: nats.ErrConnectionClosed}
+	}
+	if err := modelsuite.Require(c.cryptoSuite, signed); err != nil {
+		return NATSSubmission{}, &Error{
+			Op:      "publish NATS claim",
+			URL:     c.endpoint,
+			Code:    string(trusterr.CodeFailedPrecondition),
+			Message: fmt.Sprintf("signed claim crypto_suite does not match NATS client suite %s", c.cryptoSuite),
+			Err:     err,
+		}
 	}
 
 	request, err := natsingress.NewRequest(signed)
@@ -211,6 +231,15 @@ func (c *NATSIngressClient) WaitResult(ctx context.Context, submission NATSSubmi
 	if c.conn.IsClosed() {
 		return SubmitResult{}, &Error{Op: "wait for NATS result", URL: c.endpoint, Err: nats.ErrConnectionClosed}
 	}
+	if err := modelsuite.Require(c.cryptoSuite, submission.SignedClaim); err != nil {
+		return SubmitResult{}, &Error{
+			Op:      "validate NATS submission",
+			URL:     c.endpoint,
+			Code:    string(trusterr.CodeFailedPrecondition),
+			Message: fmt.Sprintf("signed claim crypto_suite does not match NATS client suite %s", c.cryptoSuite),
+			Err:     err,
+		}
+	}
 
 	resultSubject, err := natsResultSubject(c.resultPattern, request.MessageID)
 	if err != nil {
@@ -230,7 +259,14 @@ func (c *NATSIngressClient) WaitResult(ctx context.Context, submission NATSSubmi
 
 	stored, err := c.resultStream.GetLastMsgForSubject(ctx, resultSubject)
 	if err == nil {
-		return decodeNATSSubmitResult(c.endpoint, stored.Subject, resultSubject, stored.Header, stored.Data, request)
+		result, decodeErr := decodeNATSSubmitResult(c.endpoint, stored.Subject, resultSubject, stored.Header, stored.Data, request)
+		if decodeErr != nil {
+			return SubmitResult{}, decodeErr
+		}
+		if err := validateNATSResultSuite(c.cryptoSuite, result); err != nil {
+			return SubmitResult{}, &Error{Op: "validate NATS result", URL: c.endpoint, Code: string(trusterr.CodeFailedPrecondition), Err: err}
+		}
+		return result, nil
 	}
 	if !errors.Is(err, jetstream.ErrMsgNotFound) {
 		return SubmitResult{}, &Error{Op: "read durable NATS result", URL: c.endpoint, Err: err}
@@ -240,7 +276,14 @@ func (c *NATSIngressClient) WaitResult(ctx context.Context, submission NATSSubmi
 	if err != nil {
 		return SubmitResult{}, &Error{Op: "wait for NATS result", URL: c.endpoint, Err: err}
 	}
-	return decodeNATSSubmitResult(c.endpoint, message.Subject, resultSubject, message.Header, message.Data, request)
+	result, err := decodeNATSSubmitResult(c.endpoint, message.Subject, resultSubject, message.Header, message.Data, request)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if err := validateNATSResultSuite(c.cryptoSuite, result); err != nil {
+		return SubmitResult{}, &Error{Op: "validate NATS result", URL: c.endpoint, Code: string(trusterr.CodeFailedPrecondition), Err: err}
+	}
+	return result, nil
 }
 
 // SubmitSignedClaim is the synchronous publish-and-wait convenience path.
@@ -304,6 +347,12 @@ func normalizeNATSIngressConfig(cfg NATSIngressConfig) (NATSIngressConfig, strin
 	result.ResultStream = strings.TrimSpace(result.ResultStream)
 	result.ResultSubject = strings.TrimSpace(result.ResultSubject)
 	endpoint := strings.Join(result.URLs, ",")
+	if _, _, err := formatregistry.RequireWritable(formatregistry.SDKV2, result.CryptoSuite); err != nil {
+		return result, endpoint, fmt.Errorf("NATS CryptoSuite: %w", err)
+	}
+	if _, _, err := formatregistry.RequireWritable(formatregistry.NATSV2, result.CryptoSuite); err != nil {
+		return result, endpoint, fmt.Errorf("NATS wire CryptoSuite: %w", err)
+	}
 
 	if len(result.URLs) == 0 {
 		return result, endpoint, errors.New("NATS URLs are required")
@@ -519,6 +568,23 @@ func retryableNATSFailure(code trusterr.Code) bool {
 	default:
 		return false
 	}
+}
+
+func validateNATSResultSuite(expected CryptoSuite, result SubmitResult) error {
+	if err := modelsuite.Require(expected, result.SignedClaim); err != nil {
+		return err
+	}
+	if result.ServerRecord.SchemaVersion != "" {
+		if err := modelsuite.Require(expected, result.ServerRecord); err != nil {
+			return err
+		}
+	}
+	if result.AcceptedReceipt.SchemaVersion != "" {
+		if err := modelsuite.Require(expected, result.AcceptedReceipt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func nonNilContext(ctx context.Context) context.Context {

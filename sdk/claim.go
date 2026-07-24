@@ -1,7 +1,7 @@
 package sdk
 
 import (
-	"crypto/ed25519"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -10,22 +10,44 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/claim"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
 
 func BuildSignedFileClaim(raw io.Reader, id Identity, opts FileClaimOptions) (SignedClaim, error) {
+	return BuildSignedFileClaimContext(context.Background(), raw, id, opts)
+}
+
+// BuildSignedFileClaimContext hashes and signs one file with the suite bound
+// to id. Cancellation is observed between Reader calls and propagated to
+// callback/HSM/remote signers. It cannot forcibly interrupt an arbitrary
+// Reader while that Reader is blocked inside Read.
+func BuildSignedFileClaimContext(ctx context.Context, raw io.Reader, id Identity, opts FileClaimOptions) (SignedClaim, error) {
 	if raw == nil {
 		return SignedClaim{}, errors.New("sdk: raw content reader is nil")
 	}
-	if len(id.PrivateKey) != trustcrypto.Ed25519PrivateKeySize {
-		return SignedClaim{}, fmt.Errorf("sdk: invalid ed25519 private key size: %d", len(id.PrivateKey))
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return SignedClaim{}, err
+	}
+	descriptor, signer, err := id.signingMaterial()
+	if err != nil {
+		return SignedClaim{}, err
+	}
+	provider, err := trustcrypto.ProviderForSuite(descriptor.CryptoSuite)
+	if err != nil {
+		return SignedClaim{}, err
+	}
+	suite, err := cryptosuite.RequireAvailable(descriptor.CryptoSuite)
+	if err != nil {
+		return SignedClaim{}, err
 	}
 	hashAlg := opts.HashAlg
 	if hashAlg == "" {
-		hashAlg = model.DefaultHashAlg
+		hashAlg = suite.ContentHash.Algorithm
 	}
-	contentHash, n, err := trustcrypto.HashReader(hashAlg, raw)
+	contentHash, n, err := trustcrypto.HashReaderWithProvider(provider, hashAlg, readerWithContext(ctx, raw))
 	if err != nil {
 		return SignedClaim{}, err
 	}
@@ -63,10 +85,11 @@ func BuildSignedFileClaim(raw io.Reader, id Identity, opts FileClaimOptions) (Si
 		MediaType:     opts.MediaType,
 		StorageURI:    opts.StorageURI,
 	}
-	c, err := claim.NewFileClaim(
+	c, err := claim.NewFileClaimForSuite(
+		descriptor.CryptoSuite,
 		id.TenantID,
 		id.ClientID,
-		id.KeyID,
+		descriptor.KeyID,
 		producedAt,
 		nonce,
 		idempotencyKey,
@@ -76,11 +99,38 @@ func BuildSignedFileClaim(raw io.Reader, id Identity, opts FileClaimOptions) (Si
 	if err != nil {
 		return SignedClaim{}, err
 	}
-	return claim.Sign(c, id.PrivateKey)
+	return claim.SignWithProvider(ctx, provider, c, signer)
 }
 
-func VerifySignedClaim(signed SignedClaim, publicKey ed25519.PublicKey) (string, error) {
-	verified, err := claim.Verify(signed, publicKey)
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func readerWithContext(ctx context.Context, reader io.Reader) io.Reader {
+	return &contextReader{ctx: nonNilContext(ctx), reader: reader}
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(buffer)
+	if contextErr := r.ctx.Err(); contextErr != nil {
+		return n, contextErr
+	}
+	return n, err
+}
+
+func VerifySignedClaim(signed SignedClaim, publicKey KeyDescriptor) (string, error) {
+	if err := publicKey.Validate(); err != nil {
+		return "", err
+	}
+	provider, err := trustcrypto.ProviderForSuite(signed.CryptoSuite)
+	if err != nil {
+		return "", err
+	}
+	verified, err := claim.VerifyWithProvider(context.Background(), signed, publicKey.internalPublicKey(), provider)
 	if err != nil {
 		return "", err
 	}
