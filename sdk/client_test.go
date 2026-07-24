@@ -42,8 +42,10 @@ func TestClientSubmitSignedClaim(t *testing.T) {
 
 	signed := SignedClaim{
 		SchemaVersion: model.SchemaSignedClaim,
+		CryptoSuite:   cryptosuite.INTLV1,
 		Claim: model.ClientClaim{
 			SchemaVersion:  model.SchemaClientClaim,
+			CryptoSuite:    cryptosuite.INTLV1,
 			TenantID:       "tenant-1",
 			ClientID:       "client-1",
 			KeyID:          "key-1",
@@ -74,10 +76,12 @@ func TestClientSubmitSignedClaim(t *testing.T) {
 			BatchEnqueued: true,
 			ServerRecord: ServerRecord{
 				SchemaVersion: model.SchemaServerRecord,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      "tr1record",
 			},
 			AcceptedReceipt: AcceptedReceipt{
 				SchemaVersion: model.SchemaAcceptedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      "tr1record",
 				Status:        "accepted",
 			},
@@ -119,10 +123,12 @@ func TestLoadBalancedClientFailsOver(t *testing.T) {
 			BatchEnqueued: true,
 			ServerRecord: ServerRecord{
 				SchemaVersion: model.SchemaServerRecord,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      "tr1record",
 			},
 			AcceptedReceipt: AcceptedReceipt{
 				SchemaVersion: model.SchemaAcceptedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      "tr1record",
 				Status:        "accepted",
 			},
@@ -137,7 +143,7 @@ func TestLoadBalancedClientFailsOver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoadBalancedClient: %v", err)
 	}
-	result, err := client.SubmitSignedClaim(context.Background(), SignedClaim{SchemaVersion: model.SchemaSignedClaim})
+	result, err := client.SubmitSignedClaim(context.Background(), intlSignedClaimFixture())
 	if err != nil {
 		t.Fatalf("SubmitSignedClaim: %v", err)
 	}
@@ -162,10 +168,12 @@ func TestLoadBalancedClientNilContextDoesNotPanic(t *testing.T) {
 			ProofLevel: ProofLevelL2,
 			ServerRecord: ServerRecord{
 				SchemaVersion: model.SchemaServerRecord,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      "tr1record",
 			},
 			AcceptedReceipt: AcceptedReceipt{
 				SchemaVersion: model.SchemaAcceptedReceipt,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      "tr1record",
 				Status:        "accepted",
 			},
@@ -182,7 +190,7 @@ func TestLoadBalancedClientNilContextDoesNotPanic(t *testing.T) {
 			t.Fatalf("SubmitSignedClaim(nil) panicked: %v", recovered)
 		}
 	}()
-	result, err := client.SubmitSignedClaim(nil, SignedClaim{SchemaVersion: model.SchemaSignedClaim})
+	result, err := client.SubmitSignedClaim(nil, intlSignedClaimFixture())
 	if err != nil {
 		t.Fatalf("SubmitSignedClaim: %v", err)
 	}
@@ -209,6 +217,7 @@ func TestClientListRecordsEncodesQuery(t *testing.T) {
 		writeJSONForTest(t, w, http.StatusOK, recordsEnvelope{
 			Records: []RecordIndex{{
 				SchemaVersion: model.SchemaRecordIndex,
+				CryptoSuite:   cryptosuite.INTLV1,
 				RecordID:      "tr1record",
 				BatchID:       "batch-1",
 			}},
@@ -251,17 +260,18 @@ func TestClientOperationalEndpoints(t *testing.T) {
 			}
 			writeJSONForTest(t, w, http.StatusOK, rootsEnvelope{Roots: []BatchRoot{{
 				SchemaVersion: model.SchemaBatchRoot,
+				CryptoSuite:   cryptosuite.INTLV1,
 				BatchID:       "batch-1",
 				TreeSize:      1,
 			}}, Limit: 7, Direction: "desc", NextCursor: "root-next"})
 		case "/v2/sth":
 			writeJSONForTest(t, w, http.StatusOK, sthsEnvelope{
-				STHs:  []SignedTreeHead{{SchemaVersion: model.SchemaSignedTreeHead, TreeSize: 4, RootHash: []byte{4}}},
+				STHs:  []SignedTreeHead{{SchemaVersion: model.SchemaSignedTreeHead, CryptoSuite: cryptosuite.INTLV1, TreeSize: 4, RootHash: []byte{4}}},
 				Limit: 5, Direction: "desc", NextCursor: "sth-next",
 			})
 		case "/v2/global-log/leaves":
 			writeJSONForTest(t, w, http.StatusOK, globalLeavesEnvelope{
-				Leaves: []model.GlobalLogLeaf{{SchemaVersion: model.SchemaGlobalLogLeaf, BatchID: "batch-1", LeafIndex: 3}},
+				Leaves: []model.GlobalLogLeaf{{SchemaVersion: model.SchemaGlobalLogLeaf, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-1", LeafIndex: 3}},
 				Limit:  5, Direction: "desc", NextCursor: "leaf-next",
 			})
 		case "/v2/anchors/sth":
@@ -270,7 +280,13 @@ func TestClientOperationalEndpoints(t *testing.T) {
 					TreeSize:   4,
 					Status:     model.AnchorStatePublished,
 					ProofLevel: ProofLevelL5,
-					Result:     &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"},
+					Result: &STHAnchorResult{
+						SchemaVersion: model.SchemaSTHAnchorResult,
+						CryptoSuite:   cryptosuite.INTLV1,
+						TreeSize:      4,
+						AnchorID:      "anchor-4",
+						STH:           SignedTreeHead{CryptoSuite: cryptosuite.INTLV1},
+					},
 				}},
 				Limit: 5, Direction: "desc", NextCursor: "anchor-next",
 			})
@@ -279,7 +295,13 @@ func TestClientOperationalEndpoints(t *testing.T) {
 				TreeSize:   4,
 				Status:     model.AnchorStatePublished,
 				ProofLevel: ProofLevelL5,
-				Result:     &STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, AnchorID: "anchor-4"},
+				Result: &STHAnchorResult{
+					SchemaVersion: model.SchemaSTHAnchorResult,
+					CryptoSuite:   cryptosuite.INTLV1,
+					TreeSize:      4,
+					AnchorID:      "anchor-4",
+					STH:           SignedTreeHead{CryptoSuite: cryptosuite.INTLV1},
+				},
 			})
 		case "/v2/anchor-systems":
 			writeJSONForTest(t, w, http.StatusOK, map[string]any{"systems": []model.AnchorSystem{sdkHTTPTestAnchorSystem()}})
@@ -297,6 +319,7 @@ func TestClientOperationalEndpoints(t *testing.T) {
 		case "/v2/roots/latest":
 			writeJSONForTest(t, w, http.StatusOK, BatchRoot{
 				SchemaVersion: model.SchemaBatchRoot,
+				CryptoSuite:   cryptosuite.INTLV1,
 				BatchID:       "batch-latest",
 				TreeSize:      2,
 			})
@@ -666,5 +689,16 @@ func writeJSONForTest(t *testing.T, w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		t.Fatalf("Encode: %v", err)
+	}
+}
+
+func intlSignedClaimFixture() SignedClaim {
+	return SignedClaim{
+		SchemaVersion: model.SchemaSignedClaim,
+		CryptoSuite:   cryptosuite.INTLV1,
+		Claim: model.ClientClaim{
+			SchemaVersion: model.SchemaClientClaim,
+			CryptoSuite:   cryptosuite.INTLV1,
+		},
 	}
 }

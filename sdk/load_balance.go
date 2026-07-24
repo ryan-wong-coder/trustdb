@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
@@ -27,13 +28,22 @@ type LoadBalanceOptions struct {
 }
 
 func NewLoadBalancedClient(endpoints []string, lb LoadBalanceOptions, opts ...Option) (*Client, error) {
+	return NewLoadBalancedClientForSuite(endpoints, cryptosuite.INTLV1, lb, opts...)
+}
+
+func NewLoadBalancedClientForSuite(
+	endpoints []string,
+	expectedSuite CryptoSuite,
+	lb LoadBalanceOptions,
+	opts ...Option,
+) (*Client, error) {
 	transports := make([]Transport, 0, len(endpoints))
 	for _, endpoint := range endpoints {
 		trimmed := strings.TrimSpace(endpoint)
 		if trimmed == "" {
 			continue
 		}
-		client, err := NewClient(trimmed, opts...)
+		client, err := NewClientForSuite(trimmed, expectedSuite, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -42,10 +52,10 @@ func NewLoadBalancedClient(endpoints []string, lb LoadBalanceOptions, opts ...Op
 	if len(transports) == 0 {
 		return nil, errors.New("sdk: at least one endpoint is required")
 	}
-	return NewClientWithTransport(&loadBalancedTransport{
+	return NewClientWithTransportForSuite(&loadBalancedTransport{
 		transports: transports,
 		mode:       lb.Mode,
-	})
+	}, expectedSuite)
 }
 
 type loadBalancedTransport struct {

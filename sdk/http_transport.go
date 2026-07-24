@@ -23,15 +23,20 @@ import (
 )
 
 type httpTransport struct {
-	baseURL    string
-	httpClient *http.Client
-	userAgent  string
-	tlsConfig  *TLSConfig
-	tlsManager *transporttls.Manager
+	baseURL     string
+	httpClient  *http.Client
+	userAgent   string
+	tlsConfig   *TLSConfig
+	tlsManager  *transporttls.Manager
+	cryptoSuite CryptoSuite
 }
 
 func (t *httpTransport) Endpoint() string {
 	return t.baseURL
+}
+
+func (t *httpTransport) CryptoSuite() CryptoSuite {
+	return t.cryptoSuite
 }
 
 func (t *httpTransport) Close() error {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 )
 
@@ -18,21 +19,21 @@ func TestHTTPStatusSubscriptionSDK(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/records/tr1/status", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(model.RecordStatus{SchemaVersion: model.SchemaRecordStatus, RecordID: "tr1", Status: model.RecordStatusCommitted, ProofLevel: "L3"})
+		_ = json.NewEncoder(w).Encode(model.RecordStatus{SchemaVersion: model.SchemaRecordStatus, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1", Status: model.RecordStatusCommitted, ProofLevel: "L3"})
 	})
 	mux.HandleFunc("POST /v2/records/status:batchGet", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, RecordID: "tr1", Status: model.RecordStatusCommitted}}, "missing_record_ids": []string{"missing"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1", Status: model.RecordStatusCommitted}}, "missing_record_ids": []string{"missing"}})
 	})
 	mux.HandleFunc("POST /v2/status-subscriptions", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(StatusSubscription{ID: "tss1sdk", TenantID: "tenant", ClientID: "client", KeyID: "key", RecordIDs: []string{"tr1"}})
 	})
 	mux.HandleFunc("GET /v2/status-subscriptions/tss1sdk/statuses", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, RecordID: "tr1", Status: model.RecordStatusCommitted}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []model.RecordStatus{{SchemaVersion: model.SchemaRecordStatus, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1", Status: model.RecordStatusCommitted}}})
 	})
 	mux.HandleFunc("GET /v2/status-subscriptions/tss1sdk/events", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		notification, _ := json.Marshal(model.StatusRefresh{SchemaVersion: model.SchemaStatusRefresh, SubscriptionID: "tss1sdk", TenantID: "tenant", ClientID: "client", Version: 7, RefreshRequired: true, EmittedAtUnixN: time.Now().UnixNano()})
+		notification, _ := json.Marshal(model.StatusRefresh{SchemaVersion: model.SchemaStatusRefresh, CryptoSuite: cryptosuite.INTLV1, SubscriptionID: "tss1sdk", TenantID: "tenant", ClientID: "client", Version: 7, RefreshRequired: true, EmittedAtUnixN: time.Now().UnixNano()})
 		_, _ = fmt.Fprintf(w, "event: refresh_required\ndata: %s\n\n", notification)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()

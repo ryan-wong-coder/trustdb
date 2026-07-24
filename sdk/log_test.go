@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 )
@@ -275,10 +276,12 @@ func TestClientSubmitLogBatchPreservesOrder(t *testing.T) {
 					BatchEnqueued: true,
 					ServerRecord: ServerRecord{
 						SchemaVersion: model.SchemaServerRecord,
+						CryptoSuite:   cryptosuite.INTLV1,
 						RecordID:      "tr1" + logID,
 					},
 					AcceptedReceipt: AcceptedReceipt{
 						SchemaVersion: model.SchemaAcceptedReceipt,
+						CryptoSuite:   cryptosuite.INTLV1,
 						RecordID:      "tr1" + logID,
 						Status:        "accepted",
 					},
@@ -499,6 +502,10 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 }
 
 func TestClientSubmitLogStreamNativeCancellationUnblocksFullResultBuffer(t *testing.T) {
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
 	secondReceived := make(chan struct{})
 	transport := &stubStreamTransport{
 		results:        []signedClaimStreamItemResult{{Index: 0}, {Index: 1}},
@@ -510,7 +517,12 @@ func TestClientSubmitLogStreamNativeCancellationUnblocksFullResultBuffer(t *test
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	entries := make(chan LogEntry)
-	out, err := client.SubmitLogStream(ctx, entries, Identity{}, LogStreamOptions{QueueSize: 1})
+	out, err := client.SubmitLogStream(
+		ctx,
+		entries,
+		mustINTLV1Identity(t, "tenant", "client", "key", privateKey),
+		LogStreamOptions{QueueSize: 1},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}

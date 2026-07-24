@@ -255,6 +255,9 @@ func BuildSignedJSONLogClaimContext(ctx context.Context, v any, id Identity, opt
 
 // SubmitLog builds, signs, and submits one streaming log payload.
 func (c *Client) SubmitLog(ctx context.Context, raw io.Reader, id Identity, opts LogClaimOptions) (SubmitResult, error) {
+	if err := c.requireIdentitySuite("submit log", id); err != nil {
+		return SubmitResult{}, err
+	}
 	signed, err := BuildSignedLogClaimContext(ctx, raw, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
@@ -272,6 +275,9 @@ func (c *Client) SubmitLogBytes(ctx context.Context, raw []byte, id Identity, op
 	if raw == nil {
 		return SubmitResult{}, errors.New("sdk: log content body is nil")
 	}
+	if err := c.requireIdentitySuite("submit log bytes", id); err != nil {
+		return SubmitResult{}, err
+	}
 	signed, err := BuildSignedLogClaimBytesContext(ctx, raw, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
@@ -286,6 +292,9 @@ func (c *Client) SubmitLogBytes(ctx context.Context, raw []byte, id Identity, op
 
 // SubmitJSONLog marshals, signs, and submits one structured JSON log payload.
 func (c *Client) SubmitJSONLog(ctx context.Context, v any, id Identity, opts LogClaimOptions) (SubmitResult, error) {
+	if err := c.requireIdentitySuite("submit JSON log", id); err != nil {
+		return SubmitResult{}, err
+	}
 	signed, err := BuildSignedJSONLogClaimContext(ctx, v, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
@@ -307,6 +316,9 @@ func (c *Client) SubmitLogBatch(ctx context.Context, entries []LogEntry, id Iden
 		if err := validateMultiLogDefaults("batch", opts.Claim); err != nil {
 			return LogBatchResult{Results: make([]LogSubmitItemResult, len(entries))}, err
 		}
+	}
+	if err := c.requireIdentitySuite("submit log batch", id); err != nil {
+		return LogBatchResult{Results: make([]LogSubmitItemResult, len(entries))}, err
 	}
 	if native, ok := c.transport.(signedClaimBatchTransport); ok {
 		return c.submitLogBatchNative(ctx, entries, id, opts, native)
@@ -455,6 +467,11 @@ func (c *Client) submitLogBatchNative(ctx context.Context, entries []LogEntry, i
 			return result, fmt.Errorf("sdk: native log batch returned out-of-range result index %d", item.Index)
 		}
 		originalIndex := originalIndexes[item.Index]
+		if item.Err == nil {
+			if err := c.validateSubmitResult("submit log batch", item.Result); err != nil {
+				item.Err = err
+			}
+		}
 		result.Results[originalIndex] = LogSubmitItemResult{Index: originalIndex, Result: item.Result, Err: item.Err}
 		done[originalIndex] = true
 	}
@@ -475,6 +492,9 @@ func (c *Client) SubmitLogStream(ctx context.Context, entries <-chan LogEntry, i
 		return nil, errors.New("sdk: log entry stream is nil")
 	}
 	if err := validateMultiLogDefaults("stream", opts.Claim); err != nil {
+		return nil, err
+	}
+	if err := c.requireIdentitySuite("submit log stream", id); err != nil {
 		return nil, err
 	}
 	if native, ok := c.transport.(signedClaimStreamTransport); ok {
@@ -628,6 +648,11 @@ func (c *Client) submitLogStreamNative(ctx context.Context, entries <-chan LogEn
 		defer completion.Done()
 		defer cancel()
 		for item := range nativeOut {
+			if item.Err == nil {
+				if err := c.validateSubmitResult("submit log stream", item.Result); err != nil {
+					item.Err = err
+				}
+			}
 			if !emit(LogSubmitItemResult{Index: item.Index, Result: item.Result, Err: item.Err}) {
 				return
 			}
@@ -745,6 +770,17 @@ func normalizeLogConcurrency(concurrency int) int {
 		return defaultHTTPConcurrency
 	}
 	return concurrency
+}
+
+func (c *Client) requireIdentitySuite(op string, identity Identity) error {
+	descriptor, _, err := identity.signingMaterial()
+	if err != nil {
+		return err
+	}
+	if descriptor.CryptoSuite != c.cryptoSuite {
+		return c.mismatch(op, descriptor.CryptoSuite)
+	}
+	return nil
 }
 
 func copyStringSlice(in []string) []string {

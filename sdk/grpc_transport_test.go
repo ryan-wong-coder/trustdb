@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/model"
@@ -157,7 +158,7 @@ func TestGRPCTransportSubmitLogStream(t *testing.T) {
 	processor := grpcProcessorFunc(func(ctx context.Context, signed model.SignedClaim) (model.ServerRecord, model.AcceptedReceipt, bool, error) {
 		logID := signed.Claim.Metadata.Custom["log_id"]
 		recordID := "tr1" + logID
-		return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, RecordID: recordID}, model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, RecordID: recordID, Status: "accepted"}, false, nil
+		return model.ServerRecord{SchemaVersion: model.SchemaServerRecord, CryptoSuite: signed.CryptoSuite, RecordID: recordID}, model.AcceptedReceipt{SchemaVersion: model.SchemaAcceptedReceipt, CryptoSuite: signed.CryptoSuite, RecordID: recordID, Status: "accepted"}, false, nil
 	})
 	ingestSvc := ingest.New(processor, ingest.Options{QueueSize: 8, Workers: 2}, nil)
 	defer ingestSvc.Shutdown(context.Background())
@@ -197,11 +198,20 @@ func TestGRPCTransportSubmitLogStream(t *testing.T) {
 func TestGRPCTransportRemoteStreamTerminationClosesLogStream(t *testing.T) {
 	t.Parallel()
 
+	_, privateKey, err := trustcrypto.GenerateEd25519Key()
+	if err != nil {
+		t.Fatalf("GenerateEd25519Key: %v", err)
+	}
 	server := &grpcTerminatingStreamServer{Server: grpcapi.NewServer(nil, grpcTestBatch{}, nil, nil, nil)}
 	client := newBufconnClient(t, server)
 	entries := make(chan LogEntry)
 	t.Cleanup(func() { close(entries) })
-	out, err := client.SubmitLogStream(context.Background(), entries, Identity{}, LogStreamOptions{QueueSize: 1})
+	out, err := client.SubmitLogStream(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant", "client", "key", privateKey),
+		LogStreamOptions{QueueSize: 1},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}
@@ -298,58 +308,72 @@ func (grpcTestBatch) Enqueue(context.Context, model.SignedClaim, model.ServerRec
 }
 
 func (grpcTestBatch) Proof(context.Context, string) (model.ProofBundle, error) {
-	return model.ProofBundle{SchemaVersion: model.SchemaProofBundle, RecordID: "tr1record"}, nil
+	return model.ProofBundle{SchemaVersion: model.SchemaProofBundle, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1record"}, nil
 }
 
 func (grpcTestBatch) RecordIndex(_ context.Context, recordID string) (model.RecordIndex, bool, error) {
 	if recordID == "missing" {
 		return model.RecordIndex{}, false, nil
 	}
-	return model.RecordIndex{SchemaVersion: model.SchemaRecordIndex, RecordID: "tr1record", BatchID: "batch-1"}, true, nil
+	return model.RecordIndex{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1record", BatchID: "batch-1"}, true, nil
 }
 
 func (grpcTestBatch) Records(_ context.Context, opts model.RecordListOptions) ([]model.RecordIndex, error) {
 	if opts.Query != "" && opts.Query != "hello" {
 		return nil, trusterr.New(trusterr.CodeInvalidArgument, "unexpected query")
 	}
-	return []model.RecordIndex{{SchemaVersion: model.SchemaRecordIndex, RecordID: "tr1record", BatchID: "batch-1", ReceivedAtUnixN: 10}}, nil
+	return []model.RecordIndex{{SchemaVersion: model.SchemaRecordIndex, CryptoSuite: cryptosuite.INTLV1, RecordID: "tr1record", BatchID: "batch-1", ReceivedAtUnixN: 10}}, nil
 }
 
 func (grpcTestBatch) Roots(context.Context, int) ([]model.BatchRoot, error) {
-	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", TreeSize: 1}}, nil
+	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-1", TreeSize: 1}}, nil
 }
 
 func (grpcTestBatch) RootsAfter(context.Context, int64, int) ([]model.BatchRoot, error) {
-	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-2", TreeSize: 2, ClosedAtUnixN: 20}}, nil
+	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-2", TreeSize: 2, ClosedAtUnixN: 20}}, nil
 }
 
 func (grpcTestBatch) RootsPage(context.Context, model.RootListOptions) ([]model.BatchRoot, error) {
-	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-1", TreeSize: 1, ClosedAtUnixN: 10}}, nil
+	return []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-1", TreeSize: 1, ClosedAtUnixN: 10}}, nil
 }
 
 func (grpcTestBatch) LatestRoot(context.Context) (model.BatchRoot, error) {
-	return model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-latest", TreeSize: 3}, nil
+	return model.BatchRoot{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-latest", TreeSize: 3}, nil
 }
 
 func (grpcTestBatch) Manifest(context.Context, string) (model.BatchManifest, error) {
-	return model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, BatchID: "batch-1", TreeSize: 1}, nil
+	return model.BatchManifest{SchemaVersion: model.SchemaBatchManifest, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-1", TreeSize: 1}, nil
 }
 
 func (grpcTestBatch) BatchTreeLeaves(context.Context, model.BatchTreeLeafListOptions) ([]model.BatchTreeLeaf, error) {
-	return []model.BatchTreeLeaf{{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-1", RecordID: "tr1record", LeafIndex: 0}}, nil
+	return []model.BatchTreeLeaf{{SchemaVersion: model.SchemaBatchTreeLeaf, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-1", RecordID: "tr1record", LeafIndex: 0}}, nil
 }
 
 func (grpcTestBatch) BatchTreeNodes(context.Context, model.BatchTreeNodeListOptions) ([]model.BatchTreeNode, error) {
-	return []model.BatchTreeNode{{SchemaVersion: model.SchemaBatchTreeNode, BatchID: "batch-1", Level: 0, StartIndex: 0, Width: 1}}, nil
+	return []model.BatchTreeNode{{SchemaVersion: model.SchemaBatchTreeNode, CryptoSuite: cryptosuite.INTLV1, BatchID: "batch-1", Level: 0, StartIndex: 0, Width: 1}}, nil
 }
 
 func (grpcTestAnchors) AnchorResult(_ context.Context, treeSize uint64) (model.STHAnchorResult, bool, error) {
 	if treeSize != 4 {
 		return model.STHAnchorResult{}, false, nil
 	}
-	return model.STHAnchorResult{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, SinkName: "ots", AnchorID: "anchor-4"}, true, nil
+	return model.STHAnchorResult{
+		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   cryptosuite.INTLV1,
+		TreeSize:      4,
+		SinkName:      "ots",
+		AnchorID:      "anchor-4",
+		STH:           model.SignedTreeHead{CryptoSuite: cryptosuite.INTLV1},
+	}, true, nil
 }
 
 func (grpcTestAnchors) Anchors(context.Context, model.AnchorListOptions) ([]model.STHAnchorResult, error) {
-	return []model.STHAnchorResult{{SchemaVersion: model.SchemaSTHAnchorResult, TreeSize: 4, SinkName: "ots", AnchorID: "anchor-4"}}, nil
+	return []model.STHAnchorResult{{
+		SchemaVersion: model.SchemaSTHAnchorResult,
+		CryptoSuite:   cryptosuite.INTLV1,
+		TreeSize:      4,
+		SinkName:      "ots",
+		AnchorID:      "anchor-4",
+		STH:           model.SignedTreeHead{CryptoSuite: cryptosuite.INTLV1},
+	}}, nil
 }

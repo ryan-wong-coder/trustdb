@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
 	"github.com/wowtrust/trustdb/internal/grpcapi"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/transporttls"
@@ -57,14 +60,25 @@ func WithGRPCTransportCredentials(creds credentials.TransportCredentials) GRPCOp
 }
 
 func NewGRPCClient(target string, opts ...GRPCOption) (*Client, error) {
-	transport, err := NewGRPCTransport(target, opts...)
+	return NewGRPCClientForSuite(target, cryptosuite.INTLV1, opts...)
+}
+
+func NewGRPCClientForSuite(target string, expectedSuite CryptoSuite, opts ...GRPCOption) (*Client, error) {
+	transport, err := NewGRPCTransportForSuite(target, expectedSuite, opts...)
 	if err != nil {
 		return nil, err
 	}
-	return NewClientWithTransport(transport)
+	return NewClientWithTransportForSuite(transport, expectedSuite)
 }
 
 func NewGRPCTransport(target string, opts ...GRPCOption) (Transport, error) {
+	return NewGRPCTransportForSuite(target, cryptosuite.INTLV1, opts...)
+}
+
+func NewGRPCTransportForSuite(target string, expectedSuite CryptoSuite, opts ...GRPCOption) (Transport, error) {
+	if _, _, err := formatregistry.RequireWritable(formatregistry.SDKV2, expectedSuite); err != nil {
+		return nil, fmt.Errorf("sdk: select crypto suite: %w", err)
+	}
 	trimmed := strings.TrimSpace(target)
 	if trimmed == "" {
 		return nil, errors.New("sdk: grpc target is empty")
@@ -118,7 +132,7 @@ func NewGRPCTransport(target string, opts ...GRPCOption) (Transport, error) {
 		}
 		return nil, &Error{Op: "grpc dial", URL: trimmed, Err: err}
 	}
-	return &grpcTransport{target: trimmed, conn: conn, tlsManager: tlsManager}, nil
+	return &grpcTransport{target: trimmed, conn: conn, tlsManager: tlsManager, cryptoSuite: expectedSuite}, nil
 }
 
 func grpcTargetHost(target string) string {
@@ -134,17 +148,29 @@ func isLoopbackGRPCTarget(target string) bool {
 }
 
 func NewGRPCTransportFromConn(target string, conn *grpc.ClientConn) Transport {
-	return &grpcTransport{target: target, conn: conn}
+	return &grpcTransport{target: target, conn: conn, cryptoSuite: cryptosuite.INTLV1}
+}
+
+func NewGRPCTransportFromConnForSuite(target string, conn *grpc.ClientConn, expectedSuite CryptoSuite) (Transport, error) {
+	if _, _, err := formatregistry.RequireWritable(formatregistry.SDKV2, expectedSuite); err != nil {
+		return nil, fmt.Errorf("sdk: select crypto suite: %w", err)
+	}
+	return &grpcTransport{target: target, conn: conn, cryptoSuite: expectedSuite}, nil
 }
 
 type grpcTransport struct {
-	target     string
-	conn       *grpc.ClientConn
-	tlsManager *transporttls.Manager
+	target      string
+	conn        *grpc.ClientConn
+	tlsManager  *transporttls.Manager
+	cryptoSuite CryptoSuite
 }
 
 func (t *grpcTransport) Endpoint() string {
 	return t.target
+}
+
+func (t *grpcTransport) CryptoSuite() CryptoSuite {
+	return t.cryptoSuite
 }
 
 func (t *grpcTransport) Close() error {

@@ -12,7 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/sproof"
+	"github.com/wowtrust/trustdb/internal/trusterr"
 	"github.com/wowtrust/trustdb/transporttls"
 )
 
@@ -89,7 +93,12 @@ type signedClaimStreamItemResult struct {
 }
 
 type Client struct {
-	transport Transport
+	transport   Transport
+	cryptoSuite CryptoSuite
+}
+
+type cryptoSuiteTransport interface {
+	CryptoSuite() CryptoSuite
 }
 
 type Option func(*httpTransport)
@@ -158,6 +167,16 @@ func NewHTTPTransportForConcurrency(concurrency int) *http.Transport {
 }
 
 func NewClient(baseURL string, opts ...Option) (*Client, error) {
+	return NewClientForSuite(baseURL, cryptosuite.INTLV1, opts...)
+}
+
+// NewClientForSuite creates an HTTP client bound to one immutable server
+// namespace suite. Requests and every suite-bearing response fail closed when
+// they do not exactly match expectedSuite.
+func NewClientForSuite(baseURL string, expectedSuite CryptoSuite, opts ...Option) (*Client, error) {
+	if _, _, err := formatregistry.RequireWritable(formatregistry.SDKV2, expectedSuite); err != nil {
+		return nil, fmt.Errorf("sdk: select crypto suite: %w", err)
+	}
 	trimmed := strings.TrimSpace(baseURL)
 	if trimmed == "" {
 		return nil, errors.New("sdk: server url is empty")
@@ -176,9 +195,10 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("sdk: plaintext HTTP is limited to loopback endpoints; use https for %s", u.Hostname())
 	}
 	transport := &httpTransport{
-		baseURL:    strings.TrimRight(trimmed, "/"),
-		httpClient: NewHTTPClientForConcurrency(defaultHTTPConcurrency),
-		userAgent:  "trustdb-go-sdk",
+		baseURL:     strings.TrimRight(trimmed, "/"),
+		httpClient:  NewHTTPClientForConcurrency(defaultHTTPConcurrency),
+		userAgent:   "trustdb-go-sdk",
+		cryptoSuite: expectedSuite,
 	}
 	for _, apply := range opts {
 		apply(transport)
@@ -209,7 +229,7 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 		transport.httpClient.Transport = clone
 		transport.tlsManager = manager
 	}
-	return NewClientWithTransport(transport)
+	return NewClientWithTransportForSuite(transport, expectedSuite)
 }
 
 func rejectHTTPProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
@@ -238,15 +258,31 @@ func isLoopbackHost(host string) bool {
 }
 
 func NewClientWithTransport(transport Transport) (*Client, error) {
+	return NewClientWithTransportForSuite(transport, cryptosuite.INTLV1)
+}
+
+func NewClientWithTransportForSuite(transport Transport, expectedSuite CryptoSuite) (*Client, error) {
 	if transport == nil {
 		return nil, errors.New("sdk: transport is nil")
 	}
-	return &Client{transport: transport}, nil
+	if _, _, err := formatregistry.RequireWritable(formatregistry.SDKV2, expectedSuite); err != nil {
+		return nil, fmt.Errorf("sdk: select crypto suite: %w", err)
+	}
+	if bound, ok := transport.(cryptoSuiteTransport); ok && bound.CryptoSuite() != expectedSuite {
+		return nil, fmt.Errorf(
+			"sdk: transport crypto_suite %s does not match client suite %s",
+			bound.CryptoSuite(),
+			expectedSuite,
+		)
+	}
+	return &Client{transport: transport, cryptoSuite: expectedSuite}, nil
 }
 
 func (c *Client) BaseURL() string {
 	return c.transport.Endpoint()
 }
+
+func (c *Client) CryptoSuite() CryptoSuite { return c.cryptoSuite }
 
 func (c *Client) Close() error {
 	closer, ok := c.transport.(interface{ Close() error })
@@ -269,6 +305,9 @@ func (c *Client) CheckHealth(ctx context.Context) HealthStatus {
 }
 
 func (c *Client) SubmitFile(ctx context.Context, raw io.Reader, id Identity, opts FileClaimOptions) (SubmitResult, error) {
+	if err := c.requireIdentitySuite("submit file", id); err != nil {
+		return SubmitResult{}, err
+	}
 	signed, err := BuildSignedFileClaimContext(ctx, raw, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
@@ -282,11 +321,28 @@ func (c *Client) SubmitFile(ctx context.Context, raw io.Reader, id Identity, opt
 }
 
 func (c *Client) SubmitSignedClaim(ctx context.Context, signed SignedClaim) (SubmitResult, error) {
-	return c.transport.SubmitSignedClaim(ctx, signed)
+	if err := c.requireSuite("submit signed claim", signed); err != nil {
+		return SubmitResult{}, err
+	}
+	result, err := c.transport.SubmitSignedClaim(ctx, signed)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if err := c.validateSubmitResult("submit signed claim", result); err != nil {
+		return SubmitResult{}, err
+	}
+	return result, nil
 }
 
 func (c *Client) GetRecord(ctx context.Context, recordID string) (RecordIndex, error) {
-	return c.transport.GetRecord(ctx, recordID)
+	record, err := c.transport.GetRecord(ctx, recordID)
+	if err != nil {
+		return RecordIndex{}, err
+	}
+	if err := c.requireSuite("get record", record); err != nil {
+		return RecordIndex{}, err
+	}
+	return record, nil
 }
 
 func (c *Client) GetRecordStatus(ctx context.Context, recordID string) (RecordStatus, error) {
@@ -294,7 +350,14 @@ func (c *Client) GetRecordStatus(ctx context.Context, recordID string) (RecordSt
 	if !ok {
 		return RecordStatus{}, &Error{Op: "get record status", Message: "transport does not support record status queries"}
 	}
-	return transport.GetRecordStatus(ctx, recordID)
+	status, err := transport.GetRecordStatus(ctx, recordID)
+	if err != nil {
+		return RecordStatus{}, err
+	}
+	if err := c.requireSuite("get record status", status); err != nil {
+		return RecordStatus{}, err
+	}
+	return status, nil
 }
 
 func (c *Client) GetRecordStatuses(ctx context.Context, recordIDs []string) (RecordStatusBatch, error) {
@@ -302,13 +365,27 @@ func (c *Client) GetRecordStatuses(ctx context.Context, recordIDs []string) (Rec
 	if !ok {
 		return RecordStatusBatch{}, &Error{Op: "get record statuses", Message: "transport does not support record status queries"}
 	}
-	return transport.GetRecordStatuses(ctx, recordIDs)
+	statuses, err := transport.GetRecordStatuses(ctx, recordIDs)
+	if err != nil {
+		return RecordStatusBatch{}, err
+	}
+	if err := c.validateRecordStatuses("get record statuses", statuses); err != nil {
+		return RecordStatusBatch{}, err
+	}
+	return statuses, nil
 }
 
 func (c *Client) CreateStatusSubscription(ctx context.Context, opts CreateStatusSubscriptionOptions) (StatusSubscription, error) {
 	transport, ok := c.transport.(statusSubscriptionTransport)
 	if !ok {
 		return StatusSubscription{}, &Error{Op: "create status subscription", Message: "transport does not support status subscriptions"}
+	}
+	descriptor, _, err := opts.Identity.signingMaterial()
+	if err != nil {
+		return StatusSubscription{}, err
+	}
+	if descriptor.CryptoSuite != c.cryptoSuite {
+		return StatusSubscription{}, c.mismatch("create status subscription", descriptor.CryptoSuite)
 	}
 	return transport.CreateStatusSubscription(ctx, opts)
 }
@@ -326,7 +403,14 @@ func (c *Client) GetStatusSubscriptionStatuses(ctx context.Context, subscription
 	if !ok {
 		return RecordStatusBatch{}, &Error{Op: "get subscription statuses", Message: "transport does not support status subscriptions"}
 	}
-	return transport.GetStatusSubscriptionStatuses(ctx, subscriptionID)
+	statuses, err := transport.GetStatusSubscriptionStatuses(ctx, subscriptionID)
+	if err != nil {
+		return RecordStatusBatch{}, err
+	}
+	if err := c.validateRecordStatuses("get subscription statuses", statuses); err != nil {
+		return RecordStatusBatch{}, err
+	}
+	return statuses, nil
 }
 
 // SubscribeStatusRefresh opens the SSE invalidation stream. The status
@@ -337,19 +421,42 @@ func (c *Client) SubscribeStatusRefresh(ctx context.Context, subscriptionID stri
 	if !ok {
 		return nil, nil, &Error{Op: "subscribe status refresh", Message: "transport does not support status subscriptions"}
 	}
-	return transport.SubscribeStatusRefresh(ctx, subscriptionID)
+	events, errorsCh, err := transport.SubscribeStatusRefresh(ctx, subscriptionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	validatedEvents, validatedErrors := c.validateStatusRefreshStream(ctx, events, errorsCh)
+	return validatedEvents, validatedErrors, nil
 }
 
 func (c *Client) ListRecords(ctx context.Context, opts ListRecordsOptions) (RecordPage, error) {
-	return c.transport.ListRecords(ctx, opts)
+	page, err := c.transport.ListRecords(ctx, opts)
+	if err != nil {
+		return RecordPage{}, err
+	}
+	for index := range page.Records {
+		if err := c.requireSuite("list records", page.Records[index]); err != nil {
+			return RecordPage{}, err
+		}
+	}
+	return page, nil
 }
 
 func (c *Client) ListRootsPage(ctx context.Context, opts ListPageOptions) (RootPage, error) {
-	return c.transport.ListRootsPage(ctx, opts)
+	page, err := c.transport.ListRootsPage(ctx, opts)
+	if err != nil {
+		return RootPage{}, err
+	}
+	for index := range page.Roots {
+		if err := c.requireSuite("list roots", page.Roots[index]); err != nil {
+			return RootPage{}, err
+		}
+	}
+	return page, nil
 }
 
 func (c *Client) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) {
-	page, err := c.transport.ListRootsPage(ctx, ListPageOptions{Limit: limit, Direction: RecordListDirectionDesc})
+	page, err := c.ListRootsPage(ctx, ListPageOptions{Limit: limit, Direction: RecordListDirectionDesc})
 	if err != nil {
 		return nil, err
 	}
@@ -357,15 +464,36 @@ func (c *Client) ListRoots(ctx context.Context, limit int) ([]BatchRoot, error) 
 }
 
 func (c *Client) LatestRoot(ctx context.Context) (BatchRoot, error) {
-	return c.transport.LatestRoot(ctx)
+	root, err := c.transport.LatestRoot(ctx)
+	if err != nil {
+		return BatchRoot{}, err
+	}
+	if err := c.requireSuite("latest root", root); err != nil {
+		return BatchRoot{}, err
+	}
+	return root, nil
 }
 
 func (c *Client) GetProofBundle(ctx context.Context, recordID string) (ProofBundle, error) {
-	return c.transport.GetProofBundle(ctx, recordID)
+	bundle, err := c.transport.GetProofBundle(ctx, recordID)
+	if err != nil {
+		return ProofBundle{}, err
+	}
+	if err := c.requireSuite("get proof bundle", bundle); err != nil {
+		return ProofBundle{}, err
+	}
+	return bundle, nil
 }
 
 func (c *Client) GetGlobalProof(ctx context.Context, batchID string) (GlobalLogProof, error) {
-	return c.transport.GetGlobalProof(ctx, batchID)
+	proof, err := c.transport.GetGlobalProof(ctx, batchID)
+	if err != nil {
+		return GlobalLogProof{}, err
+	}
+	if err := c.requireSuite("get global proof", proof); err != nil {
+		return GlobalLogProof{}, err
+	}
+	return proof, nil
 }
 
 func (c *Client) GetGlobalEvidence(ctx context.Context, batchID string) (GlobalLogEvidence, error) {
@@ -373,23 +501,74 @@ func (c *Client) GetGlobalEvidence(ctx context.Context, batchID string) (GlobalL
 	if !ok {
 		return GlobalLogEvidence{}, &Error{Op: "get global evidence", Message: "transport does not support global evidence"}
 	}
-	return transport.GetGlobalEvidence(ctx, batchID)
+	evidence, err := transport.GetGlobalEvidence(ctx, batchID)
+	if err != nil {
+		return GlobalLogEvidence{}, err
+	}
+	if err := c.requireSuite("get global evidence", evidence.GlobalProof); err != nil {
+		return GlobalLogEvidence{}, err
+	}
+	if evidence.AnchorResult != nil {
+		if err := c.requireSuite("get global evidence", *evidence.AnchorResult); err != nil {
+			return GlobalLogEvidence{}, err
+		}
+	}
+	return evidence, nil
 }
 
 func (c *Client) ListSTHs(ctx context.Context, opts ListPageOptions) (TreeHeadPage, error) {
-	return c.transport.ListSTHs(ctx, opts)
+	page, err := c.transport.ListSTHs(ctx, opts)
+	if err != nil {
+		return TreeHeadPage{}, err
+	}
+	for index := range page.STHs {
+		if err := c.requireSuite("list STHs", page.STHs[index]); err != nil {
+			return TreeHeadPage{}, err
+		}
+	}
+	return page, nil
 }
 
 func (c *Client) ListGlobalLeaves(ctx context.Context, opts ListPageOptions) (GlobalLeafPage, error) {
-	return c.transport.ListGlobalLeaves(ctx, opts)
+	page, err := c.transport.ListGlobalLeaves(ctx, opts)
+	if err != nil {
+		return GlobalLeafPage{}, err
+	}
+	for index := range page.Leaves {
+		if err := c.requireSuite("list global leaves", page.Leaves[index]); err != nil {
+			return GlobalLeafPage{}, err
+		}
+	}
+	return page, nil
 }
 
 func (c *Client) ListAnchors(ctx context.Context, opts ListPageOptions) (AnchorPage, error) {
-	return c.transport.ListAnchors(ctx, opts)
+	page, err := c.transport.ListAnchors(ctx, opts)
+	if err != nil {
+		return AnchorPage{}, err
+	}
+	for index := range page.Anchors {
+		if page.Anchors[index].Result == nil {
+			continue
+		}
+		if err := c.requireSuite("list anchors", *page.Anchors[index].Result); err != nil {
+			return AnchorPage{}, err
+		}
+	}
+	return page, nil
 }
 
 func (c *Client) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {
-	return c.transport.GetAnchor(ctx, treeSize)
+	status, err := c.transport.GetAnchor(ctx, treeSize)
+	if err != nil {
+		return AnchorStatus{}, err
+	}
+	if status.Result != nil {
+		if err := c.requireSuite("get anchor", *status.Result); err != nil {
+			return AnchorStatus{}, err
+		}
+	}
+	return status, nil
 }
 
 func (c *Client) ListAnchorSystems(ctx context.Context) ([]AnchorSystem, error) {
@@ -433,11 +612,25 @@ func (c *Client) GetAnchorSystemResource(ctx context.Context, systemID, kind, re
 }
 
 func (c *Client) LatestSTH(ctx context.Context) (SignedTreeHead, error) {
-	return c.transport.LatestSTH(ctx)
+	sth, err := c.transport.LatestSTH(ctx)
+	if err != nil {
+		return SignedTreeHead{}, err
+	}
+	if err := c.requireSuite("latest STH", sth); err != nil {
+		return SignedTreeHead{}, err
+	}
+	return sth, nil
 }
 
 func (c *Client) GetSTH(ctx context.Context, treeSize uint64) (SignedTreeHead, error) {
-	return c.transport.GetSTH(ctx, treeSize)
+	sth, err := c.transport.GetSTH(ctx, treeSize)
+	if err != nil {
+		return SignedTreeHead{}, err
+	}
+	if err := c.requireSuite("get STH", sth); err != nil {
+		return SignedTreeHead{}, err
+	}
+	return sth, nil
 }
 
 func (c *Client) ExportSingleProof(ctx context.Context, recordID string) (SingleProof, error) {
@@ -468,4 +661,98 @@ func (c *Client) WriteSingleProofFile(ctx context.Context, recordID, path string
 
 func (c *Client) MetricsRaw(ctx context.Context) (string, error) {
 	return c.transport.MetricsRaw(ctx)
+}
+
+func (c *Client) requireSuite(op string, value any) error {
+	if err := modelsuite.Require(c.cryptoSuite, value); err != nil {
+		return &Error{
+			Op:      op,
+			URL:     c.BaseURL(),
+			Code:    string(trusterr.CodeFailedPrecondition),
+			Message: fmt.Sprintf("response/request crypto_suite does not match client suite %s", c.cryptoSuite),
+			Err:     err,
+		}
+	}
+	return nil
+}
+
+func (c *Client) mismatch(op string, actual CryptoSuite) error {
+	return &Error{
+		Op:      op,
+		URL:     c.BaseURL(),
+		Code:    string(trusterr.CodeFailedPrecondition),
+		Message: fmt.Sprintf("crypto_suite %s does not match client suite %s", actual, c.cryptoSuite),
+	}
+}
+
+func (c *Client) validateSubmitResult(op string, result SubmitResult) error {
+	if result.ServerRecord.SchemaVersion != "" {
+		if err := c.requireSuite(op, result.ServerRecord); err != nil {
+			return err
+		}
+	}
+	if result.AcceptedReceipt.SchemaVersion != "" {
+		if err := c.requireSuite(op, result.AcceptedReceipt); err != nil {
+			return err
+		}
+	}
+	if result.SignedClaim.SchemaVersion != "" {
+		if err := c.requireSuite(op, result.SignedClaim); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) validateRecordStatuses(op string, statuses RecordStatusBatch) error {
+	for index := range statuses.Statuses {
+		if err := c.requireSuite(op, statuses.Statuses[index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) validateStatusRefreshStream(
+	ctx context.Context,
+	events <-chan StatusRefresh,
+	upstreamErrors <-chan error,
+) (<-chan StatusRefresh, <-chan error) {
+	out := make(chan StatusRefresh, 1)
+	errs := make(chan error, 1)
+	ctx = nonNilContext(ctx)
+	go func() {
+		defer close(out)
+		defer close(errs)
+		for events != nil || upstreamErrors != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-events:
+				if !ok {
+					events = nil
+					continue
+				}
+				if err := c.requireSuite("subscribe status refresh", event); err != nil {
+					errs <- err
+					return
+				}
+				select {
+				case out <- event:
+				case <-ctx.Done():
+					return
+				}
+			case err, ok := <-upstreamErrors:
+				if !ok {
+					upstreamErrors = nil
+					continue
+				}
+				if err != nil {
+					errs <- err
+					return
+				}
+			}
+		}
+	}()
+	return out, errs
 }
