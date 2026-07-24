@@ -2,7 +2,6 @@ package wal
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,22 +15,31 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 const (
 	magic                  uint32 = 0x54445731
-	version                uint16 = 1
+	version                uint16 = 2
 	typeAccepted           uint16 = 1
-	headerSize                    = 4 + 2 + 2 + 8 + 8 + 8 + 32 + 4
+	headerSize                    = 4 + 2 + 2 + 8 + 8 + 8 + 32 + 2 + 4
 	crcSize                       = 4
 	recordHashSize                = 32
 	maxPayloadBytes               = 64 << 20
 	maxReusableRecordBytes        = 1 << 20
+	bindingSchema                 = "trustdb.wal-namespace.v2"
+	bindingFormat                 = "trustdb.wal.v2"
+	bindingFileName               = ".trustdb-wal-binding"
+	maxBindingBytes               = 4 << 10
+	bindingTempSuffix             = ".tmp"
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
+var bindingMu sync.Mutex
 
 // ErrAppendReservationInvalidated tells a caller that an earlier FIFO append
 // failed and this request must be retried to obtain a new exact WAL position.
@@ -52,10 +60,14 @@ const (
 	FsyncBatch  = "batch"
 )
 
-// Options controls the behaviour of a directory-mode Writer. A zero Options
-// is safe to use in tests: it disables auto-rotation and keeps everything in
-// a single segment.
+// Options controls the behaviour of a directory-mode Writer. Every V2 WAL
+// namespace is durably bound to one suite, node, log, and storage namespace
+// before the first segment can be published.
 type Options struct {
+	CryptoSuite cryptosuite.ID
+	NodeID      string
+	LogID       string
+	NamespaceID string
 	// MaxSegmentBytes, when > 0, makes Append rotate the active segment as
 	// soon as appending the next record would push the segment past this
 	// byte count. Records are never split across segment boundaries.
@@ -92,6 +104,15 @@ type Options struct {
 	// asynchronous group-commit timer that cannot be returned by Append. It
 	// may run from that timer and must be safe for concurrent use.
 	OnFsyncError func(string, error)
+}
+
+type Binding struct {
+	SchemaVersion string         `cbor:"schema_version"`
+	Format        string         `cbor:"format"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite"`
+	NodeID        string         `cbor:"node_id"`
+	LogID         string         `cbor:"log_id"`
+	NamespaceID   string         `cbor:"storage_namespace_id"`
 }
 
 // segmentFileExt is the on-disk suffix for each WAL segment. Segments are
@@ -137,6 +158,7 @@ type Writer struct {
 	fsyncHook       func(string, time.Duration)
 	fsyncErrorHook  func(string, error)
 	recordBuf       []byte
+	suiteID         cryptosuite.ID
 }
 
 type appendState struct {
@@ -190,6 +212,7 @@ type walFileOps struct {
 	mkdir        func(string, os.FileMode) error
 	openFile     func(string, int, os.FileMode) (*os.File, error)
 	remove       func(string) error
+	replace      func(string, string) error
 	truncateFile func(*os.File, int64) error
 	syncFile     func(*os.File) error
 	syncDir      func(string) error
@@ -202,6 +225,7 @@ func defaultWALFileOps() walFileOps {
 		mkdir:    os.Mkdir,
 		openFile: os.OpenFile,
 		remove:   os.Remove,
+		replace:  os.Rename,
 		truncateFile: func(file *os.File, size int64) error {
 			return file.Truncate(size)
 		},
@@ -212,11 +236,12 @@ func defaultWALFileOps() walFileOps {
 }
 
 type Record struct {
-	Position   model.WALPosition
-	UnixNano   int64
-	Payload    []byte
-	PrevHash   [32]byte
-	RecordHash [32]byte
+	CryptoSuite cryptosuite.ID
+	Position    model.WALPosition
+	UnixNano    int64
+	Payload     []byte
+	PrevHash    [32]byte
+	RecordHash  [32]byte
 }
 
 type InspectResult struct {
@@ -334,6 +359,128 @@ func closeAfterOpenError(file *os.File, operation string, cause error, ops walFi
 	return cause
 }
 
+func bindingForOptions(opts Options) (Binding, error) {
+	suiteID, err := requestedSuite(opts.CryptoSuite)
+	if err != nil {
+		return Binding{}, err
+	}
+	nodeID := strings.TrimSpace(opts.NodeID)
+	logID := strings.TrimSpace(opts.LogID)
+	namespaceID := strings.TrimSpace(opts.NamespaceID)
+	if nodeID == "" || logID == "" || namespaceID == "" {
+		return Binding{}, errors.New("wal: node_id, log_id, and storage namespace identity are required")
+	}
+	return Binding{
+		SchemaVersion: bindingSchema,
+		Format:        bindingFormat,
+		CryptoSuite:   suiteID,
+		NodeID:        nodeID,
+		LogID:         logID,
+		NamespaceID:   namespaceID,
+	}, nil
+}
+
+func validateBinding(stored, expected Binding) error {
+	if stored.SchemaVersion != bindingSchema || stored.Format != bindingFormat {
+		return fmt.Errorf("wal: unsupported namespace binding %q/%q", stored.SchemaVersion, stored.Format)
+	}
+	if stored != expected {
+		return fmt.Errorf(
+			"wal: namespace binding mismatch: stored=(%s,%q,%q,%q) configured=(%s,%q,%q,%q)",
+			stored.CryptoSuite,
+			stored.NodeID,
+			stored.LogID,
+			stored.NamespaceID,
+			expected.CryptoSuite,
+			expected.NodeID,
+			expected.LogID,
+			expected.NamespaceID,
+		)
+	}
+	return nil
+}
+
+func ensureBinding(path string, expected Binding, dataExists bool, ops walFileOps) error {
+	bindingMu.Lock()
+	defer bindingMu.Unlock()
+
+	file, err := ops.openFile(path, os.O_RDONLY, 0)
+	if err == nil {
+		data, readErr := io.ReadAll(io.LimitReader(file, maxBindingBytes+1))
+		closeErr := ops.closeFile(file)
+		if readErr != nil {
+			return fmt.Errorf("wal: read namespace binding: %w", readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("wal: close namespace binding: %w", closeErr)
+		}
+		if len(data) > maxBindingBytes {
+			return fmt.Errorf("wal: namespace binding exceeds %d bytes", maxBindingBytes)
+		}
+		var stored Binding
+		if err := cborx.UnmarshalLimit(data, &stored, maxBindingBytes); err != nil {
+			return fmt.Errorf("wal: decode namespace binding: %w", err)
+		}
+		if err := validateBinding(stored, expected); err != nil {
+			return err
+		}
+		// Re-publish a binding whose previous creator may have returned after
+		// rename but before the directory fsync completed.
+		if err := ops.syncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("wal: sync existing namespace binding directory: %w", err)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("wal: open namespace binding: %w", err)
+	}
+	tempPath := path + bindingTempSuffix
+	tempRemoved := false
+	if err := ops.remove(tempPath); err == nil {
+		tempRemoved = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("wal: remove interrupted namespace binding temp: %w", err)
+	}
+	if tempRemoved {
+		if err := ops.syncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("wal: publish namespace binding temp cleanup: %w", err)
+		}
+	}
+	if dataExists {
+		return errors.New("wal: non-empty V2 namespace has no durable binding")
+	}
+	data, err := cborx.Marshal(expected)
+	if err != nil {
+		return fmt.Errorf("wal: encode namespace binding: %w", err)
+	}
+	file, err = ops.openFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("wal: create namespace binding temp: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = ops.closeFile(file)
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: write namespace binding: %w", err)
+	}
+	if err := ops.syncFile(file); err != nil {
+		_ = ops.closeFile(file)
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: sync namespace binding: %w", err)
+	}
+	if err := ops.closeFile(file); err != nil {
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: close namespace binding: %w", err)
+	}
+	if err := ops.replace(tempPath, path); err != nil {
+		_ = ops.remove(tempPath)
+		return fmt.Errorf("wal: publish namespace binding rename: %w", err)
+	}
+	if err := ops.syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("wal: publish namespace binding: %w", err)
+	}
+	return nil
+}
+
 type segmentChainState struct {
 	trustBoundary bool
 	haveSegment   bool
@@ -432,6 +579,10 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 	if dir == "" {
 		return nil, errors.New("wal: directory path is required")
 	}
+	binding, err := bindingForOptions(opts)
+	if err != nil {
+		return nil, err
+	}
 	if err := ensureDurableDirectory(dir, 0o755, ops); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
@@ -439,6 +590,10 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureBinding(filepath.Join(dir, bindingFileName), binding, len(segments) > 0, ops); err != nil {
+		return nil, err
+	}
+	suiteID := binding.CryptoSuite
 	var (
 		activeSeg uint64
 		sequence  uint64
@@ -473,6 +628,9 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 			}
 			if err := chain.accept(seg, state); err != nil {
 				return nil, err
+			}
+			if state.records > 0 && state.cryptoSuite != suiteID {
+				return nil, fmt.Errorf("wal: segment %d crypto_suite %s does not match configured %s", seg, state.cryptoSuite, suiteID)
 			}
 			if state.records > 0 {
 				last = state
@@ -520,6 +678,7 @@ func openDirWriterWithOps(dir string, opts Options, ops walFileOps) (*Writer, er
 		fsyncHook:      opts.OnFsync,
 		fsyncErrorHook: opts.OnFsyncError,
 		closeDone:      make(chan struct{}),
+		suiteID:        suiteID,
 	}, nil
 }
 
@@ -543,9 +702,22 @@ func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, op
 	if segmentID == 0 {
 		return nil, errors.New("wal: segment id must be greater than zero")
 	}
+	binding, err := bindingForOptions(opts)
+	if err != nil {
+		return nil, err
+	}
 	if err := ensureDurableDirectory(filepath.Dir(path), 0o755, ops); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
+	info, statErr := ops.stat(path)
+	dataExists := statErr == nil && info.Size() > 0
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("wal: stat existing log: %w", statErr)
+	}
+	if err := ensureBinding(path+".binding", binding, dataExists, ops); err != nil {
+		return nil, err
+	}
+	suiteID := binding.CryptoSuite
 	state, err := scanFile(path, false, false)
 	create := errors.Is(err, os.ErrNotExist)
 	if err != nil && !create {
@@ -556,6 +728,9 @@ func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, op
 	}
 	if state.records > 0 && state.segmentID != segmentID {
 		return nil, fmt.Errorf("wal: segment id mismatch: existing %d requested %d", state.segmentID, segmentID)
+	}
+	if state.records > 0 && state.cryptoSuite != suiteID {
+		return nil, fmt.Errorf("wal: crypto_suite %s does not match configured %s", state.cryptoSuite, suiteID)
 	}
 	flags := os.O_RDWR | os.O_APPEND
 	if create {
@@ -591,6 +766,7 @@ func openWriterWithOptionsAndOps(path string, segmentID uint64, opts Options, op
 		fsyncHook:      opts.OnFsync,
 		fsyncErrorHook: opts.OnFsyncError,
 		closeDone:      make(chan struct{}),
+		suiteID:        suiteID,
 	}, nil
 }
 
@@ -816,7 +992,7 @@ func (w *Writer) commitAtExpected(ctx context.Context, payload []byte, at time.T
 	// an oversized record still makes forward progress instead of looping
 	// forever between rotations.
 	nextSeq := w.sequence + 1
-	encoded, recordHash := encodeRecordInto(w.recordBuf, w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
+	encoded, recordHash := encodeRecordIntoForSuite(w.recordBuf, w.suiteID, w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
 	rotate := w.dir != "" && w.maxBytes > 0 && w.offset > 0 && w.offset > w.maxBytes-int64(len(encoded))
 	if rotate {
 		beforeRotate, publish, err := w.rotateLocked()
@@ -830,7 +1006,7 @@ func (w *Writer) commitAtExpected(ctx context.Context, payload []byte, at time.T
 			return model.WALPosition{}, [32]byte{}, err
 		}
 		nextSeq = w.sequence + 1
-		encoded, recordHash = encodeRecordInto(encoded[:0], w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
+		encoded, recordHash = encodeRecordIntoForSuite(encoded[:0], w.suiteID, w.segmentID, nextSeq, at.UTC().UnixNano(), w.prevHash, payload)
 		pos = model.WALPosition{SegmentID: w.segmentID, Offset: w.offset, Sequence: nextSeq}
 	}
 	if cap(encoded) <= maxReusableRecordBytes {
@@ -1760,6 +1936,7 @@ type scanState struct {
 	segmentID     uint64
 	firstPrev     [32]byte // prev-hash expected by the first record in this segment; used to stitch chains
 	lastHash      [32]byte
+	cryptoSuite   cryptosuite.ID
 }
 
 func scanFile(path string, tolerateTail, collect bool) (scanState, error) {
@@ -1816,7 +1993,11 @@ func scanFileVisit(path string, tolerateTail bool, startPrev [32]byte, visit fun
 			state.firstSequence = rec.Position.Sequence
 			state.segmentID = rec.Position.SegmentID
 			state.firstPrev = rec.PrevHash
+			state.cryptoSuite = rec.CryptoSuite
 		} else {
+			if rec.CryptoSuite != state.cryptoSuite {
+				return scanState{}, fmt.Errorf("wal: mixed crypto_suite at offset %d", offset)
+			}
 			if rec.Position.SegmentID != state.segmentID {
 				if tolerateTail {
 					return state, nil
@@ -1850,10 +2031,14 @@ type recordReadFrame struct {
 }
 
 func encodeRecord(segmentID, sequence uint64, unixNano int64, prevHash [32]byte, payload []byte) ([]byte, [32]byte) {
-	return encodeRecordInto(nil, segmentID, sequence, unixNano, prevHash, payload)
+	return encodeRecordIntoForSuite(nil, cryptosuite.INTLV1, segmentID, sequence, unixNano, prevHash, payload)
 }
 
 func encodeRecordInto(buf []byte, segmentID, sequence uint64, unixNano int64, prevHash [32]byte, payload []byte) ([]byte, [32]byte) {
+	return encodeRecordIntoForSuite(buf, cryptosuite.INTLV1, segmentID, sequence, unixNano, prevHash, payload)
+}
+
+func encodeRecordIntoForSuite(buf []byte, suiteID cryptosuite.ID, segmentID, sequence uint64, unixNano int64, prevHash [32]byte, payload []byte) ([]byte, [32]byte) {
 	total := headerSize + len(payload) + crcSize + recordHashSize
 	if cap(buf) < total {
 		buf = make([]byte, total)
@@ -1867,12 +2052,16 @@ func encodeRecordInto(buf []byte, segmentID, sequence uint64, unixNano int64, pr
 	binary.BigEndian.PutUint64(buf[16:24], sequence)
 	binary.BigEndian.PutUint64(buf[24:32], uint64(unixNano))
 	copy(buf[32:64], prevHash[:])
-	binary.BigEndian.PutUint32(buf[64:68], uint32(len(payload)))
-	copy(buf[68:68+len(payload)], payload)
-	crcOffset := 68 + len(payload)
+	binary.BigEndian.PutUint16(buf[64:66], suiteCode(suiteID))
+	binary.BigEndian.PutUint32(buf[66:70], uint32(len(payload)))
+	copy(buf[70:70+len(payload)], payload)
+	crcOffset := 70 + len(payload)
 	crc := crc32.Checksum(buf[:crcOffset], crcTable)
 	binary.BigEndian.PutUint32(buf[crcOffset:crcOffset+4], crc)
-	sum := sha256.Sum256(buf[:crcOffset+4])
+	sum, err := walHash(suiteID, buf[:crcOffset+4])
+	if err != nil {
+		panic(err)
+	}
 	copy(buf[crcOffset+4:], sum[:])
 	return buf, sum
 }
@@ -1904,7 +2093,11 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 	if prev != expectedPrev {
 		return Record{}, 0, fmt.Errorf("%w: hash chain mismatch at offset %d", errCorruptRecord, offset)
 	}
-	payloadLen := binary.BigEndian.Uint32(header[64:68])
+	suiteID, err := suiteFromCode(binary.BigEndian.Uint16(header[64:66]))
+	if err != nil {
+		return Record{}, 0, fmt.Errorf("%w: crypto_suite at offset %d: %v", errUnsupportedRecord, offset, err)
+	}
+	payloadLen := binary.BigEndian.Uint32(header[66:70])
 	if payloadLen == 0 {
 		return Record{}, 0, fmt.Errorf("%w: empty payload at offset %d", errCorruptRecord, offset)
 	}
@@ -1933,12 +2126,14 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 	if gotCRC != wantCRC {
 		return Record{}, 0, fmt.Errorf("%w: crc mismatch at offset %d", errCorruptRecord, offset)
 	}
-	h := sha256.New()
-	_, _ = h.Write(header)
-	_, _ = h.Write(payload)
-	_, _ = h.Write(trailer[:4])
-	var gotHash [recordHashSize]byte
-	h.Sum(gotHash[:0])
+	hashInput := make([]byte, 0, len(header)+len(payload)+4)
+	hashInput = append(hashInput, header...)
+	hashInput = append(hashInput, payload...)
+	hashInput = append(hashInput, trailer[:4]...)
+	gotHash, err := walHash(suiteID, hashInput)
+	if err != nil {
+		return Record{}, 0, fmt.Errorf("%w: storage hash at offset %d: %v", errUnsupportedRecord, offset, err)
+	}
 	var storedHash [32]byte
 	copy(storedHash[:], trailer[4:])
 	if gotHash != storedHash {
@@ -1948,6 +2143,7 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 	segmentID := binary.BigEndian.Uint64(header[8:16])
 	unixNano := int64(binary.BigEndian.Uint64(header[24:32]))
 	return Record{
+		CryptoSuite: suiteID,
 		Position: model.WALPosition{
 			SegmentID: segmentID,
 			Offset:    offset,
@@ -1958,4 +2154,51 @@ func readOneWithFrame(r io.Reader, offset int64, expectedPrev [32]byte, frame *r
 		PrevHash:   prev,
 		RecordHash: storedHash,
 	}, int64(headerSize + len(payload) + crcSize + recordHashSize), nil
+}
+
+func requestedSuite(suiteID cryptosuite.ID) (cryptosuite.ID, error) {
+	if suiteID == "" {
+		suiteID = cryptosuite.INTLV1
+	}
+	if _, err := cryptosuite.RequireAvailable(suiteID); err != nil {
+		return "", fmt.Errorf("wal: crypto_suite: %w", err)
+	}
+	return suiteID, nil
+}
+
+func suiteCode(suiteID cryptosuite.ID) uint16 {
+	switch suiteID {
+	case cryptosuite.INTLV1:
+		return 1
+	case cryptosuite.CNSMV1:
+		return 2
+	default:
+		panic("wal: unregistered crypto suite")
+	}
+}
+
+func suiteFromCode(code uint16) (cryptosuite.ID, error) {
+	switch code {
+	case 1:
+		return cryptosuite.INTLV1, nil
+	case 2:
+		return cryptosuite.CNSMV1, nil
+	default:
+		return "", fmt.Errorf("unknown suite code %d", code)
+	}
+}
+
+func walHash(suiteID cryptosuite.ID, data []byte) ([recordHashSize]byte, error) {
+	suite, err := cryptosuite.RequireAvailable(suiteID)
+	if err != nil {
+		return [recordHashSize]byte{}, err
+	}
+	factory, err := trustcrypto.HashFactoryForSuite(suiteID, suite.StorageIntegrityHash.Algorithm)
+	if err != nil {
+		return [recordHashSize]byte{}, err
+	}
+	if factory.Size() != recordHashSize {
+		return [recordHashSize]byte{}, fmt.Errorf("storage hash size %d, want %d", factory.Size(), recordHashSize)
+	}
+	return factory.Sum32(data), nil
 }

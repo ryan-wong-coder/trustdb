@@ -14,7 +14,7 @@ func TestWriterReadAllRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	w, err := OpenWriter(path, 1)
+	w, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -51,7 +51,7 @@ func TestReadAllRejectsCorruptCRC(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	w, err := OpenWriter(path, 1)
+	w, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -78,7 +78,7 @@ func TestOpenWriterAppendsExistingWAL(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	w, err := OpenWriter(path, 1)
+	w, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
@@ -89,7 +89,7 @@ func TestOpenWriterAppendsExistingWAL(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	w, err = OpenWriter(path, 1)
+	w, err = OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("reopen OpenWriter() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestInspectAndRepairTruncatedTail(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "000000000001.wal")
-	w, err := OpenWriter(path, 1)
+	w, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}

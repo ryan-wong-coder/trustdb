@@ -17,7 +17,7 @@ func TestRepairDirNoOpWhenClean(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -63,7 +63,7 @@ func TestRepairDirTruncatesTailGarbage(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -132,7 +132,7 @@ func TestRepairDirTruncatesTailGarbage(t *testing.T) {
 
 	// The writer should be able to reopen the directory and continue with
 	// a contiguous sequence.
-	w2, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w2, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() after repair error = %v", err)
 	}
@@ -155,7 +155,7 @@ func TestRepairDirRejectsNonTailCorruption(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}

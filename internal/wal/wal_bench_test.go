@@ -28,7 +28,7 @@ func TestEncodeRecordIntoReusesBuffer(t *testing.T) {
 }
 
 func TestWriterDoesNotRetainOversizedRecordBuffer(t *testing.T) {
-	w, err := OpenDirWriter(t.TempDir(), Options{FsyncMode: FsyncBatch})
+	w, err := OpenDirWriter(t.TempDir(), testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,10 +44,11 @@ func TestWriterDoesNotRetainOversizedRecordBuffer(t *testing.T) {
 }
 
 func BenchmarkWALAppendGroup(b *testing.B) {
-	w, err := OpenDirWriter(b.TempDir(), Options{
+	w, err := OpenDirWriter(b.TempDir(), testWALOptions(Options{
 		FsyncMode:           FsyncGroup,
 		GroupCommitInterval: time.Hour,
-	})
+	}))
+
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func BenchmarkWALAppendGroup(b *testing.B) {
 
 func BenchmarkWALRecoveryScan1024(b *testing.B) {
 	path := b.TempDir() + "/recovery.wal"
-	w, err := OpenWriterWithOptions(path, 1, Options{FsyncMode: FsyncBatch})
+	w, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		b.Fatal(err)
 	}

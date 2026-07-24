@@ -189,13 +189,13 @@ func TestWriterStartupPublishesFileAndRetriesExistingDirectoryBarrier(t *testing
 		{
 			name: "directory mode",
 			open: func(root string, ops walFileOps) (*Writer, error) {
-				return openDirWriterWithOps(filepath.Join(root, "wal"), Options{FsyncMode: FsyncBatch}, ops)
+				return openDirWriterWithOps(filepath.Join(root, "wal"), testWALOptions(Options{FsyncMode: FsyncBatch}), ops)
 			},
 		},
 		{
 			name: "single file",
 			open: func(root string, ops walFileOps) (*Writer, error) {
-				return openWriterWithOptionsAndOps(filepath.Join(root, "wal", "records.wal"), 1, Options{FsyncMode: FsyncBatch}, ops)
+				return openWriterWithOptionsAndOps(filepath.Join(root, "wal", "records.wal"), 1, testWALOptions(Options{FsyncMode: FsyncBatch}), ops)
 			},
 		},
 	}
@@ -260,13 +260,13 @@ func TestWriterStartupDirectorySyncFailureClosesFile(t *testing.T) {
 		{
 			name: "directory mode",
 			open: func(root string, ops walFileOps) (*Writer, error) {
-				return openDirWriterWithOps(root, Options{}, ops)
+				return openDirWriterWithOps(root, testWALOptions(Options{}), ops)
 			},
 		},
 		{
 			name: "single file",
 			open: func(root string, ops walFileOps) (*Writer, error) {
-				return openWriterWithOptionsAndOps(filepath.Join(root, "records.wal"), 1, Options{}, ops)
+				return openWriterWithOptionsAndOps(filepath.Join(root, "records.wal"), 1, testWALOptions(Options{}), ops)
 			},
 		},
 	}
@@ -296,7 +296,7 @@ func TestWriterStartupDirectorySyncFailureClosesFile(t *testing.T) {
 			if _, err := opened.Stat(); err == nil {
 				t.Fatal("opened file remains usable after failed startup")
 			}
-			if !strings.Contains(err.Error(), "sync containing directory") {
+			if !strings.Contains(err.Error(), "publish namespace binding") {
 				t.Fatalf("error lacks directory-sync context: %v", err)
 			}
 		})
@@ -335,14 +335,17 @@ func TestRotationDirectorySyncFailureIsSticky(t *testing.T) {
 		closeCalls.Add(1)
 		return file.Close()
 	}
-	writer, err := openDirWriterWithOps(dir, Options{
+	writer, err := openDirWriterWithOps(dir, testWALOptions(Options{
 		FsyncMode:       FsyncBatch,
 		MaxSegmentBytes: 1,
 		OnRotate:        func(uint64, uint64) { rotateCalls.Add(1) },
 		OnFsyncError: func(string, error) {
 			reported.Add(1)
 		},
-	}, ops)
+	}),
+
+		ops)
+
 	if err != nil {
 		t.Fatalf("openDirWriterWithOps() error = %v", err)
 	}
@@ -418,10 +421,11 @@ func TestRotationPreservesDirectorySyncAndCleanupCloseErrors(t *testing.T) {
 		}
 		return nil
 	}
-	writer, err := openDirWriterWithOps(dir, Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 1}, ops)
+	writer, err := openDirWriterWithOps(dir, testWALOptions(Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 1}), ops)
 	if err != nil {
 		t.Fatalf("openDirWriterWithOps() error = %v", err)
 	}
+	closeCalls.Store(0)
 	appendTestRecord(t, writer, "first")
 	failDirectory.Store(true)
 	_, _, err = writer.Append(context.Background(), []byte("force rotation"))
@@ -443,7 +447,7 @@ func TestOpenDirWriterRecoversEmptyHighestSegmentAtZeroOffset(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	writer, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch})
+	writer, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -462,7 +466,7 @@ func TestOpenDirWriterRecoversEmptyHighestSegmentAtZeroOffset(t *testing.T) {
 		t.Fatalf("close empty highest segment: %v", err)
 	}
 
-	reopened, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 1})
+	reopened, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 1}))
 	if err != nil {
 		t.Fatalf("reopen OpenDirWriter() error = %v", err)
 	}
@@ -494,7 +498,7 @@ func TestAppendSyncsDirectoryOnlyOnRotation(t *testing.T) {
 		syncDirCalls.Add(1)
 		return syncDirectory(path)
 	}
-	writer, err := openDirWriterWithOps(t.TempDir(), Options{FsyncMode: FsyncBatch}, ops)
+	writer, err := openDirWriterWithOps(t.TempDir(), testWALOptions(Options{FsyncMode: FsyncBatch}), ops)
 	if err != nil {
 		t.Fatalf("openDirWriterWithOps() error = %v", err)
 	}
@@ -635,7 +639,7 @@ func TestPrunedSuffixSupportsEveryRecoveryAPI(t *testing.T) {
 		t.Fatal("RepairDir() mutated valid retained tail")
 	}
 
-	writer, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 500})
+	writer, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() after prune error = %v", err)
 	}
@@ -655,7 +659,7 @@ func TestPrunedSuffixSkipsLeadingEmptySegmentBeforeBoundarySeed(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	writer, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch})
+	writer, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -690,7 +694,7 @@ func TestPrunedSuffixSkipsLeadingEmptySegmentBeforeBoundarySeed(t *testing.T) {
 	if repair, err := RepairDir(dir); err != nil || repair.TailRepair.Repaired {
 		t.Fatalf("RepairDir() = (%+v, %v), want no-op", repair, err)
 	}
-	reopened, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch})
+	reopened, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() after empty boundary error = %v", err)
 	}
@@ -717,7 +721,7 @@ func TestRecoveryAPIsRejectInternalSegmentGap(t *testing.T) {
 		run  func() error
 	}{
 		{name: "open writer", run: func() error {
-			writer, err := OpenDirWriter(dir, Options{})
+			writer, err := OpenDirWriter(dir, testWALOptions(Options{}))
 			if writer != nil {
 				_ = writer.Close()
 			}
@@ -753,7 +757,7 @@ func TestSegmentNamedSymlinkIsRejectedWithoutMutatingTarget(t *testing.T) {
 	if _, err := ListSegments(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("ListSegments() error = %v, want non-regular rejection", err)
 	}
-	if writer, err := OpenDirWriter(dir, Options{}); err == nil {
+	if writer, err := OpenDirWriter(dir, testWALOptions(Options{})); err == nil {
 		_ = writer.Close()
 		t.Fatal("OpenDirWriter() accepted segment-named symlink")
 	}
@@ -798,7 +802,7 @@ func TestRepairDirRejectsGapBeforeTailWithoutMutation(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	writer, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch})
+	writer, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -842,6 +846,7 @@ func TestRepairDirTruncatesTornFirstHeaderAtRetainedBoundary(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	writeTestDirBinding(t, dir, Options{})
 	tailPath := filepath.Join(dir, segmentName(7))
 	partialHeader := bytes.Repeat([]byte{0xff}, headerSize-1)
 	if err := os.WriteFile(tailPath, partialHeader, 0o600); err != nil {
@@ -850,7 +855,7 @@ func TestRepairDirTruncatesTornFirstHeaderAtRetainedBoundary(t *testing.T) {
 	if _, err := ReadAllDir(dir); err == nil {
 		t.Fatal("ReadAllDir() accepted partial first header before repair")
 	}
-	if writer, err := OpenDirWriter(dir, Options{}); err == nil {
+	if writer, err := OpenDirWriter(dir, testWALOptions(Options{})); err == nil {
 		_ = writer.Close()
 		t.Fatal("OpenDirWriter() accepted partial first header before repair")
 	}
@@ -866,7 +871,7 @@ func TestRepairDirTruncatesTornFirstHeaderAtRetainedBoundary(t *testing.T) {
 	if err != nil || info.Size() != 0 {
 		t.Fatalf("repaired tail = (%v, %v), want zero bytes", info, err)
 	}
-	reopened, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch})
+	reopened, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() after repair error = %v", err)
 	}
@@ -934,7 +939,7 @@ func TestDirectoryTailRepairsWithinFilePositionViolations(t *testing.T) {
 			if _, err := InspectDir(dir); err == nil {
 				t.Fatal("InspectDir() accepted position violation")
 			}
-			if writer, err := OpenDirWriter(dir, Options{}); err == nil {
+			if writer, err := OpenDirWriter(dir, testWALOptions(Options{})); err == nil {
 				_ = writer.Close()
 				t.Fatal("OpenDirWriter() accepted position violation")
 			}
@@ -1036,7 +1041,7 @@ func TestFreshChainsRequireSequenceOne(t *testing.T) {
 		if _, err := Inspect(path); err == nil {
 			t.Fatal("Inspect() accepted sequence 42 fresh chain")
 		}
-		if writer, err := OpenWriter(path, 1); err == nil {
+		if writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{})); err == nil {
 			_ = writer.Close()
 			t.Fatal("OpenWriter() accepted sequence 42 fresh chain")
 		}
@@ -1078,7 +1083,7 @@ func TestStrictRecoveryRejectsExactPayloadAndTrailerEOF(t *testing.T) {
 			if _, err := Inspect(path); err == nil {
 				t.Fatal("Inspect() accepted exact EOF inside record")
 			}
-			if writer, err := OpenWriter(path, 1); err == nil {
+			if writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{})); err == nil {
 				_ = writer.Close()
 				t.Fatal("OpenWriter() accepted exact EOF inside record")
 			}
@@ -1089,7 +1094,7 @@ func TestStrictRecoveryRejectsExactPayloadAndTrailerEOF(t *testing.T) {
 			if !result.Repaired || result.TruncatedBytes != int64(test.cut) {
 				t.Fatalf("Repair() result = %+v, want full truncation", result)
 			}
-			writer, err := OpenWriterWithOptions(path, 1, Options{FsyncMode: FsyncBatch})
+			writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{FsyncMode: FsyncBatch}))
 			if err != nil {
 				t.Fatalf("OpenWriter() after repair error = %v", err)
 			}
@@ -1146,13 +1151,14 @@ func TestWriterRejectsSequenceAndSegmentIDExhaustion(t *testing.T) {
 
 	t.Run("sequence", func(t *testing.T) {
 		dir := t.TempDir()
+		writeTestDirBinding(t, dir, Options{})
 		prev := [32]byte{1}
 		record, _ := encodeRecord(7, ^uint64(0), 1, prev, []byte("last sequence"))
 		path := filepath.Join(dir, segmentName(7))
 		if err := os.WriteFile(path, record, 0o600); err != nil {
 			t.Fatalf("write exhausted sequence fixture: %v", err)
 		}
-		writer, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch})
+		writer, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch}))
 		if err != nil {
 			t.Fatalf("OpenDirWriter() error = %v", err)
 		}
@@ -1171,7 +1177,7 @@ func TestWriterRejectsSequenceAndSegmentIDExhaustion(t *testing.T) {
 
 	t.Run("segment id", func(t *testing.T) {
 		dir := t.TempDir()
-		writer, err := OpenDirWriter(dir, Options{InitialSegmentID: ^uint64(0), MaxSegmentBytes: 1, FsyncMode: FsyncBatch})
+		writer, err := OpenDirWriter(dir, testWALOptions(Options{InitialSegmentID: ^uint64(0), MaxSegmentBytes: 1, FsyncMode: FsyncBatch}))
 		if err != nil {
 			t.Fatalf("OpenDirWriter() error = %v", err)
 		}
@@ -1191,7 +1197,7 @@ func TestWriterRejectsSequenceAndSegmentIDExhaustion(t *testing.T) {
 	t.Run("offset addition", func(t *testing.T) {
 		dir := t.TempDir()
 		const maxInt64 = int64(^uint64(0) >> 1)
-		writer, err := OpenDirWriter(dir, Options{MaxSegmentBytes: maxInt64, FsyncMode: FsyncBatch})
+		writer, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: maxInt64, FsyncMode: FsyncBatch}))
 		if err != nil {
 			t.Fatalf("OpenDirWriter() error = %v", err)
 		}
@@ -1349,7 +1355,7 @@ func TestRepairSynchronizesCleanAndTruncatedFiles(t *testing.T) {
 
 func writeSegmentedWAL(t *testing.T, dir string, count int) []uint64 {
 	t.Helper()
-	writer, err := OpenDirWriter(dir, Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 500})
+	writer, err := OpenDirWriter(dir, testWALOptions(Options{FsyncMode: FsyncBatch, MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -1375,7 +1381,7 @@ func writeSegmentedWAL(t *testing.T, dir string, count int) []uint64 {
 func writeSingleFileWAL(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "records.wal")
-	writer, err := OpenWriterWithOptions(path, 1, Options{FsyncMode: FsyncBatch})
+	writer, err := OpenWriterWithOptions(path, 1, testWALOptions(Options{FsyncMode: FsyncBatch}))
 	if err != nil {
 		t.Fatalf("OpenWriterWithOptions() error = %v", err)
 	}

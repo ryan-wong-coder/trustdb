@@ -16,7 +16,7 @@ func TestOpenDirWriterCreatesInitialSegment(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -43,7 +43,7 @@ func TestOpenDirWriterHonorsInitialSegmentID(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{InitialSegmentID: 7})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{InitialSegmentID: 7}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -63,7 +63,7 @@ func TestWriterAutoRotatesOnMaxBytes(t *testing.T) {
 	dir := t.TempDir()
 	// Payloads of ~200 bytes each; MaxSegmentBytes set so that two records
 	// fit per segment, forcing rotation on the third.
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 700})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 700}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -119,7 +119,7 @@ func TestReadAllDirFromSkipsEarlySegments(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -160,7 +160,7 @@ func TestScanDirFromStreamsLikeReadAllDirFrom(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -207,7 +207,7 @@ func TestOpenDirWriterResumesAfterRestart(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -226,7 +226,7 @@ func TestOpenDirWriterResumesAfterRestart(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	w2, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w2, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("reopen OpenDirWriter() error = %v", err)
 	}
@@ -273,7 +273,7 @@ func TestReadAllDirDetectsHashChainBreak(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -317,7 +317,7 @@ func TestOpenDirWriterRejectsChainBreakOnOpen(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -345,7 +345,7 @@ func TestOpenDirWriterRejectsChainBreakOnOpen(t *testing.T) {
 	if err := os.WriteFile(firstSeg, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	if _, err := OpenDirWriter(dir, Options{}); err == nil {
+	if _, err := OpenDirWriter(dir, testWALOptions(Options{})); err == nil {
 		t.Fatal("OpenDirWriter() error = nil, want scan failure on corrupted segment")
 	}
 }
@@ -382,7 +382,7 @@ func TestWriterRotatesPastOversizedRecord(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 100})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 100}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -416,7 +416,7 @@ func TestPruneSegmentsBeforeDeletesEarlySegments(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
@@ -472,7 +472,7 @@ func TestPruneSegmentsBeforeIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	w, err := OpenDirWriter(dir, Options{MaxSegmentBytes: 500})
+	w, err := OpenDirWriter(dir, testWALOptions(Options{MaxSegmentBytes: 500}))
 	if err != nil {
 		t.Fatalf("OpenDirWriter() error = %v", err)
 	}
