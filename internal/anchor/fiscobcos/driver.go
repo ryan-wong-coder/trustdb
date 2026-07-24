@@ -24,6 +24,77 @@ var (
 	ErrExistingAnchorEvidenceUnavailable = errors.New("existing FISCO BCOS anchor requires immutable transaction evidence recovery")
 )
 
+// ReceiptStatusDisposition is the pinned FISCO BCOS v3.16.3 interpretation of
+// a non-success transaction receipt. It is deliberately more precise than the
+// scheduler's three failure classes so block-limit refresh and deterministic
+// duplicate lookup can be implemented by #470 without changing this boundary.
+type ReceiptStatusDisposition string
+
+const (
+	ReceiptStatusSucceeded  ReceiptStatusDisposition = "succeeded"
+	ReceiptStatusPermanent  ReceiptStatusDisposition = "permanent"
+	ReceiptStatusRetryable  ReceiptStatusDisposition = "retryable"
+	ReceiptStatusBlockLimit ReceiptStatusDisposition = "block_limit"
+	ReceiptStatusDuplicate  ReceiptStatusDisposition = "duplicate"
+	ReceiptStatusAmbiguous  ReceiptStatusDisposition = "ambiguous"
+)
+
+type ReceiptStatusError struct {
+	Status      int
+	Disposition ReceiptStatusDisposition
+}
+
+func (e *ReceiptStatusError) Error() string {
+	if e == nil {
+		return ErrInvalidReceiptStatus.Error()
+	}
+	return fmt.Sprintf("%s: status=%d disposition=%s", ErrInvalidReceiptStatus, e.Status, e.Disposition)
+}
+
+func (*ReceiptStatusError) Unwrap() error { return ErrInvalidReceiptStatus }
+
+func NewReceiptStatusError(status int) *ReceiptStatusError {
+	return &ReceiptStatusError{Status: status, Disposition: ClassifyReceiptStatus(status)}
+}
+
+func (e *ReceiptStatusError) FailureClass() FailureClass {
+	if e != nil && e.Disposition == ReceiptStatusPermanent {
+		return FailurePermanent
+	}
+	if e != nil && (e.Disposition == ReceiptStatusRetryable || e.Disposition == ReceiptStatusBlockLimit) {
+		return FailureTransient
+	}
+	return FailureAmbiguous
+}
+
+// ClassifyReceiptStatus uses the receipt codes pinned by Go SDK v3.0.2 and the
+// FISCO BCOS v3.16.3 node baseline. Unknown/reserved codes remain ambiguous.
+func ClassifyReceiptStatus(status int) ReceiptStatusDisposition {
+	switch status {
+	case 0:
+		return ReceiptStatusSucceeded
+	case 1, 10010:
+		// "unknown" and transaction-pool timeout do not prove whether the
+		// transaction was accepted or propagated.
+		return ReceiptStatusAmbiguous
+	case 10001:
+		return ReceiptStatusBlockLimit
+	case 10002:
+		return ReceiptStatusRetryable
+	case 10000, 10004, 10005, 10011:
+		// Nonce/duplicate responses require deterministic lookup of the exact
+		// immutable attempt before any replacement is permitted (#470).
+		return ReceiptStatusDuplicate
+	case 2, 7,
+		10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+		32, 33, 34, 35,
+		10003, 10006, 10007, 10008, 10009:
+		return ReceiptStatusPermanent
+	default:
+		return ReceiptStatusAmbiguous
+	}
+}
+
 // FailureClass is intentionally small and stable. The anchor worker maps
 // permanent failures to anchor.ErrPermanent and retries transient failures
 // without replacing its immutable InFlight STH.

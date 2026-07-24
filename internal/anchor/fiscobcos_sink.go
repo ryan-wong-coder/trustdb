@@ -203,7 +203,14 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 		return model.STHAnchorResult{}, ambiguousDriverFailure("get_receipt_with_proof", s.drivers[0].Endpoint(), err)
 	}
 	if receipt.Status != fiscobcos.ReceiptStatusOK {
-		return model.STHAnchorResult{}, ambiguousDriverFailure("validate_receipt_status", s.drivers[0].Endpoint(), fiscobcos.ErrInvalidReceiptStatus)
+		statusErr := fiscobcos.NewReceiptStatusError(receipt.Status)
+		classified := &fiscobcos.DriverError{
+			Operation: "validate_receipt_status",
+			Endpoint:  s.drivers[0].Endpoint(),
+			Class:     statusErr.FailureClass(),
+			Kind:      statusErr,
+		}
+		return model.STHAnchorResult{}, mapSinkError(classified)
 	}
 	if err := validateReceipt(s.trust, payload, submission.Attempt, receipt, records[0]); err != nil {
 		return model.STHAnchorResult{}, ambiguousDriverFailure("validate_receipt", s.drivers[0].Endpoint(), err)

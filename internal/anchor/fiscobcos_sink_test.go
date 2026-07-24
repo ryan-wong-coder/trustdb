@@ -484,17 +484,92 @@ func (d *attemptMismatchDriver) SubmitAnchor(ctx context.Context, request fiscob
 	return submission, err
 }
 
-func TestFISCOBCOSPostSubmitValidationFailuresRemainRecoverOnly(t *testing.T) {
+type classifiedReceiptSubmitDriver struct {
+	*fakeBCOSDriver
+	status int
+}
+
+func (d *classifiedReceiptSubmitDriver) SubmitAnchor(context.Context, fiscobcos.SubmitRequest) (fiscobcos.Submission, error) {
+	statusErr := fiscobcos.NewReceiptStatusError(d.status)
+	return fiscobcos.Submission{}, &fiscobcos.DriverError{
+		Operation: "submit_anchor_receipt",
+		Endpoint:  d.endpoint,
+		Class:     statusErr.FailureClass(),
+		Kind:      statusErr,
+	}
+}
+
+func TestFISCOBCOSReceiptStatusDispositionControlsServiceRetry(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		terminal bool
+	}{
+		{name: "contract revert", status: 16, terminal: true},
+		{name: "permission denied", status: 18, terminal: true},
+		{name: "invalid chain", status: 10006, terminal: true},
+		{name: "invalid group", status: 10007, terminal: true},
+		{name: "invalid signature", status: 10008, terminal: true},
+		{name: "block limit", status: 10001},
+		{name: "transaction pool full", status: 10002},
+		{name: "duplicate in pool", status: 10004},
+		{name: "duplicate in chain", status: 10005},
+		{name: "pool timeout", status: 10010},
+		{name: "unknown status", status: 99999},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			trust, drivers := fakeBCOSFixture(t)
+			base := drivers[0].(*fakeBCOSDriver)
+			drivers[0] = &classifiedReceiptSubmitDriver{fakeBCOSDriver: base, status: test.status}
+			sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := proofstore.LocalStore{Root: t.TempDir()}
+			key := testScheduleKey(fiscobcos.SinkName)
+			sth := testSTH(key, 14, 0x1e)
+			offer(t, store, key, sth, 100, 100)
+			now := time.Unix(0, 100)
+			service := newTestService(t, store, sink, key, &now, func(config *Config) {
+				config.InitialBackoff = time.Nanosecond
+				config.MaxBackoff = time.Nanosecond
+			})
+			service.tick(context.Background())
+
+			schedule, found, err := store.GetSTHAnchorSchedule(context.Background(), key)
+			if err != nil || !found || schedule.InFlight == nil {
+				t.Fatalf("schedule=%+v found=%v err=%v", schedule, found, err)
+			}
+			if schedule.InFlight.TerminalFailure != test.terminal || schedule.InFlight.Attempts != 1 {
+				t.Fatalf("status=%d terminal=%v attempts=%d, want terminal=%v attempts=1",
+					test.status, schedule.InFlight.TerminalFailure, schedule.InFlight.Attempts, test.terminal)
+			}
+			if !test.terminal && schedule.InFlight.NextAttemptUnixN == 0 {
+				t.Fatalf("status=%d was not durably scheduled for retry/recovery", test.status)
+			}
+			base.state.mu.Lock()
+			defer base.state.mu.Unlock()
+			if base.state.submitCalls != 0 {
+				t.Fatalf("status-classification fixture produced a side effect: calls=%d", base.state.submitCalls)
+			}
+		})
+	}
+}
+
+func TestFISCOBCOSPostSubmitValidationFailuresAreClassified(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		wrap func(*fakeBCOSDriver) fiscobcos.Driver
+		name     string
+		wrap     func(*fakeBCOSDriver) fiscobcos.Driver
+		terminal bool
 	}{
 		{name: "missing receipt proofs", wrap: func(driver *fakeBCOSDriver) fiscobcos.Driver {
 			return &receiptOnlyDriver{fakeBCOSDriver: driver}
 		}},
 		{name: "invalid receipt status", wrap: func(driver *fakeBCOSDriver) fiscobcos.Driver {
 			return &statusMismatchDriver{fakeBCOSDriver: driver}
-		}},
+		}, terminal: true},
 		{name: "submission identity mismatch", wrap: func(driver *fakeBCOSDriver) fiscobcos.Driver {
 			return &attemptMismatchDriver{fakeBCOSDriver: driver}
 		}},
@@ -522,8 +597,9 @@ func TestFISCOBCOSPostSubmitValidationFailuresRemainRecoverOnly(t *testing.T) {
 			service = newTestService(t, store, sink, key, &now, nil)
 			service.tick(context.Background())
 			schedule, found, err := store.GetSTHAnchorSchedule(context.Background(), key)
-			if err != nil || !found || schedule.InFlight == nil || schedule.InFlight.TerminalFailure {
-				t.Fatalf("schedule=%+v found=%v error=%v, want recover-only InFlight", schedule, found, err)
+			if err != nil || !found || schedule.InFlight == nil ||
+				schedule.InFlight.TerminalFailure != test.terminal {
+				t.Fatalf("schedule=%+v found=%v error=%v, want terminal=%v", schedule, found, err, test.terminal)
 			}
 			base.state.mu.Lock()
 			defer base.state.mu.Unlock()

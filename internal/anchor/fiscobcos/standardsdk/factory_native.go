@@ -215,9 +215,18 @@ func (d *nativeDriver) SubmitAnchor(ctx context.Context, request fiscobcos.Submi
 		}
 	}
 	if err := validateSubmittedReceipt(receipt, digest, d.sender, d.trust.Contract.Address, callData); err != nil {
+		statusErr := fiscobcos.NewReceiptStatusError(receipt.Status)
+		if !errors.Is(err, fiscobcos.ErrInvalidReceiptStatus) {
+			statusErr = nil
+		}
+		class := fiscobcos.FailureAmbiguous
+		if statusErr != nil {
+			class = statusErr.FailureClass()
+			err = statusErr
+		}
 		return fiscobcos.Submission{}, &fiscobcos.DriverError{
 			Operation: "submit_anchor_receipt", Endpoint: d.endpoint,
-			Class: fiscobcos.FailureAmbiguous, Kind: err,
+			Class: class, Kind: err,
 		}
 	}
 	return fiscobcos.Submission{Attempt: fiscobcos.TransactionSubmission{
@@ -429,7 +438,7 @@ func validateSubmittedReceipt(receipt *types.Receipt, digest, sender, contract, 
 		return fiscobcos.ErrIncompleteChainEvidence
 	}
 	if receipt.Status != types.Success {
-		return fmt.Errorf("%w: %s", fiscobcos.ErrInvalidReceiptStatus, boundedReceiptStatus(receipt.Status))
+		return fiscobcos.NewReceiptStatusError(receipt.Status)
 	}
 	transactionHash, err := strictHex32(receipt.TransactionHash)
 	if err != nil || !bytes.Equal(transactionHash, digest) {
