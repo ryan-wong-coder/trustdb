@@ -2,7 +2,11 @@ package grpcapi
 
 import "github.com/wowtrust/trustdb/internal/model"
 
-const MaxMessageBytes = 16 << 20
+const (
+	MaxMessageBytes      = 16 << 20
+	MaxCBORArrayElements = 4096
+	MaxCBORMapPairs      = 4096
+)
 
 const ServiceName = "trustdb.v2.TrustDB"
 

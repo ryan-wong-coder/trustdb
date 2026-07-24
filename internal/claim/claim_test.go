@@ -3,6 +3,7 @@ package claim
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -97,6 +98,33 @@ func TestVerifyWithProviderRejectsNilProvider(t *testing.T) {
 
 	if _, err := VerifyWithProvider(context.Background(), model.SignedClaim{}, trustcrypto.PublicKeyDescriptor{}, nil); err == nil {
 		t.Fatal("VerifyWithProvider() error = nil for nil provider")
+	}
+}
+
+func TestClaimRejectsOversizedMetadataCollections(t *testing.T) {
+	t.Parallel()
+
+	base := model.ClientClaim{
+		SchemaVersion: model.SchemaClientClaim,
+		CryptoSuite:   "INTL_V1",
+		Content: model.Content{
+			HashAlg:       model.DefaultHashAlg,
+			ContentHash:   bytes.Repeat([]byte{2}, 32),
+			ContentLength: 12,
+		},
+	}
+	base.Metadata.Parents = make([]string, MaxMetadataParents+1)
+	if _, err := Canonical(base); err == nil {
+		t.Fatal("Canonical() accepted oversized metadata parents")
+	}
+
+	base.Metadata.Parents = nil
+	base.Metadata.Custom = make(map[string]string, MaxMetadataCustomEntries+1)
+	for index := 0; index <= MaxMetadataCustomEntries; index++ {
+		base.Metadata.Custom[fmt.Sprintf("key-%d", index)] = "value"
+	}
+	if _, err := Canonical(base); err == nil {
+		t.Fatal("Canonical() accepted oversized metadata custom entries")
 	}
 }
 

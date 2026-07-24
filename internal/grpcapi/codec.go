@@ -22,7 +22,7 @@ func (cborCodec) Marshal(v any) ([]byte, error) {
 }
 
 func (cborCodec) Unmarshal(data []byte, v any) error {
-	return cborx.UnmarshalLimit(data, v, MaxMessageBytes)
+	return cborx.UnmarshalLimits(data, v, MaxMessageBytes, MaxCBORArrayElements, MaxCBORMapPairs)
 }
 
 func (cborCodec) Name() string {

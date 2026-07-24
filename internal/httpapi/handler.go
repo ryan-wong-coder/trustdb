@@ -897,6 +897,7 @@ func (h Handler) getBatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, batchResponse{
 		Root: model.BatchRoot{
 			SchemaVersion: model.SchemaBatchRoot,
+			CryptoSuite:   manifest.CryptoSuite,
 			BatchID:       manifest.BatchID,
 			NodeID:        manifest.NodeID,
 			LogID:         manifest.LogID,

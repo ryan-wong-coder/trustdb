@@ -806,9 +806,9 @@ func TestBatchTreeEndpoints(t *testing.T) {
 	t.Parallel()
 
 	handler := New(nil, nil, &fakeBatchService{
-		roots: []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, BatchID: "batch-a", TreeSize: 2, BatchRoot: []byte{9}, ClosedAtUnixN: 100}},
+		roots: []model.BatchRoot{{SchemaVersion: model.SchemaBatchRoot, CryptoSuite: cryptosuite.CNSMV1, BatchID: "batch-a", TreeSize: 2, BatchRoot: []byte{9}, ClosedAtUnixN: 100}},
 		manifests: map[string]model.BatchManifest{
-			"batch-a": {SchemaVersion: model.SchemaBatchManifest, BatchID: "batch-a", State: model.BatchStateCommitted, TreeSize: 2, BatchRoot: []byte{9}, RecordIDs: []string{"rec-a", "rec-b"}, ClosedAtUnixN: 100},
+			"batch-a": {SchemaVersion: model.SchemaBatchManifest, CryptoSuite: cryptosuite.CNSMV1, BatchID: "batch-a", State: model.BatchStateCommitted, TreeSize: 2, BatchRoot: []byte{9}, RecordIDs: []string{"rec-a", "rec-b"}, ClosedAtUnixN: 100},
 		},
 		treeLeaves: []model.BatchTreeLeaf{
 			{SchemaVersion: model.SchemaBatchTreeLeaf, BatchID: "batch-a", RecordID: "rec-a", LeafIndex: 0, LeafHash: []byte{1}},
@@ -831,7 +831,8 @@ func TestBatchTreeEndpoints(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("decode batch detail: %v", err)
 	}
-	if detail.RecordCount != 2 || detail.Root.BatchID != "batch-a" {
+	if detail.RecordCount != 2 || detail.Root.BatchID != "batch-a" ||
+		detail.Root.CryptoSuite != cryptosuite.CNSMV1 {
 		t.Fatalf("batch detail = %+v", detail)
 	}
 

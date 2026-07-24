@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
@@ -18,6 +19,13 @@ import (
 )
 
 const maxSigningInputBufferCapacity = 1 << 20
+
+const (
+	MaxMetadataParents       = 1000
+	MaxMetadataCustomEntries = 1000
+	MaxMetadataStringBytes   = 4096
+	MaxMetadataKeyBytes      = 1024
+)
 
 var signingInputBufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
@@ -58,6 +66,9 @@ func NewFileClaimForSuite(suiteID cryptosuite.ID, tenantID, clientID, keyID stri
 	if content.ContentLength < 0 {
 		return model.ClientClaim{}, errors.New("content_length cannot be negative")
 	}
+	if err := validateMetadata(metadata); err != nil {
+		return model.ClientClaim{}, err
+	}
 	if metadata.EventType == "" {
 		return model.ClientClaim{}, errors.New("metadata.event_type is required")
 	}
@@ -87,7 +98,49 @@ func Canonical(claim model.ClientClaim) ([]byte, error) {
 	if claim.Content.HashAlg != suite.ContentHash.Algorithm || len(claim.Content.ContentHash) != suite.ContentHash.DigestBytes {
 		return nil, fmt.Errorf("claim content digest does not match suite %s", suite.ID)
 	}
+	if err := validateMetadata(claim.Metadata); err != nil {
+		return nil, err
+	}
 	return cborx.Marshal(claim)
+}
+
+func validateMetadata(metadata model.Metadata) error {
+	if len(metadata.Parents) > MaxMetadataParents {
+		return fmt.Errorf("metadata parents exceed %d items", MaxMetadataParents)
+	}
+	if len(metadata.Custom) > MaxMetadataCustomEntries {
+		return fmt.Errorf("metadata custom entries exceed %d items", MaxMetadataCustomEntries)
+	}
+	if err := validateMetadataString("event_type", metadata.EventType, MaxMetadataStringBytes); err != nil {
+		return err
+	}
+	if err := validateMetadataString("source", metadata.Source, MaxMetadataStringBytes); err != nil {
+		return err
+	}
+	for index, parent := range metadata.Parents {
+		if err := validateMetadataString(fmt.Sprintf("parents[%d]", index), parent, MaxMetadataStringBytes); err != nil {
+			return err
+		}
+	}
+	for key, value := range metadata.Custom {
+		if err := validateMetadataString("custom key", key, MaxMetadataKeyBytes); err != nil {
+			return err
+		}
+		if err := validateMetadataString("custom value", value, MaxMetadataStringBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateMetadataString(field, value string, maxBytes int) error {
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("metadata %s is not valid UTF-8", field)
+	}
+	if len(value) > maxBytes {
+		return fmt.Errorf("metadata %s exceeds %d bytes", field, maxBytes)
+	}
+	return nil
 }
 
 func SigningInput(claimCBOR []byte) []byte {
