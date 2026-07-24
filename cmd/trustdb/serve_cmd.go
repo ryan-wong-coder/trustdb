@@ -495,6 +495,9 @@ func newServeCommand(rt *runtimeConfig) *cobra.Command {
 				}
 				statusHub, err = statusnotify.New(statusnotify.Config{
 					StatePath:   filepath.Join(proofDir, "status-subscriptions.json"),
+					NodeID:      nodeID,
+					LogID:       logID,
+					NamespaceID: proofstoreNamespaceID(metaKind, metaPath, proofstoreTiKVKeyspace, proofstoreTiKVNamespace),
 					Routes:      routes,
 					Signer:      serverSigner,
 					CryptoSuite: suiteID,
