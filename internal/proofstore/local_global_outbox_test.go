@@ -236,8 +236,12 @@ func TestLocalStoreReplaysDurableAnchorPublicationJournal(t *testing.T) {
 	if err := writeCBORAtomic(store.sthAnchorPublicationJournalPath(key), journal); err != nil {
 		t.Fatalf("write publication journal: %v", err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store before restart: %v", err)
+	}
 
 	restarted := testLocalStore(root)
+	defer restarted.Close()
 	gotSchedule, found, err := restarted.GetSTHAnchorSchedule(ctx, key)
 	if err != nil || !found || gotSchedule.Pending == nil || gotSchedule.Pending.Target.TreeSize != 2 {
 		t.Fatalf("replayed schedule=%+v found=%v err=%v", gotSchedule, found, err)
@@ -296,8 +300,12 @@ func TestLocalStoreJournalReplayRemovesStalePendingAfterPublishedCopy(t *testing
 	if err := writeCBORAtomic(store.sthAnchorPublicationJournalPath(key), journal); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store before restart: %v", err)
+	}
 
 	restarted := testLocalStore(root)
+	defer restarted.Close()
 	if _, found, err := restarted.GetSTHAnchorSchedule(ctx, key); err != nil || !found {
 		t.Fatalf("GetSTHAnchorSchedule found=%v err=%v", found, err)
 	}

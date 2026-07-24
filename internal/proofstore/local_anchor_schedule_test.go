@@ -243,7 +243,11 @@ func TestLocalStoreL5CoverageCheckpointSurvivesRestart(t *testing.T) {
 	if _, err := first.AdvanceL5CoverageCheckpoint(ctx, key, 17, 100); err != nil {
 		t.Fatalf("AdvanceL5CoverageCheckpoint: %v", err)
 	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
 	restarted := testLocalStore(root)
+	defer restarted.Close()
 	checkpoint, found, err := restarted.GetL5CoverageCheckpoint(ctx, key)
 	if err != nil || !found || checkpoint.CoveredTreeSize != 17 || checkpoint.Revision != 1 {
 		t.Fatalf("restarted checkpoint=%+v found=%v err=%v", checkpoint, found, err)

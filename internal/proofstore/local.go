@@ -42,11 +42,13 @@ const (
 	localL5CoverageSuffix     = ".tdl5-coverage"
 	localAnchorPublishSuffix  = ".tdanchor-publish-journal"
 	localAnchorPublishSchema  = "trustdb.local-anchor-publish-journal.v1"
+	localNamespaceLockFile    = ".trustdb-proofstore.lock"
 )
 
 type LocalStore struct {
 	directory string
 	binding   proofstoremeta.Marker
+	lock      *localNamespaceLock
 }
 
 func (s LocalStore) RootPath() string {
@@ -73,8 +75,146 @@ func (s LocalStore) requireSuite(value any) error {
 	return nil
 }
 
-func newBoundLocalStore(root string, binding proofstoremeta.Marker) *LocalStore {
-	return &LocalStore{directory: root, binding: binding}
+func newBoundLocalStore(root string, binding proofstoremeta.Marker, lock *localNamespaceLock) *LocalStore {
+	return &LocalStore{directory: root, binding: binding, lock: lock}
+}
+
+type localNamespaceLock struct {
+	mu     sync.Mutex
+	dir    *os.File
+	file   *os.File
+	closed bool
+}
+
+func acquireLocalNamespaceLock(root string) (*localNamespaceLock, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "create file proofstore directory", err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "inspect file proofstore directory", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore root must be a real directory, not a symlink")
+	}
+	if !validateLocalRootPermissions(rootInfo) {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore root must not be group- or other-writable")
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open file proofstore directory", err)
+	}
+	dirInfo, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "stat opened file proofstore directory", err)
+	}
+	if !os.SameFile(rootInfo, dirInfo) {
+		_ = dir.Close()
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore directory changed while opening")
+	}
+
+	path := filepath.Join(root, localNamespaceLockFile)
+	file, err := openSecureLocalNamespaceLockFile(path)
+	if err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	if err := lockLocalNamespaceFile(file); err != nil {
+		_ = file.Close()
+		_ = dir.Close()
+		return nil, trusterr.Wrap(trusterr.CodeFailedPrecondition, "file proofstore namespace is already open by another process", err)
+	}
+	return &localNamespaceLock{dir: dir, file: file}, nil
+}
+
+func openSecureLocalNamespaceLockFile(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		file, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if createErr == nil {
+			info, err = os.Lstat(path)
+			if err != nil {
+				_ = file.Close()
+				return nil, trusterr.Wrap(trusterr.CodeDataLoss, "inspect created file proofstore namespace lock", err)
+			}
+			fileInfo, statErr := file.Stat()
+			if statErr != nil {
+				_ = file.Close()
+				return nil, trusterr.Wrap(trusterr.CodeDataLoss, "stat created file proofstore namespace lock", statErr)
+			}
+			if err := validateLocalNamespaceLockFile(info, fileInfo); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			return file, nil
+		}
+		if !errors.Is(createErr, os.ErrExist) {
+			return nil, trusterr.Wrap(trusterr.CodeDataLoss, "create file proofstore namespace lock", createErr)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "inspect file proofstore namespace lock", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock must be a regular file, not a symlink")
+	}
+	if !validateLocalLockPermissions(info) {
+		return nil, trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock permissions must be 0600")
+	}
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "open file proofstore namespace lock", err)
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, trusterr.Wrap(trusterr.CodeDataLoss, "stat opened file proofstore namespace lock", err)
+	}
+	if err := validateLocalNamespaceLockFile(info, fileInfo); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func validateLocalNamespaceLockFile(pathInfo, fileInfo os.FileInfo) error {
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !fileInfo.Mode().IsRegular() {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock must be a regular file, not a symlink")
+	}
+	if !validateLocalLockPermissions(pathInfo) || !validateLocalLockPermissions(fileInfo) {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock permissions must be 0600")
+	}
+	if !os.SameFile(pathInfo, fileInfo) {
+		return trusterr.New(trusterr.CodeFailedPrecondition, "file proofstore namespace lock changed while opening")
+	}
+	return nil
+}
+
+func (l *localNamespaceLock) close() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	unlockErr := unlockLocalNamespaceFile(l.file)
+	closeErr := l.file.Close()
+	dirCloseErr := l.dir.Close()
+	if unlockErr != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "unlock file proofstore namespace", unlockErr)
+	}
+	if closeErr != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "close file proofstore namespace lock", closeErr)
+	}
+	if dirCloseErr != nil {
+		return trusterr.Wrap(trusterr.CodeDataLoss, "close file proofstore directory", dirCloseErr)
+	}
+	return nil
 }
 
 type localFileOps struct {
@@ -972,12 +1112,10 @@ func (s LocalStore) GetCheckpoint(ctx context.Context) (model.WALCheckpoint, boo
 	return cp, true, nil
 }
 
-// Close is a no-op for the file-backed store because it owns only a
-// directory handle via stdlib os calls, but the method exists so
-// LocalStore can satisfy the Store interface alongside backends (e.g.
-// Pebble) that require explicit teardown.
+// Close releases the process-wide exclusive namespace lock. LocalStore values
+// may be copied, so the shared lock handle makes repeated Close calls safe.
 func (s LocalStore) Close() error {
-	return nil
+	return s.lock.close()
 }
 
 // WALCheckpointPruneSafe remains false because durable file publication alone

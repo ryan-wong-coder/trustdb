@@ -45,8 +45,12 @@ func TestOpenFileBackendInitializesAndRequiresCurrentSchema(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "proofs")
 
-	if _, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root})); err != nil {
+	initial, err := Open(testStoreConfig(Config{Kind: BackendFile, Path: root}))
+	if err != nil {
 		t.Fatalf("Open(file) error = %v", err)
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatalf("close initial file store: %v", err)
 	}
 	data, err := readStoredFileLimit(filepath.Join(root, localStorageSchemaFile), proofstoremeta.MaxMarkerBytes)
 	if err != nil {

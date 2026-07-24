@@ -110,11 +110,16 @@ func OpenLocalStore(root string, suiteID cryptosuite.ID, nodeID, logID, namespac
 	if err != nil {
 		return nil, trusterr.Wrap(trusterr.CodeInvalidArgument, "invalid proofstore cryptographic suite", err)
 	}
-	marker, err := ensureLocalStorageSchema(root, requested, nodeID, logID, namespaceID)
+	namespaceLock, err := acquireLocalNamespaceLock(root)
 	if err != nil {
 		return nil, err
 	}
-	return newBoundLocalStore(root, marker), nil
+	marker, err := ensureLocalStorageSchema(root, requested, nodeID, logID, namespaceID)
+	if err != nil {
+		_ = namespaceLock.close()
+		return nil, err
+	}
+	return newBoundLocalStore(root, marker, namespaceLock), nil
 }
 
 func ensureLocalStorageSchema(root string, expected cryptosuite.ID, nodeID, logID, namespaceID string) (proofstoremeta.Marker, error) {
@@ -144,6 +149,9 @@ func ensureLocalStorageSchema(root string, expected cryptosuite.ID, nodeID, logI
 	switch {
 	case err == nil:
 		for _, entry := range entries {
+			if entry.Name() == localNamespaceLockFile {
+				continue
+			}
 			if isLocalStorageMarkerTemp(entry.Name()) {
 				if err := removeLocalFileDurable(filepath.Join(root, entry.Name())); err != nil {
 					return proofstoremeta.Marker{}, trusterr.Wrap(trusterr.CodeDataLoss, "remove interrupted file proofstore marker", err)
