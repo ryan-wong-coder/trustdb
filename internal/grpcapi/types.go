@@ -4,7 +4,7 @@ import "github.com/wowtrust/trustdb/internal/model"
 
 const MaxMessageBytes = 16 << 20
 
-const ServiceName = "trustdb.v1.TrustDB"
+const ServiceName = "trustdb.v2.TrustDB"
 
 const (
 	FullMethodHealth                    = "/" + ServiceName + "/Health"

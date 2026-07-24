@@ -100,9 +100,9 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 		}
 	})
 
-	resp, err := http.Post(server.URL+"/v1/claims", "application/cbor", bytes.NewReader(body))
+	resp, err := http.Post(server.URL+"/v2/claims", "application/cbor", bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("POST /v1/claims error = %v", err)
+		t.Fatalf("POST /v2/claims error = %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
@@ -118,8 +118,8 @@ func TestHTTPIngestWritesWAL(t *testing.T) {
 	if !accepted.BatchEnqueued {
 		t.Fatalf("accepted response did not enqueue batch: %+v", accepted)
 	}
-	waitForHTTPStatus(t, server.URL+"/v1/proofs/"+accepted.RecordID, http.StatusOK)
-	waitForHTTPStatus(t, server.URL+"/v1/roots/latest", http.StatusOK)
+	waitForHTTPStatus(t, server.URL+"/v2/proofs/"+accepted.RecordID, http.StatusOK)
+	waitForHTTPStatus(t, server.URL+"/v2/roots/latest", http.StatusOK)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

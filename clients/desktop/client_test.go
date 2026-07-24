@@ -22,8 +22,8 @@ func TestHTTPClientListRecordIndexesMapsServerPage(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/records" {
-			t.Fatalf("path = %s, want /v1/records", r.URL.Path)
+		if r.URL.Path != "/v2/records" {
+			t.Fatalf("path = %s, want /v2/records", r.URL.Path)
 		}
 		q := r.URL.Query()
 		if q.Get("limit") != "2" || q.Get("cursor") != "cur-1" || q.Get("batch_id") != "batch-1" || q.Get("direction") != "desc" {
@@ -79,7 +79,7 @@ func TestHTTPClientListRecordIndexesSupportsExactRecordQuery(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/records/tr1exact" {
+		if r.URL.Path != "/v2/records/tr1exact" {
 			t.Fatalf("path = %s, want exact record endpoint", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(model.RecordIndex{
@@ -114,8 +114,8 @@ func TestHTTPClientListRecordIndexesSendsServerSearchFilters(t *testing.T) {
 		sawHashQuery bool
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/records" {
-			t.Fatalf("path = %s, want /v1/records", r.URL.Path)
+		if r.URL.Path != "/v2/records" {
+			t.Fatalf("path = %s, want /v2/records", r.URL.Path)
 		}
 		switch {
 		case r.URL.Query().Get("q") == "screenshot" && r.URL.Query().Get("content_hash") == "":
@@ -154,8 +154,8 @@ func TestHTTPClientListRecordIndexesSendsLevelFilter(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/records" {
-			t.Fatalf("path = %s, want /v1/records", r.URL.Path)
+		if r.URL.Path != "/v2/records" {
+			t.Fatalf("path = %s, want /v2/records", r.URL.Path)
 		}
 		if r.URL.Query().Get("level") != "L4" {
 			t.Fatalf("query = %s", r.URL.RawQuery)
@@ -177,8 +177,8 @@ func TestHTTPClientGetAnchorMapsImmutableResult(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/anchors/sth/7" {
-			t.Fatalf("path = %s, want /v1/anchors/sth/7", r.URL.Path)
+		if r.URL.Path != "/v2/anchors/sth/7" {
+			t.Fatalf("path = %s, want /v2/anchors/sth/7", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"tree_size":   7,

@@ -14,8 +14,8 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog"
-	trustconfig "github.com/wowtrust/trustdb/internal/config"
 	"github.com/spf13/viper"
+	trustconfig "github.com/wowtrust/trustdb/internal/config"
 	"golang.org/x/crypto/bcrypt"
 )
 

@@ -77,7 +77,7 @@ func (t *httpTransport) SubmitSignedClaim(ctx context.Context, signed SignedClai
 		return SubmitResult{}, err
 	}
 	var env submitClaimEnvelope
-	if err := t.doJSON(ctx, http.MethodPost, "/v1/claims", nil, bytes.NewReader(body), "application/cbor", &env); err != nil {
+	if err := t.doJSON(ctx, http.MethodPost, "/v2/claims", nil, bytes.NewReader(body), "application/cbor", &env); err != nil {
 		return SubmitResult{}, err
 	}
 	return submitResultFromEnvelope(env, signed), nil
@@ -89,7 +89,7 @@ func (t *httpTransport) SubmitSignedClaims(ctx context.Context, signed []SignedC
 		return nil, err
 	}
 	var env submitClaimsBatchEnvelope
-	if err := t.doJSON(ctx, http.MethodPost, "/v1/claims/batch", nil, bytes.NewReader(body), "application/cbor", &env); err != nil {
+	if err := t.doJSON(ctx, http.MethodPost, "/v2/claims/batch", nil, bytes.NewReader(body), "application/cbor", &env); err != nil {
 		return nil, err
 	}
 	if len(env.Results) != len(signed) {
@@ -121,7 +121,7 @@ func (t *httpTransport) SubmitSignedClaims(ctx context.Context, signed []SignedC
 
 func (t *httpTransport) GetRecord(ctx context.Context, recordID string) (RecordIndex, error) {
 	var idx model.RecordIndex
-	if err := t.getJSON(ctx, "/v1/records/"+url.PathEscape(recordID), nil, &idx); err != nil {
+	if err := t.getJSON(ctx, "/v2/records/"+url.PathEscape(recordID), nil, &idx); err != nil {
 		return RecordIndex{}, err
 	}
 	if idx.RecordID == "" {
@@ -132,7 +132,7 @@ func (t *httpTransport) GetRecord(ctx context.Context, recordID string) (RecordI
 
 func (t *httpTransport) GetRecordStatus(ctx context.Context, recordID string) (RecordStatus, error) {
 	var status model.RecordStatus
-	if err := t.getJSON(ctx, "/v1/records/"+url.PathEscape(recordID)+"/status", nil, &status); err != nil {
+	if err := t.getJSON(ctx, "/v2/records/"+url.PathEscape(recordID)+"/status", nil, &status); err != nil {
 		return RecordStatus{}, err
 	}
 	return status, nil
@@ -144,7 +144,7 @@ func (t *httpTransport) GetRecordStatuses(ctx context.Context, recordIDs []strin
 		return RecordStatusBatch{}, err
 	}
 	var response recordStatusesEnvelope
-	if err := t.doJSON(ctx, http.MethodPost, "/v1/records/status:batchGet", nil, bytes.NewReader(body), "application/json", &response); err != nil {
+	if err := t.doJSON(ctx, http.MethodPost, "/v2/records/status:batchGet", nil, bytes.NewReader(body), "application/json", &response); err != nil {
 		return RecordStatusBatch{}, err
 	}
 	return RecordStatusBatch{Statuses: response.Statuses, MissingRecordIDs: response.MissingRecordIDs}, nil
@@ -183,19 +183,19 @@ func (t *httpTransport) CreateStatusSubscription(ctx context.Context, opts Creat
 		return StatusSubscription{}, err
 	}
 	var subscription statusnotify.Subscription
-	if err := t.doJSON(ctx, http.MethodPost, "/v1/status-subscriptions", nil, bytes.NewReader(body), "application/json", &subscription); err != nil {
+	if err := t.doJSON(ctx, http.MethodPost, "/v2/status-subscriptions", nil, bytes.NewReader(body), "application/json", &subscription); err != nil {
 		return StatusSubscription{}, err
 	}
 	return subscription, nil
 }
 
 func (t *httpTransport) DeleteStatusSubscription(ctx context.Context, subscriptionID string) error {
-	return t.doJSON(ctx, http.MethodDelete, "/v1/status-subscriptions/"+url.PathEscape(subscriptionID), nil, nil, "", nil)
+	return t.doJSON(ctx, http.MethodDelete, "/v2/status-subscriptions/"+url.PathEscape(subscriptionID), nil, nil, "", nil)
 }
 
 func (t *httpTransport) GetStatusSubscriptionStatuses(ctx context.Context, subscriptionID string) (RecordStatusBatch, error) {
 	var response recordStatusesEnvelope
-	path := "/v1/status-subscriptions/" + url.PathEscape(subscriptionID) + "/statuses"
+	path := "/v2/status-subscriptions/" + url.PathEscape(subscriptionID) + "/statuses"
 	if err := t.getJSON(ctx, path, nil, &response); err != nil {
 		return RecordStatusBatch{}, err
 	}
@@ -203,7 +203,7 @@ func (t *httpTransport) GetStatusSubscriptionStatuses(ctx context.Context, subsc
 }
 
 func (t *httpTransport) SubscribeStatusRefresh(ctx context.Context, subscriptionID string) (<-chan StatusRefresh, <-chan error, error) {
-	path := "/v1/status-subscriptions/" + url.PathEscape(subscriptionID) + "/events"
+	path := "/v2/status-subscriptions/" + url.PathEscape(subscriptionID) + "/events"
 	endpoint := t.endpoint(path, nil)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -285,7 +285,7 @@ func (t *httpTransport) ListRecords(ctx context.Context, opts ListRecordsOptions
 		values.Set("received_to", strconv.FormatInt(opts.ReceivedToUnixN, 10))
 	}
 	var env recordsEnvelope
-	if err := t.getJSON(ctx, "/v1/records", values, &env); err != nil {
+	if err := t.getJSON(ctx, "/v2/records", values, &env); err != nil {
 		return RecordPage{}, err
 	}
 	return recordPageFromEnvelope(env), nil
@@ -302,7 +302,7 @@ func recordPageFromEnvelope(env recordsEnvelope) RecordPage {
 func (t *httpTransport) ListRootsPage(ctx context.Context, opts ListPageOptions) (RootPage, error) {
 	values := pageValues(opts)
 	var env rootsEnvelope
-	if err := t.getJSON(ctx, "/v1/roots", values, &env); err != nil {
+	if err := t.getJSON(ctx, "/v2/roots", values, &env); err != nil {
 		return RootPage{}, err
 	}
 	return RootPage{Roots: env.Roots, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
@@ -319,7 +319,7 @@ func (t *httpTransport) ListRoots(ctx context.Context, limit int) ([]BatchRoot, 
 func (t *httpTransport) ListSTHs(ctx context.Context, opts ListPageOptions) (TreeHeadPage, error) {
 	values := pageValues(opts)
 	var env sthsEnvelope
-	if err := t.getJSON(ctx, "/v1/sth", values, &env); err != nil {
+	if err := t.getJSON(ctx, "/v2/sth", values, &env); err != nil {
 		return TreeHeadPage{}, err
 	}
 	return TreeHeadPage{STHs: env.STHs, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
@@ -328,7 +328,7 @@ func (t *httpTransport) ListSTHs(ctx context.Context, opts ListPageOptions) (Tre
 func (t *httpTransport) ListGlobalLeaves(ctx context.Context, opts ListPageOptions) (GlobalLeafPage, error) {
 	values := pageValues(opts)
 	var env globalLeavesEnvelope
-	if err := t.getJSON(ctx, "/v1/global-log/leaves", values, &env); err != nil {
+	if err := t.getJSON(ctx, "/v2/global-log/leaves", values, &env); err != nil {
 		return GlobalLeafPage{}, err
 	}
 	return GlobalLeafPage{Leaves: env.Leaves, Limit: env.Limit, Direction: env.Direction, NextCursor: env.NextCursor}, nil
@@ -337,12 +337,12 @@ func (t *httpTransport) ListGlobalLeaves(ctx context.Context, opts ListPageOptio
 func (t *httpTransport) ListAnchors(ctx context.Context, opts ListPageOptions) (AnchorPage, error) {
 	values := pageValues(opts)
 	var env anchorsEnvelope
-	if err := t.getStrictJSON(ctx, "/v1/anchors/sth", values, &env); err != nil {
+	if err := t.getStrictJSON(ctx, "/v2/anchors/sth", values, &env); err != nil {
 		return AnchorPage{}, err
 	}
 	items := make([]AnchorPageItem, 0, len(env.Anchors))
 	for _, item := range env.Anchors {
-		if err := validatePublishedAnchorEnvelope("list anchors", t.endpoint("/v1/anchors/sth", values), item); err != nil {
+		if err := validatePublishedAnchorEnvelope("list anchors", t.endpoint("/v2/anchors/sth", values), item); err != nil {
 			return AnchorPage{}, err
 		}
 		items = append(items, AnchorPageItem{
@@ -356,7 +356,7 @@ func (t *httpTransport) ListAnchors(ctx context.Context, opts ListPageOptions) (
 
 func (t *httpTransport) LatestRoot(ctx context.Context) (BatchRoot, error) {
 	var root model.BatchRoot
-	if err := t.getJSON(ctx, "/v1/roots/latest", nil, &root); err != nil {
+	if err := t.getJSON(ctx, "/v2/roots/latest", nil, &root); err != nil {
 		return BatchRoot{}, err
 	}
 	return root, nil
@@ -364,7 +364,7 @@ func (t *httpTransport) LatestRoot(ctx context.Context) (BatchRoot, error) {
 
 func (t *httpTransport) GetProofBundle(ctx context.Context, recordID string) (ProofBundle, error) {
 	var env proofEnvelope
-	if err := t.getJSON(ctx, "/v1/proofs/"+url.PathEscape(recordID), nil, &env); err != nil {
+	if err := t.getJSON(ctx, "/v2/proofs/"+url.PathEscape(recordID), nil, &env); err != nil {
 		return ProofBundle{}, err
 	}
 	if env.ProofBundle.RecordID == "" {
@@ -375,7 +375,7 @@ func (t *httpTransport) GetProofBundle(ctx context.Context, recordID string) (Pr
 
 func (t *httpTransport) GetGlobalProof(ctx context.Context, batchID string) (GlobalLogProof, error) {
 	var proof model.GlobalLogProof
-	if err := t.getJSON(ctx, "/v1/global-log/inclusion/"+url.PathEscape(batchID), nil, &proof); err != nil {
+	if err := t.getJSON(ctx, "/v2/global-log/inclusion/"+url.PathEscape(batchID), nil, &proof); err != nil {
 		return GlobalLogProof{}, err
 	}
 	return proof, nil
@@ -383,7 +383,7 @@ func (t *httpTransport) GetGlobalProof(ctx context.Context, batchID string) (Glo
 
 func (t *httpTransport) GetGlobalEvidence(ctx context.Context, batchID string) (GlobalLogEvidence, error) {
 	var evidence model.GlobalLogEvidence
-	if err := t.getJSON(ctx, "/v1/global-log/evidence/"+url.PathEscape(batchID), nil, &evidence); err != nil {
+	if err := t.getJSON(ctx, "/v2/global-log/evidence/"+url.PathEscape(batchID), nil, &evidence); err != nil {
 		return GlobalLogEvidence{}, err
 	}
 	return evidence, nil
@@ -391,7 +391,7 @@ func (t *httpTransport) GetGlobalEvidence(ctx context.Context, batchID string) (
 
 func (t *httpTransport) GetAnchor(ctx context.Context, treeSize uint64) (AnchorStatus, error) {
 	var env anchorEnvelope
-	path := "/v1/anchors/sth/" + strconv.FormatUint(treeSize, 10)
+	path := "/v2/anchors/sth/" + strconv.FormatUint(treeSize, 10)
 	if err := t.getStrictJSON(ctx, path, nil, &env); err != nil {
 		return AnchorStatus{}, err
 	}
@@ -405,7 +405,7 @@ func (t *httpTransport) ListAnchorSystems(ctx context.Context) ([]AnchorSystem, 
 	var response struct {
 		Systems []model.AnchorSystem `json:"systems"`
 	}
-	if err := t.getStrictJSON(ctx, "/v1/anchor-systems", nil, &response); err != nil {
+	if err := t.getStrictJSON(ctx, "/v2/anchor-systems", nil, &response); err != nil {
 		return nil, err
 	}
 	if response.Systems == nil {
@@ -421,7 +421,7 @@ func (t *httpTransport) ListAnchorSystems(ctx context.Context) ([]AnchorSystem, 
 
 func (t *httpTransport) GetAnchorSystem(ctx context.Context, systemID string) (AnchorSystem, error) {
 	var system model.AnchorSystem
-	path := "/v1/anchor-systems/" + url.PathEscape(systemID)
+	path := "/v2/anchor-systems/" + url.PathEscape(systemID)
 	if err := t.getStrictJSON(ctx, path, nil, &system); err != nil {
 		return AnchorSystem{}, err
 	}
@@ -433,7 +433,7 @@ func (t *httpTransport) GetAnchorSystem(ctx context.Context, systemID string) (A
 
 func (t *httpTransport) GetAnchorSystemStatus(ctx context.Context, systemID string) (AnchorSystemStatus, error) {
 	var status model.AnchorSystemStatus
-	path := "/v1/anchor-systems/" + url.PathEscape(systemID) + "/status"
+	path := "/v2/anchor-systems/" + url.PathEscape(systemID) + "/status"
 	if err := t.getStrictJSON(ctx, path, nil, &status); err != nil {
 		return AnchorSystemStatus{}, err
 	}
@@ -453,7 +453,7 @@ func (t *httpTransport) ListAnchorSystemResources(ctx context.Context, systemID 
 	values.Set("limit", strconv.Itoa(limit))
 	setQuery(values, "cursor", opts.Cursor)
 	var page model.AnchorSystemResourcePage
-	path := "/v1/anchor-systems/" + url.PathEscape(systemID) + "/resources"
+	path := "/v2/anchor-systems/" + url.PathEscape(systemID) + "/resources"
 	if err := t.getStrictJSON(ctx, path, values, &page); err != nil {
 		return AnchorSystemResourcePage{}, err
 	}
@@ -467,7 +467,7 @@ func (t *httpTransport) ListAnchorSystemResources(ctx context.Context, systemID 
 
 func (t *httpTransport) GetAnchorSystemResource(ctx context.Context, systemID, kind, resourceID string) (AnchorSystemResource, error) {
 	var resource model.AnchorSystemResource
-	path := "/v1/anchor-systems/" + url.PathEscape(systemID) + "/resources/" + url.PathEscape(kind) + "/" + url.PathEscape(resourceID)
+	path := "/v2/anchor-systems/" + url.PathEscape(systemID) + "/resources/" + url.PathEscape(kind) + "/" + url.PathEscape(resourceID)
 	if err := t.getStrictJSON(ctx, path, nil, &resource); err != nil {
 		return AnchorSystemResource{}, err
 	}
@@ -493,7 +493,7 @@ func validateAnchorResource(systemID, kind string, resource model.AnchorSystemRe
 
 func (t *httpTransport) LatestSTH(ctx context.Context) (SignedTreeHead, error) {
 	var sth model.SignedTreeHead
-	if err := t.getJSON(ctx, "/v1/sth/latest", nil, &sth); err != nil {
+	if err := t.getJSON(ctx, "/v2/sth/latest", nil, &sth); err != nil {
 		return SignedTreeHead{}, err
 	}
 	return sth, nil
@@ -501,7 +501,7 @@ func (t *httpTransport) LatestSTH(ctx context.Context) (SignedTreeHead, error) {
 
 func (t *httpTransport) GetSTH(ctx context.Context, treeSize uint64) (SignedTreeHead, error) {
 	var sth model.SignedTreeHead
-	if err := t.getJSON(ctx, "/v1/sth/"+strconv.FormatUint(treeSize, 10), nil, &sth); err != nil {
+	if err := t.getJSON(ctx, "/v2/sth/"+strconv.FormatUint(treeSize, 10), nil, &sth); err != nil {
 		return SignedTreeHead{}, err
 	}
 	return sth, nil

@@ -164,8 +164,8 @@ func (a *App) SubmitBatch(reqs []SubmitRequest) []BatchItemResult {
 	return out
 }
 
-// RefreshRecord re-polls /v1/proofs, /v1/global-log/inclusion and
-// /v1/anchors/sth for one record
+// RefreshRecord re-polls /v2/proofs, /v2/global-log/inclusion and
+// /v2/anchors/sth for one record
 // and updates its persisted state accordingly. Returns the freshly
 // merged LocalRecord so the UI can bind to a single source of
 // truth.
@@ -354,7 +354,7 @@ func (a *App) mergeExportedProofState(recordID string, bundle model.ProofBundle,
 //
 // This function intentionally mutates ONLY the client-side copy. The
 // server's authoritative STHAnchorResult (returned by
-// `GET /v1/anchors/sth/<tree_size>`) remains the server's responsibility;
+// `GET /v2/anchors/sth/<tree_size>`) remains the server's responsibility;
 // operators should run `trustdb anchor upgrade` on the server to keep
 // the two in sync. The desktop is free to upgrade its local copy
 // whenever the user asks — verification always walks through
