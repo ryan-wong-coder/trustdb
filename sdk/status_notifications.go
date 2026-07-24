@@ -87,6 +87,7 @@ func VerifyStatusRefresh(notification StatusRefresh, serverPublicKey KeyDescript
 // notifications are wake-up hints, so reconnecting callers should immediately
 // pull current subscription statuses.
 func SubscribeNATSStatusRefresh(ctx context.Context, conn *nats.Conn, subject, queueGroup string, serverPublicKey KeyDescriptor) (<-chan StatusRefresh, <-chan error, error) {
+	ctx = nonNilContext(ctx)
 	if conn == nil || conn.IsClosed() {
 		return nil, nil, errors.New("sdk: NATS connection is unavailable")
 	}

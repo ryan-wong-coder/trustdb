@@ -198,6 +198,58 @@ func TestSubscribeNATSStatusRefreshSharesOneQueueGroupAcrossReplicas(t *testing.
 	}
 }
 
+func TestSubscribeNATSStatusRefreshNilContextUsesBackground(t *testing.T) {
+	t.Parallel()
+
+	server, err := natsserver.NewServer(&natsserver.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go server.Start()
+	if !server.ReadyForConnections(5 * time.Second) {
+		t.Fatal("embedded NATS server did not become ready")
+	}
+	defer server.Shutdown()
+
+	conn, err := nats.Connect(server.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	serverPublicKey, serverPrivateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, errorsCh, err := SubscribeNATSStatusRefresh(
+		nil,
+		conn,
+		"trustdb.status.nil-context",
+		"trustdb-status-nil-context",
+		mustINTLV1PublicKey(t, "server-key", serverPublicKey),
+	)
+	if err != nil {
+		t.Fatalf("SubscribeNATSStatusRefresh(nil): %v", err)
+	}
+	if err := conn.Publish("trustdb.status.nil-context", signedStatusRefreshCBOR(t, serverPrivateKey, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case notification := <-events:
+		if notification.Version != 1 {
+			t.Fatalf("notification version = %d, want 1", notification.Version)
+		}
+	case streamErr := <-errorsCh:
+		t.Fatalf("status refresh error: %v", streamErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for status refresh with nil context")
+	}
+}
+
 func signedStatusRefreshCBOR(t *testing.T, privateKey ed25519.PrivateKey, version uint64) []byte {
 	t.Helper()
 	notification := model.StatusRefresh{
