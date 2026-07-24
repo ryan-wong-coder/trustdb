@@ -84,13 +84,13 @@ type ChainProbe struct {
 // AnchorRecord mirrors TrustDBAnchorV1.AnchorRecord. It is a read-only chain
 // observation and is not itself an offline proof.
 type AnchorRecord struct {
-	StreamID        []byte
-	TreeSize        uint64
-	RootHash        []byte
-	SignedSTHDigest []byte
-	Publisher       []byte
-	PayloadVersion  uint16
-	Exists          bool
+	StreamID        []byte `cbor:"stream_id" json:"stream_id"`
+	TreeSize        uint64 `cbor:"tree_size" json:"tree_size"`
+	RootHash        []byte `cbor:"root_hash" json:"root_hash"`
+	SignedSTHDigest []byte `cbor:"signed_sth_digest" json:"signed_sth_digest"`
+	Publisher       []byte `cbor:"publisher" json:"publisher"`
+	PayloadVersion  uint16 `cbor:"payload_version" json:"payload_version"`
+	Exists          bool   `cbor:"exists" json:"exists"`
 }
 
 // SubmitRequest is immutable for one scheduler attempt. CanonicalPayload is
@@ -101,12 +101,12 @@ type SubmitRequest struct {
 }
 
 type TransactionSubmission struct {
-	EncodedTransaction []byte
-	Signature          []byte
-	Sender             []byte
-	TransactionHash    []byte
-	BlockLimit         uint64
-	SubmittedAtUnixN   int64
+	EncodedTransaction []byte `cbor:"encoded_transaction" json:"encoded_transaction"`
+	Signature          []byte `cbor:"signature" json:"signature"`
+	Sender             []byte `cbor:"sender" json:"sender"`
+	TransactionHash    []byte `cbor:"transaction_hash" json:"transaction_hash"`
+	BlockLimit         uint64 `cbor:"block_limit" json:"block_limit"`
+	SubmittedAtUnixN   int64  `cbor:"submitted_at_unix_nano" json:"submitted_at_unix_nano"`
 }
 
 type Submission struct {
@@ -114,31 +114,31 @@ type Submission struct {
 }
 
 type AnchorPublishedEvent struct {
-	ContractAddress  []byte
-	AnchorID         []byte
-	StreamID         []byte
-	TreeSize         uint64
-	RootHash         []byte
-	SignedSTHDigest  []byte
-	Publisher        []byte
-	PayloadVersion   uint16
-	LogIndex         uint64
-	NormalizedRPCLog []byte
+	ContractAddress  []byte `cbor:"contract_address" json:"contract_address"`
+	AnchorID         []byte `cbor:"anchor_id" json:"anchor_id"`
+	StreamID         []byte `cbor:"stream_id" json:"stream_id"`
+	TreeSize         uint64 `cbor:"tree_size" json:"tree_size"`
+	RootHash         []byte `cbor:"root_hash" json:"root_hash"`
+	SignedSTHDigest  []byte `cbor:"signed_sth_digest" json:"signed_sth_digest"`
+	Publisher        []byte `cbor:"publisher" json:"publisher"`
+	PayloadVersion   uint16 `cbor:"payload_version" json:"payload_version"`
+	LogIndex         uint64 `cbor:"log_index" json:"log_index"`
+	NormalizedRPCLog []byte `cbor:"normalized_rpc_log" json:"normalized_rpc_log"`
 }
 
 type ReceiptRPCObservation struct {
-	NormalizedRPCReceipt []byte
-	Status               int
-	StatusMessage        string
-	BlockNumber          uint64
-	BlockHashClaim       []byte
-	ReceiptHashClaim     []byte
-	TransactionHash      []byte
-	TransactionIndex     uint64
-	TransactionProofRPC  [][]byte
-	ReceiptIndex         uint64
-	ReceiptProofRPC      [][]byte
-	AnchorLogIndex       uint64
+	NormalizedRPCReceipt []byte   `cbor:"normalized_rpc_receipt" json:"normalized_rpc_receipt"`
+	Status               int      `cbor:"status" json:"status"`
+	StatusMessage        string   `cbor:"status_message" json:"status_message"`
+	BlockNumber          uint64   `cbor:"block_number" json:"block_number"`
+	BlockHashClaim       []byte   `cbor:"block_hash_claim" json:"block_hash_claim"`
+	ReceiptHashClaim     []byte   `cbor:"receipt_hash_claim" json:"receipt_hash_claim"`
+	TransactionHash      []byte   `cbor:"transaction_hash" json:"transaction_hash"`
+	TransactionIndex     uint64   `cbor:"transaction_index" json:"transaction_index"`
+	TransactionProofRPC  [][]byte `cbor:"transaction_proof_rpc" json:"transaction_proof_rpc"`
+	ReceiptIndex         uint64   `cbor:"receipt_index" json:"receipt_index"`
+	ReceiptProofRPC      [][]byte `cbor:"receipt_proof_rpc" json:"receipt_proof_rpc"`
+	AnchorLogIndex       uint64   `cbor:"anchor_log_index" json:"anchor_log_index"`
 }
 
 // ReceiptWithProof is deliberately named to exclude receipt-only APIs. A
@@ -155,9 +155,9 @@ type ReceiptWithProof struct {
 }
 
 type BlockRPCObservation struct {
-	NormalizedRPCHeader []byte
-	BlockHashClaim      []byte
-	BlockNumber         uint64
+	NormalizedRPCHeader []byte `cbor:"normalized_rpc_header" json:"normalized_rpc_header"`
+	BlockHashClaim      []byte `cbor:"block_hash_claim" json:"block_hash_claim"`
+	BlockNumber         uint64 `cbor:"block_number" json:"block_number"`
 }
 
 type BlockHeader struct {
@@ -165,9 +165,9 @@ type BlockHeader struct {
 }
 
 type ConsensusSnapshot struct {
-	BlockNumber uint64
-	BlockHash   []byte
-	Finality    FinalityEvidence
+	BlockNumber uint64           `cbor:"block_number" json:"block_number"`
+	BlockHash   []byte           `cbor:"block_hash" json:"block_hash"`
+	Finality    FinalityEvidence `cbor:"finality" json:"finality"`
 }
 
 // Driver is the complete network boundary used by the standard-crypto sink.

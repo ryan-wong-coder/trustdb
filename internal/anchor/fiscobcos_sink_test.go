@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/wowtrust/trustdb/internal/anchor/fiscobcos"
+	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
@@ -149,6 +152,71 @@ func TestFISCOBCOSStandardSinkPublishesCompleteRawEvidence(t *testing.T) {
 	}
 }
 
+func TestFISCOBCOSPublicationObservationStrictWireFormat(t *testing.T) {
+	t.Parallel()
+	trust, drivers := fakeBCOSFixture(t)
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{
+		TrustConfig: trust, Drivers: drivers, Clock: func() time.Time { return time.Unix(10, 0) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := sink.Publish(context.Background(), testSTH(testScheduleKey(fiscobcos.SinkName), 8, 0x18))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := fiscobcos.UnmarshalPublicationObservation(result.Proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fiscobcos.UnmarshalPublicationObservation(append(append([]byte(nil), result.Proof...), 0)); err == nil {
+		t.Fatal("accepted trailing CBOR data")
+	}
+	var object map[string]any
+	if err := cbor.Unmarshal(result.Proof, &object); err != nil {
+		t.Fatal(err)
+	}
+	object["unknown_field"] = true
+	unknown, err := cborx.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fiscobcos.UnmarshalPublicationObservation(unknown); err == nil {
+		t.Fatal("accepted an unknown publication observation field")
+	}
+	mode, err := cbor.EncOptions{Sort: cbor.SortNone, IndefLength: cbor.IndefLengthForbidden, TagsMd: cbor.TagsForbidden}.EncMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonical, err := mode.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(nonCanonical, result.Proof) {
+		t.Fatal("test encoder unexpectedly emitted canonical field order")
+	}
+	if _, err := fiscobcos.UnmarshalPublicationObservation(nonCanonical); err == nil {
+		t.Fatal("accepted non-canonical CBOR")
+	}
+	tampered := observation
+	tampered.Event.RootHash = bytes.Repeat([]byte{0xff}, 32)
+	tamperedBytes, err := cborx.Marshal(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fiscobcos.UnmarshalPublicationObservation(tamperedBytes); err == nil {
+		t.Fatal("accepted event/payload binding tamper")
+	}
+	if _, err := fiscobcos.UnmarshalPublicationObservation(make([]byte, fiscobcos.MaxPublicationObservationBytes+1)); err == nil {
+		t.Fatal("accepted oversized publication observation")
+	}
+	observation.Transaction.EncodedTransaction = make([]byte, fiscobcos.MaxPublicationObservationBytes)
+	if _, err := fiscobcos.MarshalPublicationObservation(observation); err == nil {
+		t.Fatal("accepted oversized transaction observation before encoding")
+	}
+}
+
 func TestFISCOBCOSStandardSinkFailsClosedOnEndpointDisagreement(t *testing.T) {
 	trust, drivers := fakeBCOSFixture(t)
 	drivers[1].(*fakeBCOSDriver).probe.Height++
@@ -184,13 +252,59 @@ func TestFISCOBCOSStandardSinkDoesNotMaskConfiguredEndpointReadDisagreement(t *t
 		t.Fatal(err)
 	}
 	_, err = sink.Publish(context.Background(), testSTH(testScheduleKey(fiscobcos.SinkName), 8, 0x18))
-	if !errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrEndpointDisagreement) {
+	if errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrEndpointDisagreement) {
 		t.Fatalf("minority endpoint disagreement error=%v", err)
 	}
 	base.state.mu.Lock()
 	defer base.state.mu.Unlock()
 	if base.state.submitCalls != 1 {
 		t.Fatalf("submit calls=%d, want one side effect before readback disagreement", base.state.submitCalls)
+	}
+}
+
+func TestFISCOBCOSReadbackDisagreementRemainsRecoverOnlyAfterConvergence(t *testing.T) {
+	trust, drivers := fakeBCOSFixture(t)
+	trust.Endpoints = append(trust.Endpoints, "127.0.0.1:20202")
+	base := drivers[0].(*fakeBCOSDriver)
+	probe := cloneChainProbe(base.probe)
+	probe.Endpoint = trust.Endpoints[2]
+	laggingState := &fakeBCOSState{}
+	drivers = append(drivers, &fakeBCOSDriver{endpoint: probe.Endpoint, probe: probe, state: laggingState})
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := proofstore.LocalStore{Root: t.TempDir()}
+	key := testScheduleKey(fiscobcos.SinkName)
+	sth := testSTH(key, 10, 0x1a)
+	offer(t, store, key, sth, 100, 100)
+	now := time.Unix(0, 100)
+	first := newTestService(t, store, sink, key, &now, func(config *Config) {
+		config.InitialBackoff = time.Nanosecond
+		config.MaxBackoff = time.Nanosecond
+	})
+	first.tick(context.Background())
+
+	base.state.mu.Lock()
+	converged := cloneAnchorRecord(base.state.record)
+	base.state.mu.Unlock()
+	laggingState.mu.Lock()
+	laggingState.record = converged
+	laggingState.mu.Unlock()
+
+	now = now.Add(time.Second)
+	second := newTestService(t, store, sink, key, &now, nil)
+	second.tick(context.Background())
+	schedule, found, err := store.GetSTHAnchorSchedule(context.Background(), key)
+	if err != nil || !found || schedule.InFlight == nil || schedule.InFlight.TerminalFailure ||
+		schedule.InFlight.Target.TreeSize != sth.TreeSize {
+		t.Fatalf("recover-only schedule after convergence=%+v found=%v err=%v", schedule, found, err)
+	}
+	base.state.mu.Lock()
+	defer base.state.mu.Unlock()
+	if base.state.submitCalls != 1 {
+		t.Fatalf("submit calls=%d, converged readback must not resubmit", base.state.submitCalls)
 	}
 }
 

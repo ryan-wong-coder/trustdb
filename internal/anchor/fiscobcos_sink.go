@@ -174,7 +174,7 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 	}
 	receipt, err := s.drivers[0].GetReceiptWithProof(ctx, submission.Attempt.TransactionHash)
 	if err != nil {
-		return model.STHAnchorResult{}, mapSinkError(classifyDriverFailure("get_receipt_with_proof", s.drivers[0].Endpoint(), err))
+		return model.STHAnchorResult{}, ambiguousDriverFailure("get_receipt_with_proof", s.drivers[0].Endpoint(), err)
 	}
 	if receipt.Status != fiscobcos.ReceiptStatusOK {
 		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, fiscobcos.ErrInvalidReceiptStatus)
@@ -214,7 +214,7 @@ func (s *FISCOBCOSStandardSink) readAnchorStateQuorum(ctx context.Context, paylo
 		if index == 0 {
 			first = cloneAnchorRecord(record)
 		} else if !sameAnchorRecord(first, record) {
-			return false, permanentDriverFailure("read_anchor_before_submit", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
+			return false, transientDriverFailure("read_anchor_before_submit", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
 		}
 		if record.Exists {
 			if err := fiscobcos.ValidateAnchorRecord(payload, record); err != nil {
@@ -249,10 +249,13 @@ func (s *FISCOBCOSStandardSink) readAnchorQuorum(ctx context.Context, payload fi
 	for _, driver := range s.drivers {
 		record, err := driver.ReadAnchor(ctx, payload.AnchorID)
 		if err != nil {
-			return nil, classifyDriverFailure("read_anchor", driver.Endpoint(), err)
+			return nil, ambiguousDriverFailure("read_anchor", driver.Endpoint(), err)
 		}
 		if len(records) > 0 && !sameAnchorRecord(records[0], record) {
-			return nil, permanentDriverFailure("read_anchor", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
+			return nil, ambiguousDriverFailure("read_anchor", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
+		}
+		if !record.Exists {
+			return nil, ambiguousDriverFailure("read_anchor", driver.Endpoint(), fiscobcos.ErrIncompleteChainEvidence)
 		}
 		if err := fiscobcos.ValidateAnchorRecord(payload, record); err != nil {
 			return nil, permanentDriverFailure("read_anchor", driver.Endpoint(), err)
@@ -268,14 +271,14 @@ func (s *FISCOBCOSStandardSink) readBlockQuorum(ctx context.Context, blockNumber
 	for index, driver := range s.drivers {
 		header, err := driver.GetBlockHeader(ctx, blockNumber)
 		if err != nil {
-			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, classifyDriverFailure("get_block_header", driver.Endpoint(), err)
+			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, ambiguousDriverFailure("get_block_header", driver.Endpoint(), err)
 		}
 		consensus, err := driver.GetConsensusSnapshot(ctx, blockNumber)
 		if err != nil {
-			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, classifyDriverFailure("get_consensus_snapshot", driver.Endpoint(), err)
+			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, ambiguousDriverFailure("get_consensus_snapshot", driver.Endpoint(), err)
 		}
 		if err := validateBlockObservation(blockNumber, blockHash, header, consensus); err != nil {
-			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, permanentDriverFailure("read_block", driver.Endpoint(), err)
+			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, ambiguousDriverFailure("read_block", driver.Endpoint(), err)
 		}
 		if index == 0 {
 			selectedHeader = cloneBlockHeader(header)
@@ -283,7 +286,7 @@ func (s *FISCOBCOSStandardSink) readBlockQuorum(ctx context.Context, blockNumber
 			continue
 		}
 		if !sameBlockHeader(selectedHeader, header) || !sameConsensusSnapshot(selectedConsensus, consensus) {
-			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, permanentDriverFailure("read_block", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
+			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, ambiguousDriverFailure("read_block", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
 		}
 	}
 	return selectedHeader, selectedConsensus, nil
@@ -440,6 +443,14 @@ func sameConsensusSnapshot(left, right fiscobcos.ConsensusSnapshot) bool {
 
 func permanentDriverFailure(operation, endpoint string, kind error) error {
 	return &fiscobcos.DriverError{Operation: operation, Endpoint: endpoint, Class: fiscobcos.FailurePermanent, Kind: kind}
+}
+
+func transientDriverFailure(operation, endpoint string, kind error) error {
+	return &fiscobcos.DriverError{Operation: operation, Endpoint: endpoint, Class: fiscobcos.FailureTransient, Kind: kind}
+}
+
+func ambiguousDriverFailure(operation, endpoint string, kind error) error {
+	return &fiscobcos.DriverError{Operation: operation, Endpoint: endpoint, Class: fiscobcos.FailureAmbiguous, Kind: kind}
 }
 
 func classifyDriverFailure(operation, endpoint string, err error) error {

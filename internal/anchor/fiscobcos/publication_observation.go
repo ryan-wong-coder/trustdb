@@ -18,22 +18,22 @@ const (
 // RawCanonical* fields and makes no receipt-inclusion or PBFT-finality claim.
 // #465 may transform qualified native encodings into the offline proof format.
 type PublicationObservation struct {
-	SchemaVersion     string
-	EvidenceStage     string
-	CryptoMode        CryptoMode
-	ChainID           string
-	GroupID           string
-	GenesisHash       []byte
-	TrustedCheckpoint BlockCheckpoint
-	Contract          ContractBinding
-	ChainContextID    []byte
-	CanonicalPayload  []byte
-	Transaction       TransactionSubmission
-	Receipt           ReceiptRPCObservation
-	Event             AnchorPublishedEvent
-	Readback          AnchorRecord
-	Block             BlockRPCObservation
-	Consensus         ConsensusSnapshot
+	SchemaVersion     string                `cbor:"schema_version" json:"schema_version"`
+	EvidenceStage     string                `cbor:"evidence_stage" json:"evidence_stage"`
+	CryptoMode        CryptoMode            `cbor:"crypto_mode" json:"crypto_mode"`
+	ChainID           string                `cbor:"chain_id" json:"chain_id"`
+	GroupID           string                `cbor:"group_id" json:"group_id"`
+	GenesisHash       []byte                `cbor:"genesis_hash" json:"genesis_hash"`
+	TrustedCheckpoint BlockCheckpoint       `cbor:"trusted_checkpoint" json:"trusted_checkpoint"`
+	Contract          ContractBinding       `cbor:"contract" json:"contract"`
+	ChainContextID    []byte                `cbor:"chain_context_id" json:"chain_context_id"`
+	CanonicalPayload  []byte                `cbor:"canonical_payload" json:"canonical_payload"`
+	Transaction       TransactionSubmission `cbor:"transaction" json:"transaction"`
+	Receipt           ReceiptRPCObservation `cbor:"receipt" json:"receipt"`
+	Event             AnchorPublishedEvent  `cbor:"event" json:"event"`
+	Readback          AnchorRecord          `cbor:"readback" json:"readback"`
+	Block             BlockRPCObservation   `cbor:"block" json:"block"`
+	Consensus         ConsensusSnapshot     `cbor:"consensus" json:"consensus"`
 }
 
 func MarshalPublicationObservation(observation PublicationObservation) ([]byte, error) {
@@ -58,6 +58,13 @@ func UnmarshalPublicationObservation(data []byte) (PublicationObservation, error
 	if err := ValidatePublicationObservation(observation); err != nil {
 		return PublicationObservation{}, err
 	}
+	canonical, err := cborx.Marshal(observation)
+	if err != nil {
+		return PublicationObservation{}, fmt.Errorf("%w: canonicalize publication observation: %v", ErrDriverInvalid, err)
+	}
+	if !bytes.Equal(canonical, data) {
+		return PublicationObservation{}, fmt.Errorf("%w: publication observation is not canonical CBOR", ErrDriverInvalid)
+	}
 	return observation, nil
 }
 
@@ -73,20 +80,53 @@ func ValidatePublicationObservation(observation PublicationObservation) error {
 		len(observation.ChainContextID) != 32 {
 		return fmt.Errorf("%w: invalid publication observation identity", ErrDriverInvalid)
 	}
+	if err := validateConfigString("publication chain_id", observation.ChainID); err != nil {
+		return fmt.Errorf("%w: invalid publication chain_id", ErrDriverInvalid)
+	}
+	if err := validateConfigString("publication group_id", observation.GroupID); err != nil {
+		return fmt.Errorf("%w: invalid publication group_id", ErrDriverInvalid)
+	}
+	if len(observation.CanonicalPayload) == 0 || len(observation.CanonicalPayload) > MaxPayloadBytes ||
+		len(observation.Transaction.EncodedTransaction) == 0 ||
+		len(observation.Transaction.EncodedTransaction) > maxRawTransactionBytes ||
+		len(observation.Transaction.Signature) == 0 ||
+		len(observation.Transaction.Signature) > maxSignatureBytes ||
+		len(observation.Receipt.NormalizedRPCReceipt) == 0 ||
+		len(observation.Receipt.NormalizedRPCReceipt) > maxRawReceiptBytes ||
+		len(observation.Event.NormalizedRPCLog) == 0 ||
+		len(observation.Event.NormalizedRPCLog) > maxDecodedEventBytes ||
+		len(observation.Block.NormalizedRPCHeader) == 0 ||
+		len(observation.Block.NormalizedRPCHeader) > maxRawHeaderBytes ||
+		len(observation.Receipt.StatusMessage) > maxConfigString {
+		return fmt.Errorf("%w: publication observation contains an empty or oversized field", ErrDriverInvalid)
+	}
+	if err := validateMerklePath("transaction RPC", observation.Receipt.TransactionProofRPC); err != nil {
+		return err
+	}
+	if err := validateMerklePath("receipt RPC", observation.Receipt.ReceiptProofRPC); err != nil {
+		return err
+	}
+	if len(observation.Consensus.Finality.Signatures) == 0 ||
+		len(observation.Consensus.Finality.Signatures) > maxCommitSignatures {
+		return fmt.Errorf("%w: invalid consensus signature count", ErrDriverInvalid)
+	}
+	for _, signature := range observation.Consensus.Finality.Signatures {
+		if len(signature.ValidatorNodeID) == 0 || len(signature.ValidatorNodeID) > maxConfigString ||
+			len(signature.Signature) == 0 || len(signature.Signature) > maxSignatureBytes {
+			return fmt.Errorf("%w: invalid consensus signature observation", ErrDriverInvalid)
+		}
+	}
 	payload, err := UnmarshalPayload(observation.CanonicalPayload)
 	if err != nil {
 		return err
 	}
-	if len(observation.Transaction.EncodedTransaction) == 0 ||
-		len(observation.Transaction.Signature) == 0 ||
-		len(observation.Transaction.Sender) != 20 ||
+	if len(observation.Transaction.Sender) != 20 ||
 		len(observation.Transaction.TransactionHash) != 32 ||
 		observation.Transaction.BlockLimit == 0 ||
 		observation.Transaction.SubmittedAtUnixN <= 0 {
 		return fmt.Errorf("%w: incomplete transaction observation", ErrIncompleteChainEvidence)
 	}
-	if len(observation.Receipt.NormalizedRPCReceipt) == 0 ||
-		observation.Receipt.Status != ReceiptStatusOK ||
+	if observation.Receipt.Status != ReceiptStatusOK ||
 		observation.Receipt.BlockNumber == 0 ||
 		len(observation.Receipt.BlockHashClaim) != 32 ||
 		len(observation.Receipt.ReceiptHashClaim) != 32 ||
@@ -114,14 +154,12 @@ func ValidatePublicationObservation(observation PublicationObservation) error {
 	if !bytes.Equal(observation.Readback.Publisher, event.Publisher) {
 		return fmt.Errorf("%w: event publisher does not match contract readback", ErrContractMismatch)
 	}
-	if len(observation.Block.NormalizedRPCHeader) == 0 ||
-		len(observation.Block.BlockHashClaim) != 32 ||
+	if len(observation.Block.BlockHashClaim) != 32 ||
 		observation.Block.BlockNumber == 0 ||
 		observation.Receipt.BlockNumber != observation.Block.BlockNumber ||
 		!bytes.Equal(observation.Receipt.BlockHashClaim, observation.Block.BlockHashClaim) ||
 		observation.Consensus.BlockNumber != observation.Block.BlockNumber ||
-		!bytes.Equal(observation.Consensus.BlockHash, observation.Block.BlockHashClaim) ||
-		len(observation.Consensus.Finality.Signatures) == 0 {
+		!bytes.Equal(observation.Consensus.BlockHash, observation.Block.BlockHashClaim) {
 		return fmt.Errorf("%w: incomplete block/consensus observation", ErrIncompleteChainEvidence)
 	}
 	return nil
