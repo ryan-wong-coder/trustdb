@@ -19,7 +19,7 @@ import (
 type fakeBCOSState struct {
 	mu                  sync.Mutex
 	record              fiscobcos.AnchorRecord
-	attempt             fiscobcos.TransactionAttempt
+	attempt             fiscobcos.TransactionSubmission
 	receipt             fiscobcos.ReceiptWithProof
 	submitCalls         int
 	failAfterEffectOnce bool
@@ -41,13 +41,13 @@ func (d *fakeBCOSDriver) SubmitAnchor(_ context.Context, request fiscobcos.Submi
 	defer d.state.mu.Unlock()
 	d.state.submitCalls++
 	txHash := sha256.Sum256(append(append([]byte(nil), request.Payload.AnchorID...), byte(d.state.submitCalls)))
-	d.state.attempt = fiscobcos.TransactionAttempt{
-		RawCanonicalTransaction: append([]byte("canonical-transaction-"), txHash[:]...),
-		Signature:               bytes.Repeat([]byte{0x51}, 65),
-		Sender:                  bytes.Repeat([]byte{0x61}, 20),
-		TransactionHash:         txHash[:],
-		BlockLimit:              700,
-		SubmittedAtUnixN:        int64(d.state.submitCalls),
+	d.state.attempt = fiscobcos.TransactionSubmission{
+		EncodedTransaction: append([]byte("encoded-transaction-"), txHash[:]...),
+		Signature:          bytes.Repeat([]byte{0x51}, 65),
+		Sender:             bytes.Repeat([]byte{0x61}, 20),
+		TransactionHash:    txHash[:],
+		BlockLimit:         700,
+		SubmittedAtUnixN:   int64(d.state.submitCalls),
 	}
 	d.state.record = fiscobcos.AnchorRecord{
 		StreamID: append([]byte(nil), request.Payload.StreamID...), TreeSize: request.Payload.TreeSize,
@@ -58,10 +58,29 @@ func (d *fakeBCOSDriver) SubmitAnchor(_ context.Context, request fiscobcos.Submi
 	blockHash := bytes.Repeat([]byte{0x71}, 32)
 	d.state.receipt = fiscobcos.ReceiptWithProof{
 		Status: fiscobcos.ReceiptStatusOK, BlockNumber: 500, BlockHash: blockHash, Record: cloneAnchorRecord(d.state.record),
-		Evidence: fiscobcos.ReceiptEvidence{
-			RawCanonicalReceipt: []byte("canonical-receipt"), ReceiptHash: bytes.Repeat([]byte{0x72}, 32),
-			TransactionHash: txHash[:], TransactionProof: [][]byte{}, ReceiptProof: [][]byte{},
-			DecodedAnchorEvent: []byte("exact-anchor-event"),
+		Event: fiscobcos.AnchorPublishedEvent{
+			ContractAddress:  bytes.Repeat([]byte{0x41}, 20),
+			AnchorID:         append([]byte(nil), request.Payload.AnchorID...),
+			StreamID:         append([]byte(nil), request.Payload.StreamID...),
+			TreeSize:         request.Payload.TreeSize,
+			RootHash:         append([]byte(nil), request.Payload.RootHash...),
+			SignedSTHDigest:  append([]byte(nil), request.Payload.SignedSTHDigest...),
+			Publisher:        bytes.Repeat([]byte{0x61}, 20),
+			PayloadVersion:   request.Payload.Version,
+			LogIndex:         0,
+			NormalizedRPCLog: []byte("normalized-rpc-log"),
+		},
+		Observation: fiscobcos.ReceiptRPCObservation{
+			NormalizedRPCReceipt: []byte("normalized-rpc-receipt"),
+			Status:               fiscobcos.ReceiptStatusOK,
+			StatusMessage:        "success",
+			BlockNumber:          500,
+			BlockHashClaim:       append([]byte(nil), blockHash...),
+			ReceiptHashClaim:     bytes.Repeat([]byte{0x72}, 32),
+			TransactionHash:      txHash[:],
+			TransactionProofRPC:  [][]byte{},
+			ReceiptProofRPC:      [][]byte{},
+			AnchorLogIndex:       0,
 		},
 	}
 	if d.state.failAfterEffectOnce {
@@ -81,8 +100,8 @@ func (d *fakeBCOSDriver) GetReceiptWithProof(context.Context, []byte) (fiscobcos
 	return cloneReceipt(d.state.receipt), nil
 }
 func (d *fakeBCOSDriver) GetBlockHeader(context.Context, uint64) (fiscobcos.BlockHeader, error) {
-	return fiscobcos.BlockHeader{Evidence: fiscobcos.BlockEvidence{
-		RawCanonicalHeader: []byte("canonical-header"), BlockHash: bytes.Repeat([]byte{0x71}, 32), BlockNumber: 500,
+	return fiscobcos.BlockHeader{Observation: fiscobcos.BlockRPCObservation{
+		NormalizedRPCHeader: []byte("normalized-rpc-header"), BlockHashClaim: bytes.Repeat([]byte{0x71}, 32), BlockNumber: 500,
 	}}, nil
 }
 func (d *fakeBCOSDriver) GetConsensusSnapshot(context.Context, uint64) (fiscobcos.ConsensusSnapshot, error) {
@@ -113,15 +132,20 @@ func TestFISCOBCOSStandardSinkPublishesCompleteRawEvidence(t *testing.T) {
 	if result.SinkName != fiscobcos.SinkName || result.TreeSize != sth.TreeSize || result.PublishedAtUnixN == 0 {
 		t.Fatalf("result=%+v", result)
 	}
-	if err := fiscobcos.ValidateProofAgainstTrustConfig(sth, result, trust); err != nil {
-		t.Fatalf("raw evidence container binding: %v", err)
+	if result.EvidenceStage != model.AnchorEvidenceStageRaw || model.AnchorResultProvidesOfflineL5(result) {
+		t.Fatalf("raw result must not satisfy L5: %+v", result)
 	}
-	proof, err := fiscobcos.UnmarshalProof(result.Proof)
+	observation, err := fiscobcos.UnmarshalPublicationObservation(result.Proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(proof.TransactionAttempts) != 1 || len(proof.Receipt.TransactionProof) != 0 || len(proof.Finality.Signatures) != 3 {
-		t.Fatalf("proof=%+v", proof)
+	if observation.EvidenceStage != model.AnchorEvidenceStageRaw ||
+		len(observation.Receipt.TransactionProofRPC) != 0 ||
+		len(observation.Consensus.Finality.Signatures) != 3 {
+		t.Fatalf("observation=%+v", observation)
+	}
+	if err := fiscobcos.ValidateProofAgainstTrustConfig(sth, result, trust); err == nil {
+		t.Fatal("raw RPC observation must not decode as an offline anchor proof")
 	}
 }
 
@@ -144,25 +168,39 @@ func TestFISCOBCOSStandardSinkFailsClosedOnEndpointDisagreement(t *testing.T) {
 	}
 }
 
-func TestFISCOBCOSStandardSinkRejectsReceiptOnlyResponse(t *testing.T) {
+func TestFISCOBCOSStandardSinkDoesNotMaskConfiguredEndpointReadDisagreement(t *testing.T) {
 	trust, drivers := fakeBCOSFixture(t)
-	state := drivers[0].(*fakeBCOSDriver).state
-	driver := drivers[0].(*fakeBCOSDriver)
-	originalSubmit := driver.state
-	_ = originalSubmit
+	trust.Endpoints = append(trust.Endpoints, "127.0.0.1:20202")
+	base := drivers[0].(*fakeBCOSDriver)
+	probe := cloneChainProbe(base.probe)
+	probe.Endpoint = trust.Endpoints[2]
+	drivers = append(drivers, &fakeBCOSDriver{
+		endpoint: probe.Endpoint,
+		probe:    probe,
+		state:    &fakeBCOSState{},
+	})
 	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fake produces proof fields during Submit. Clear them after the side
-	// effect by wrapping the shared state through a hook-free first call.
-	_, _ = driver.SubmitAnchor(context.Background(), fakeSubmitRequest(t, testSTH(testScheduleKey(fiscobcos.SinkName), 7, 0x17)))
-	state.mu.Lock()
-	state.receipt.Evidence.TransactionProof = nil
-	state.receipt.Evidence.ReceiptProof = nil
-	state.mu.Unlock()
-	// A new Publish replaces the fixture receipt. Force incomplete evidence
-	// through a dedicated driver wrapper.
+	_, err = sink.Publish(context.Background(), testSTH(testScheduleKey(fiscobcos.SinkName), 8, 0x18))
+	if !errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrEndpointDisagreement) {
+		t.Fatalf("minority endpoint disagreement error=%v", err)
+	}
+	base.state.mu.Lock()
+	defer base.state.mu.Unlock()
+	if base.state.submitCalls != 1 {
+		t.Fatalf("submit calls=%d, want one side effect before readback disagreement", base.state.submitCalls)
+	}
+}
+
+func TestFISCOBCOSStandardSinkRejectsReceiptOnlyResponse(t *testing.T) {
+	trust, drivers := fakeBCOSFixture(t)
+	driver := drivers[0].(*fakeBCOSDriver)
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+	if err != nil {
+		t.Fatal(err)
+	}
 	drivers[0] = &receiptOnlyDriver{fakeBCOSDriver: driver}
 	sink, err = NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
 	if err != nil {
@@ -174,16 +212,39 @@ func TestFISCOBCOSStandardSinkRejectsReceiptOnlyResponse(t *testing.T) {
 	}
 }
 
+func TestFISCOBCOSStandardSinkDoesNotResubmitExistingAnchorWithoutEvidence(t *testing.T) {
+	trust, drivers := fakeBCOSFixture(t)
+	driver := drivers[0].(*fakeBCOSDriver)
+	sth := testSTH(testScheduleKey(fiscobcos.SinkName), 8, 0x18)
+	request := fakeSubmitRequest(t, sth)
+	if _, err := driver.SubmitAnchor(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sink.Publish(context.Background(), sth)
+	if errors.Is(err, ErrPermanent) || !errors.Is(err, fiscobcos.ErrExistingAnchorEvidenceUnavailable) {
+		t.Fatalf("pre-existing anchor error=%v", err)
+	}
+	driver.state.mu.Lock()
+	defer driver.state.mu.Unlock()
+	if driver.state.submitCalls != 1 {
+		t.Fatalf("pre-existing anchor was resubmitted: calls=%d", driver.state.submitCalls)
+	}
+}
+
 type receiptOnlyDriver struct{ *fakeBCOSDriver }
 
 func (d *receiptOnlyDriver) GetReceiptWithProof(ctx context.Context, hash []byte) (fiscobcos.ReceiptWithProof, error) {
 	receipt, err := d.fakeBCOSDriver.GetReceiptWithProof(ctx, hash)
-	receipt.Evidence.TransactionProof = nil
-	receipt.Evidence.ReceiptProof = nil
+	receipt.Observation.TransactionProofRPC = nil
+	receipt.Observation.ReceiptProofRPC = nil
 	return receipt, err
 }
 
-func TestFISCOBCOSServiceRestartKeepsImmutableTarget(t *testing.T) {
+func TestFISCOBCOSServiceRestartDoesNotRepeatUnknownSideEffect(t *testing.T) {
 	trust, drivers := fakeBCOSFixture(t)
 	state := drivers[0].(*fakeBCOSDriver).state
 	state.failAfterEffectOnce = true
@@ -209,14 +270,18 @@ func TestFISCOBCOSServiceRestartKeepsImmutableTarget(t *testing.T) {
 	now = now.Add(time.Second)
 	second := newTestService(t, store, sink, key, &now, nil)
 	second.tick(context.Background())
-	result, found, err := store.GetSTHAnchorResult(context.Background(), sth.TreeSize)
-	if err != nil || !found || result.TreeSize != sth.TreeSize {
-		t.Fatalf("result after restart=%+v found=%v err=%v", result, found, err)
+	if result, found, err := store.GetSTHAnchorResult(context.Background(), sth.TreeSize); err != nil || found {
+		t.Fatalf("unknown-outcome result must remain unclaimed until #465 recovery: result=%+v found=%v err=%v", result, found, err)
+	}
+	schedule, found, err = store.GetSTHAnchorSchedule(context.Background(), key)
+	if err != nil || !found || schedule.InFlight == nil || schedule.InFlight.TerminalFailure ||
+		schedule.InFlight.Target.TreeSize != sth.TreeSize {
+		t.Fatalf("recover-only schedule=%+v found=%v err=%v", schedule, found, err)
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.submitCalls != 2 {
-		t.Fatalf("submit calls=%d, want 2 attempts for one immutable target", state.submitCalls)
+	if state.submitCalls != 1 {
+		t.Fatalf("submit calls=%d, unknown outcome must not be resubmitted", state.submitCalls)
 	}
 }
 
@@ -284,8 +349,8 @@ func fakeSubmitRequest(t *testing.T, sth model.SignedTreeHead) fiscobcos.SubmitR
 	return fiscobcos.SubmitRequest{Payload: payload, CanonicalPayload: data}
 }
 
-func cloneAttempt(in fiscobcos.TransactionAttempt) fiscobcos.TransactionAttempt {
-	in.RawCanonicalTransaction = append([]byte(nil), in.RawCanonicalTransaction...)
+func cloneAttempt(in fiscobcos.TransactionSubmission) fiscobcos.TransactionSubmission {
+	in.EncodedTransaction = append([]byte(nil), in.EncodedTransaction...)
 	in.Signature = append([]byte(nil), in.Signature...)
 	in.Sender = append([]byte(nil), in.Sender...)
 	in.TransactionHash = append([]byte(nil), in.TransactionHash...)
@@ -295,12 +360,19 @@ func cloneAttempt(in fiscobcos.TransactionAttempt) fiscobcos.TransactionAttempt 
 func cloneReceipt(in fiscobcos.ReceiptWithProof) fiscobcos.ReceiptWithProof {
 	in.BlockHash = append([]byte(nil), in.BlockHash...)
 	in.Record = cloneAnchorRecord(in.Record)
-	in.Evidence.RawCanonicalReceipt = append([]byte(nil), in.Evidence.RawCanonicalReceipt...)
-	in.Evidence.ReceiptHash = append([]byte(nil), in.Evidence.ReceiptHash...)
-	in.Evidence.TransactionHash = append([]byte(nil), in.Evidence.TransactionHash...)
-	in.Evidence.TransactionProof = cloneByteSlicesForTest(in.Evidence.TransactionProof)
-	in.Evidence.ReceiptProof = cloneByteSlicesForTest(in.Evidence.ReceiptProof)
-	in.Evidence.DecodedAnchorEvent = append([]byte(nil), in.Evidence.DecodedAnchorEvent...)
+	in.Event.ContractAddress = append([]byte(nil), in.Event.ContractAddress...)
+	in.Event.AnchorID = append([]byte(nil), in.Event.AnchorID...)
+	in.Event.StreamID = append([]byte(nil), in.Event.StreamID...)
+	in.Event.RootHash = append([]byte(nil), in.Event.RootHash...)
+	in.Event.SignedSTHDigest = append([]byte(nil), in.Event.SignedSTHDigest...)
+	in.Event.Publisher = append([]byte(nil), in.Event.Publisher...)
+	in.Event.NormalizedRPCLog = append([]byte(nil), in.Event.NormalizedRPCLog...)
+	in.Observation.NormalizedRPCReceipt = append([]byte(nil), in.Observation.NormalizedRPCReceipt...)
+	in.Observation.BlockHashClaim = append([]byte(nil), in.Observation.BlockHashClaim...)
+	in.Observation.ReceiptHashClaim = append([]byte(nil), in.Observation.ReceiptHashClaim...)
+	in.Observation.TransactionHash = append([]byte(nil), in.Observation.TransactionHash...)
+	in.Observation.TransactionProofRPC = cloneByteSlicesForTest(in.Observation.TransactionProofRPC)
+	in.Observation.ReceiptProofRPC = cloneByteSlicesForTest(in.Observation.ReceiptProofRPC)
 	return in
 }
 

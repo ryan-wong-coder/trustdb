@@ -13,14 +13,15 @@ const (
 )
 
 var (
-	ErrDriverInvalid           = errors.New("invalid FISCO BCOS driver response")
-	ErrWrongNetwork            = errors.New("FISCO BCOS wrong network")
-	ErrStaleEndpoint           = errors.New("FISCO BCOS stale endpoint")
-	ErrEndpointDisagreement    = errors.New("FISCO BCOS endpoint disagreement")
-	ErrContractMismatch        = errors.New("FISCO BCOS contract mismatch")
-	ErrUnsupportedSDK          = errors.New("FISCO BCOS SDK is unsupported")
-	ErrInvalidReceiptStatus    = errors.New("FISCO BCOS receipt status is invalid")
-	ErrIncompleteChainEvidence = errors.New("FISCO BCOS chain evidence is incomplete")
+	ErrDriverInvalid                     = errors.New("invalid FISCO BCOS driver response")
+	ErrWrongNetwork                      = errors.New("FISCO BCOS wrong network")
+	ErrStaleEndpoint                     = errors.New("FISCO BCOS stale endpoint")
+	ErrEndpointDisagreement              = errors.New("FISCO BCOS endpoint disagreement")
+	ErrContractMismatch                  = errors.New("FISCO BCOS contract mismatch")
+	ErrUnsupportedSDK                    = errors.New("FISCO BCOS SDK is unsupported")
+	ErrInvalidReceiptStatus              = errors.New("FISCO BCOS receipt status is invalid")
+	ErrIncompleteChainEvidence           = errors.New("FISCO BCOS chain evidence is incomplete")
+	ErrExistingAnchorEvidenceUnavailable = errors.New("existing FISCO BCOS anchor requires immutable transaction evidence recovery")
 )
 
 // FailureClass is intentionally small and stable. The anchor worker maps
@@ -99,8 +100,45 @@ type SubmitRequest struct {
 	CanonicalPayload []byte
 }
 
+type TransactionSubmission struct {
+	EncodedTransaction []byte
+	Signature          []byte
+	Sender             []byte
+	TransactionHash    []byte
+	BlockLimit         uint64
+	SubmittedAtUnixN   int64
+}
+
 type Submission struct {
-	Attempt TransactionAttempt
+	Attempt TransactionSubmission
+}
+
+type AnchorPublishedEvent struct {
+	ContractAddress  []byte
+	AnchorID         []byte
+	StreamID         []byte
+	TreeSize         uint64
+	RootHash         []byte
+	SignedSTHDigest  []byte
+	Publisher        []byte
+	PayloadVersion   uint16
+	LogIndex         uint64
+	NormalizedRPCLog []byte
+}
+
+type ReceiptRPCObservation struct {
+	NormalizedRPCReceipt []byte
+	Status               int
+	StatusMessage        string
+	BlockNumber          uint64
+	BlockHashClaim       []byte
+	ReceiptHashClaim     []byte
+	TransactionHash      []byte
+	TransactionIndex     uint64
+	TransactionProofRPC  [][]byte
+	ReceiptIndex         uint64
+	ReceiptProofRPC      [][]byte
+	AnchorLogIndex       uint64
 }
 
 // ReceiptWithProof is deliberately named to exclude receipt-only APIs. A
@@ -112,11 +150,18 @@ type ReceiptWithProof struct {
 	BlockNumber   uint64
 	BlockHash     []byte
 	Record        AnchorRecord
-	Evidence      ReceiptEvidence
+	Event         AnchorPublishedEvent
+	Observation   ReceiptRPCObservation
+}
+
+type BlockRPCObservation struct {
+	NormalizedRPCHeader []byte
+	BlockHashClaim      []byte
+	BlockNumber         uint64
 }
 
 type BlockHeader struct {
-	Evidence BlockEvidence
+	Observation BlockRPCObservation
 }
 
 type ConsensusSnapshot struct {

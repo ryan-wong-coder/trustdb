@@ -150,6 +150,17 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
 	}
 	request := fiscobcos.SubmitRequest{Payload: payload, CanonicalPayload: canonicalPayload}
+	existing, err := s.readAnchorStateQuorum(ctx, payload)
+	if err != nil {
+		return model.STHAnchorResult{}, mapSinkError(err)
+	}
+	if existing {
+		return model.STHAnchorResult{}, &fiscobcos.DriverError{
+			Operation: "recover_existing_anchor",
+			Class:     fiscobcos.FailureAmbiguous,
+			Kind:      fiscobcos.ErrExistingAnchorEvidenceUnavailable,
+		}
+	}
 	submission, err := s.drivers[0].SubmitAnchor(ctx, request)
 	if err != nil {
 		return model.STHAnchorResult{}, mapSinkError(classifyDriverFailure("submit_anchor", s.drivers[0].Endpoint(), err))
@@ -168,18 +179,18 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 	if receipt.Status != fiscobcos.ReceiptStatusOK {
 		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, fiscobcos.ErrInvalidReceiptStatus)
 	}
-	if err := validateReceipt(payload, submission.Attempt, receipt, records[0]); err != nil {
+	if err := validateReceipt(s.trust, payload, submission.Attempt, receipt, records[0]); err != nil {
 		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
 	}
 	header, consensus, err := s.readBlockQuorum(ctx, receipt.BlockNumber, receipt.BlockHash)
 	if err != nil {
 		return model.STHAnchorResult{}, mapSinkError(err)
 	}
-	proof, err := s.buildProof(canonicalPayload, submission.Attempt, receipt, header, consensus)
+	observation, err := s.buildObservation(canonicalPayload, submission.Attempt, receipt, header, consensus)
 	if err != nil {
 		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
 	}
-	proofBytes, err := fiscobcos.MarshalProof(proof)
+	proofBytes, err := fiscobcos.MarshalPublicationObservation(observation)
 	if err != nil {
 		return model.STHAnchorResult{}, fmt.Errorf("%w: %w", ErrPermanent, err)
 	}
@@ -188,8 +199,33 @@ func (s *FISCOBCOSStandardSink) Publish(ctx context.Context, sth model.SignedTre
 		NodeID:        sth.NodeID, LogID: sth.LogID, TreeSize: sth.TreeSize,
 		SinkName: fiscobcos.SinkName, AnchorID: fiscobcos.AnchorIDString(payload),
 		RootHash: append([]byte(nil), sth.RootHash...), STH: sth, Proof: proofBytes,
+		EvidenceStage:    model.AnchorEvidenceStageRaw,
 		PublishedAtUnixN: s.clock().UTC().UnixNano(),
 	}, nil
+}
+
+func (s *FISCOBCOSStandardSink) readAnchorStateQuorum(ctx context.Context, payload fiscobcos.AnchorPayload) (bool, error) {
+	var first fiscobcos.AnchorRecord
+	for index, driver := range s.drivers {
+		record, err := driver.ReadAnchor(ctx, payload.AnchorID)
+		if err != nil {
+			return false, classifyDriverFailure("read_anchor_before_submit", driver.Endpoint(), err)
+		}
+		if index == 0 {
+			first = cloneAnchorRecord(record)
+		} else if !sameAnchorRecord(first, record) {
+			return false, permanentDriverFailure("read_anchor_before_submit", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
+		}
+		if record.Exists {
+			if err := fiscobcos.ValidateAnchorRecord(payload, record); err != nil {
+				return false, permanentDriverFailure("read_anchor_before_submit", driver.Endpoint(), err)
+			}
+		} else if len(record.StreamID) != 0 || record.TreeSize != 0 || len(record.RootHash) != 0 ||
+			len(record.SignedSTHDigest) != 0 || len(record.Publisher) != 0 || record.PayloadVersion != 0 {
+			return false, permanentDriverFailure("read_anchor_before_submit", driver.Endpoint(), fiscobcos.ErrDriverInvalid)
+		}
+	}
+	return first.Exists, nil
 }
 
 func (s *FISCOBCOSStandardSink) Close() error {
@@ -209,18 +245,17 @@ func (s *FISCOBCOSStandardSink) Close() error {
 }
 
 func (s *FISCOBCOSStandardSink) readAnchorQuorum(ctx context.Context, payload fiscobcos.AnchorPayload) ([]fiscobcos.AnchorRecord, error) {
-	quorum := int(s.trust.ReadQuorum)
-	records := make([]fiscobcos.AnchorRecord, 0, quorum)
-	for _, driver := range s.drivers[:quorum] {
+	records := make([]fiscobcos.AnchorRecord, 0, len(s.drivers))
+	for _, driver := range s.drivers {
 		record, err := driver.ReadAnchor(ctx, payload.AnchorID)
 		if err != nil {
 			return nil, classifyDriverFailure("read_anchor", driver.Endpoint(), err)
 		}
-		if err := fiscobcos.ValidateAnchorRecord(payload, record); err != nil {
-			return nil, permanentDriverFailure("read_anchor", driver.Endpoint(), err)
-		}
 		if len(records) > 0 && !sameAnchorRecord(records[0], record) {
 			return nil, permanentDriverFailure("read_anchor", driver.Endpoint(), fiscobcos.ErrEndpointDisagreement)
+		}
+		if err := fiscobcos.ValidateAnchorRecord(payload, record); err != nil {
+			return nil, permanentDriverFailure("read_anchor", driver.Endpoint(), err)
 		}
 		records = append(records, cloneAnchorRecord(record))
 	}
@@ -228,10 +263,9 @@ func (s *FISCOBCOSStandardSink) readAnchorQuorum(ctx context.Context, payload fi
 }
 
 func (s *FISCOBCOSStandardSink) readBlockQuorum(ctx context.Context, blockNumber uint64, blockHash []byte) (fiscobcos.BlockHeader, fiscobcos.ConsensusSnapshot, error) {
-	quorum := int(s.trust.ReadQuorum)
 	var selectedHeader fiscobcos.BlockHeader
 	var selectedConsensus fiscobcos.ConsensusSnapshot
-	for index, driver := range s.drivers[:quorum] {
+	for index, driver := range s.drivers {
 		header, err := driver.GetBlockHeader(ctx, blockNumber)
 		if err != nil {
 			return fiscobcos.BlockHeader{}, fiscobcos.ConsensusSnapshot{}, classifyDriverFailure("get_block_header", driver.Endpoint(), err)
@@ -255,28 +289,28 @@ func (s *FISCOBCOSStandardSink) readBlockQuorum(ctx context.Context, blockNumber
 	return selectedHeader, selectedConsensus, nil
 }
 
-func (s *FISCOBCOSStandardSink) buildProof(payload []byte, attempt fiscobcos.TransactionAttempt, receipt fiscobcos.ReceiptWithProof, header fiscobcos.BlockHeader, consensus fiscobcos.ConsensusSnapshot) (fiscobcos.AnchorProof, error) {
+func (s *FISCOBCOSStandardSink) buildObservation(payload []byte, attempt fiscobcos.TransactionSubmission, receipt fiscobcos.ReceiptWithProof, header fiscobcos.BlockHeader, consensus fiscobcos.ConsensusSnapshot) (fiscobcos.PublicationObservation, error) {
 	contextID, err := fiscobcos.ChainContextID(s.trust)
 	if err != nil {
-		return fiscobcos.AnchorProof{}, err
+		return fiscobcos.PublicationObservation{}, err
 	}
-	return fiscobcos.AnchorProof{
-		SchemaVersion: fiscobcos.SchemaAnchorProof, FormatVersion: fiscobcos.ProofVersion,
-		CryptoMode:              s.trust.CryptoMode,
-		ProtocolHashAlgorithm:   s.trust.ProtocolHashAlgorithm,
-		ChainHashAlgorithm:      s.trust.ChainHashAlgorithm,
-		ChainSignatureAlgorithm: s.trust.ChainSignatureAlgorithm,
-		ChainID:                 s.trust.ChainID, GroupID: s.trust.GroupID,
-		GenesisHash:               append([]byte(nil), s.trust.GenesisHash...),
-		TrustedCheckpoint:         s.trust.TrustedCheckpoint,
-		Contract:                  s.trust.Contract,
-		ChainContextID:            contextID,
-		CanonicalPayload:          append([]byte(nil), payload...),
-		TransactionAttempts:       []fiscobcos.TransactionAttempt{attempt},
-		SuccessfulTransactionHash: append([]byte(nil), attempt.TransactionHash...),
-		Receipt:                   receipt.Evidence,
-		Block:                     header.Evidence,
-		Finality:                  consensus.Finality,
+	return fiscobcos.PublicationObservation{
+		SchemaVersion:     fiscobcos.SchemaPublicationObservation,
+		EvidenceStage:     model.AnchorEvidenceStageRaw,
+		CryptoMode:        s.trust.CryptoMode,
+		ChainID:           s.trust.ChainID,
+		GroupID:           s.trust.GroupID,
+		GenesisHash:       append([]byte(nil), s.trust.GenesisHash...),
+		TrustedCheckpoint: s.trust.TrustedCheckpoint,
+		Contract:          s.trust.Contract,
+		ChainContextID:    contextID,
+		CanonicalPayload:  append([]byte(nil), payload...),
+		Transaction:       attempt,
+		Receipt:           receipt.Observation,
+		Event:             receipt.Event,
+		Readback:          receipt.Record,
+		Block:             header.Observation,
+		Consensus:         consensus,
 	}, nil
 }
 
@@ -294,23 +328,22 @@ func payloadForSTH(sth model.SignedTreeHead) (fiscobcos.AnchorPayload, error) {
 	return matched[0], nil
 }
 
-func validateTransactionAttempt(attempt fiscobcos.TransactionAttempt) error {
-	if len(attempt.RawCanonicalTransaction) == 0 || len(attempt.Signature) == 0 ||
-		len(attempt.Sender) == 0 || len(attempt.TransactionHash) != 32 ||
+func validateTransactionAttempt(attempt fiscobcos.TransactionSubmission) error {
+	if len(attempt.EncodedTransaction) == 0 || len(attempt.Signature) == 0 ||
+		len(attempt.Sender) != 20 || len(attempt.TransactionHash) != 32 ||
 		attempt.BlockLimit == 0 || attempt.SubmittedAtUnixN <= 0 {
 		return fiscobcos.ErrIncompleteChainEvidence
 	}
 	return nil
 }
 
-func validateReceipt(payload fiscobcos.AnchorPayload, attempt fiscobcos.TransactionAttempt, receipt fiscobcos.ReceiptWithProof, quorumRecord fiscobcos.AnchorRecord) error {
+func validateReceipt(trust fiscobcos.TrustConfig, payload fiscobcos.AnchorPayload, attempt fiscobcos.TransactionSubmission, receipt fiscobcos.ReceiptWithProof, quorumRecord fiscobcos.AnchorRecord) error {
 	if receipt.BlockNumber == 0 || len(receipt.BlockHash) != 32 ||
-		!bytes.Equal(receipt.Evidence.TransactionHash, attempt.TransactionHash) ||
-		len(receipt.Evidence.RawCanonicalReceipt) == 0 ||
-		len(receipt.Evidence.ReceiptHash) != 32 ||
-		len(receipt.Evidence.DecodedAnchorEvent) == 0 ||
-		receipt.Evidence.TransactionProof == nil ||
-		receipt.Evidence.ReceiptProof == nil {
+		!bytes.Equal(receipt.Observation.TransactionHash, attempt.TransactionHash) ||
+		len(receipt.Observation.NormalizedRPCReceipt) == 0 ||
+		len(receipt.Observation.ReceiptHashClaim) != 32 ||
+		receipt.Observation.TransactionProofRPC == nil ||
+		receipt.Observation.ReceiptProofRPC == nil {
 		return fiscobcos.ErrIncompleteChainEvidence
 	}
 	if err := fiscobcos.ValidateAnchorRecord(payload, receipt.Record); err != nil {
@@ -319,13 +352,27 @@ func validateReceipt(payload fiscobcos.AnchorPayload, attempt fiscobcos.Transact
 	if !sameAnchorRecord(receipt.Record, quorumRecord) {
 		return fiscobcos.ErrEndpointDisagreement
 	}
+	event := receipt.Event
+	if !bytes.Equal(event.ContractAddress, trust.Contract.Address) ||
+		!bytes.Equal(event.AnchorID, payload.AnchorID) ||
+		!bytes.Equal(event.StreamID, payload.StreamID) ||
+		event.TreeSize != payload.TreeSize ||
+		!bytes.Equal(event.RootHash, payload.RootHash) ||
+		!bytes.Equal(event.SignedSTHDigest, payload.SignedSTHDigest) ||
+		event.PayloadVersion != payload.Version ||
+		!bytes.Equal(event.Publisher, receipt.Record.Publisher) ||
+		!bytes.Equal(event.Publisher, attempt.Sender) ||
+		event.LogIndex != receipt.Observation.AnchorLogIndex ||
+		len(event.NormalizedRPCLog) == 0 {
+		return fiscobcos.ErrContractMismatch
+	}
 	return nil
 }
 
 func validateBlockObservation(blockNumber uint64, blockHash []byte, header fiscobcos.BlockHeader, consensus fiscobcos.ConsensusSnapshot) error {
-	if blockNumber == 0 || header.Evidence.BlockNumber != blockNumber ||
-		len(header.Evidence.RawCanonicalHeader) == 0 ||
-		!bytes.Equal(header.Evidence.BlockHash, blockHash) ||
+	if blockNumber == 0 || header.Observation.BlockNumber != blockNumber ||
+		len(header.Observation.NormalizedRPCHeader) == 0 ||
+		!bytes.Equal(header.Observation.BlockHashClaim, blockHash) ||
 		consensus.BlockNumber != blockNumber ||
 		!bytes.Equal(consensus.BlockHash, blockHash) ||
 		len(consensus.Finality.Signatures) == 0 {
@@ -371,9 +418,9 @@ func sameAnchorRecord(left, right fiscobcos.AnchorRecord) bool {
 }
 
 func sameBlockHeader(left, right fiscobcos.BlockHeader) bool {
-	return left.Evidence.BlockNumber == right.Evidence.BlockNumber &&
-		bytes.Equal(left.Evidence.BlockHash, right.Evidence.BlockHash) &&
-		bytes.Equal(left.Evidence.RawCanonicalHeader, right.Evidence.RawCanonicalHeader)
+	return left.Observation.BlockNumber == right.Observation.BlockNumber &&
+		bytes.Equal(left.Observation.BlockHashClaim, right.Observation.BlockHashClaim) &&
+		bytes.Equal(left.Observation.NormalizedRPCHeader, right.Observation.NormalizedRPCHeader)
 }
 
 func sameConsensusSnapshot(left, right fiscobcos.ConsensusSnapshot) bool {
@@ -429,8 +476,8 @@ func cloneAnchorRecord(in fiscobcos.AnchorRecord) fiscobcos.AnchorRecord {
 }
 
 func cloneBlockHeader(in fiscobcos.BlockHeader) fiscobcos.BlockHeader {
-	in.Evidence.RawCanonicalHeader = append([]byte(nil), in.Evidence.RawCanonicalHeader...)
-	in.Evidence.BlockHash = append([]byte(nil), in.Evidence.BlockHash...)
+	in.Observation.NormalizedRPCHeader = append([]byte(nil), in.Observation.NormalizedRPCHeader...)
+	in.Observation.BlockHashClaim = append([]byte(nil), in.Observation.BlockHashClaim...)
 	return in
 }
 

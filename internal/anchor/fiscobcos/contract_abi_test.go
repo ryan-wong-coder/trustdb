@@ -2,6 +2,8 @@ package fiscobcos
 
 import (
 	"bytes"
+	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +36,22 @@ func TestTrustDBAnchorV1CallEncoding(t *testing.T) {
 }
 
 func TestDecodeAnchorRecordRejectsNonCanonicalABI(t *testing.T) {
+	// This is the exact 7-word ABI result returned by TrustDBAnchorV1 for an
+	// unknown anchor ID: Solidity zero-initializes every tuple element,
+	// including exists=false.
+	absentVector, err := hex.DecodeString(strings.Repeat("00", 7*32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	absent, err := DecodeAnchorRecord(absentVector)
+	if err != nil || absent.Exists || len(absent.StreamID) != 0 {
+		t.Fatalf("absent record=%+v err=%v", absent, err)
+	}
+	nonCanonicalAbsent := append([]byte(nil), absentVector...)
+	nonCanonicalAbsent[0] = 1
+	if _, err := DecodeAnchorRecord(nonCanonicalAbsent); err == nil {
+		t.Fatal("decoder accepted a non-zero tuple with exists=false")
+	}
 	data := make([]byte, 7*32)
 	copy(data[:32], bytes.Repeat([]byte{1}, 32))
 	data[2*32-1] = 7

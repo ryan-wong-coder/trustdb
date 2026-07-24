@@ -57,6 +57,12 @@ func DecodeAnchorRecord(data []byte) (AnchorRecord, error) {
 	if exists > 1 {
 		return AnchorRecord{}, fmt.Errorf("%w: getAnchor exists flag is not boolean", ErrDriverInvalid)
 	}
+	if exists == 0 {
+		if !bytes.Equal(data, make([]byte, len(data))) {
+			return AnchorRecord{}, fmt.Errorf("%w: absent getAnchor record contains non-zero fields", ErrDriverInvalid)
+		}
+		return AnchorRecord{}, nil
+	}
 	return AnchorRecord{
 		StreamID:        append([]byte(nil), data[:32]...),
 		TreeSize:        binary.BigEndian.Uint64(data[32+24 : 2*32]),
