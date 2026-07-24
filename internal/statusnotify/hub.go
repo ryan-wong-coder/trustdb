@@ -2,6 +2,7 @@ package statusnotify
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -104,21 +105,42 @@ type persistedState struct {
 	Subscriptions []Subscription `json:"subscriptions"`
 }
 
+type subscriptionExpiry struct {
+	id             string
+	expiresAtUnixN int64
+}
+
+type subscriptionExpiryHeap []subscriptionExpiry
+
+func (h subscriptionExpiryHeap) Len() int           { return len(h) }
+func (h subscriptionExpiryHeap) Less(i, j int) bool { return h[i].expiresAtUnixN < h[j].expiresAtUnixN }
+func (h subscriptionExpiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *subscriptionExpiryHeap) Push(value any)    { *h = append(*h, value.(subscriptionExpiry)) }
+func (h *subscriptionExpiryHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
+}
+
 // Hub keeps only the latest invalidation bit per selective subscription. A
 // slow or disconnected receiver can therefore increase notification latency
 // but can never create an event-per-status unbounded queue.
 type Hub struct {
-	mu       sync.RWMutex
-	byID     map[string]*state
-	byRecord map[string]map[string]struct{}
-	cfg      Config
-	jobs     chan deliveryJob
-	stop     chan struct{}
-	done     chan struct{}
-	natsMu   sync.RWMutex
-	nats     NATSPublisher
-	stopOnce sync.Once
-	workers  sync.WaitGroup
+	mu             sync.RWMutex
+	byID           map[string]*state
+	byRecord       map[string]map[string]struct{}
+	dirty          map[string]struct{}
+	expiries       subscriptionExpiryHeap
+	upstreamCounts map[string]int
+	cfg            Config
+	jobs           chan deliveryJob
+	stop           chan struct{}
+	done           chan struct{}
+	natsMu         sync.RWMutex
+	nats           NATSPublisher
+	stopOnce       sync.Once
+	workers        sync.WaitGroup
 }
 
 func New(cfg Config) (*Hub, error) {
@@ -147,12 +169,14 @@ func New(cfg Config) (*Hub, error) {
 		cfg.HTTPClient = &http.Client{Timeout: defaultWebhookTimeout}
 	}
 	h := &Hub{
-		byID:     make(map[string]*state),
-		byRecord: make(map[string]map[string]struct{}),
-		cfg:      cfg,
-		jobs:     make(chan deliveryJob, cfg.QueueSize),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		byID:           make(map[string]*state),
+		byRecord:       make(map[string]map[string]struct{}),
+		dirty:          make(map[string]struct{}),
+		upstreamCounts: make(map[string]int),
+		cfg:            cfg,
+		jobs:           make(chan deliveryJob, cfg.QueueSize),
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	if err := h.load(); err != nil {
 		return nil, err
@@ -286,13 +310,7 @@ func (h *Hub) Create(_ context.Context, request CreateRequest) (Subscription, er
 		h.mu.Unlock()
 		return Subscription{}, trusterr.New(trusterr.CodeResourceExhausted, "status subscription capacity is exhausted")
 	}
-	upstreamSubscriptions := 0
-	for _, item := range h.byID {
-		if item.subscription.TenantID == subscription.TenantID && item.subscription.ClientID == subscription.ClientID {
-			upstreamSubscriptions++
-		}
-	}
-	if upstreamSubscriptions >= maxSubscriptionsPerUpstream {
+	if h.upstreamCounts[upstreamIdentity(subscription.TenantID, subscription.ClientID)] >= maxSubscriptionsPerUpstream {
 		h.mu.Unlock()
 		return Subscription{}, trusterr.New(trusterr.CodeResourceExhausted, "upstream status subscription limit is exhausted")
 	}
@@ -338,7 +356,7 @@ func (h *Hub) Notify(statuses []model.RecordStatus) {
 	for i := range statuses {
 		for id := range h.byRecord[statuses[i].RecordID] {
 			if item := h.byID[id]; item != nil {
-				item.dirty = true
+				h.markDirtyLocked(id, item)
 			}
 		}
 	}
@@ -356,7 +374,7 @@ func (h *Hub) Watch(id string) (<-chan model.StatusRefresh, func(), error) {
 	watcherID := item.nextWatcher
 	ch := make(chan model.StatusRefresh, 1)
 	item.watchers[watcherID] = ch
-	item.dirty = true
+	h.markDirtyLocked(id, item)
 	h.mu.Unlock()
 	var once sync.Once
 	cancel := func() {
@@ -407,16 +425,25 @@ func (h *Hub) run() {
 
 func (h *Hub) flush() {
 	now := h.cfg.Clock().UTC()
+	nowUnixN := now.UnixNano()
 	jobs := make([]deliveryJob, 0)
 	h.mu.Lock()
 	removed := false
-	for id, item := range h.byID {
-		if item.subscription.ExpiresAtUnixN <= now.UnixNano() {
-			h.removeLocked(id)
+	for h.expiries.Len() > 0 && h.expiries[0].expiresAtUnixN <= nowUnixN {
+		expiry := heap.Pop(&h.expiries).(subscriptionExpiry)
+		item := h.byID[expiry.id]
+		if item != nil && item.subscription.ExpiresAtUnixN == expiry.expiresAtUnixN {
+			h.removeLocked(expiry.id)
 			removed = true
+		}
+	}
+	for id := range h.dirty {
+		item := h.byID[id]
+		if item == nil || !item.dirty {
+			delete(h.dirty, id)
 			continue
 		}
-		if !item.dirty || now.Before(item.nextAttempt) {
+		if now.Before(item.nextAttempt) {
 			continue
 		}
 		if _, err := h.cfg.Routes.LookupClientKeyAt(item.subscription.TenantID, item.subscription.ClientID, item.subscription.KeyID, now); err != nil {
@@ -425,7 +452,8 @@ func (h *Hub) flush() {
 			continue
 		}
 		item.dirty = false
-		item.subscription.Version = uint64(now.UnixNano())
+		delete(h.dirty, id)
+		item.subscription.Version = uint64(nowUnixN)
 		route, found := h.cfg.Routes.LookupNotificationRoute(item.subscription.TenantID, item.subscription.ClientID, item.subscription.KeyID)
 		if !found {
 			h.removeLocked(id)
@@ -542,7 +570,7 @@ func (h *Hub) postWebhook(rawURL, subscriptionID string, body []byte) error {
 func (h *Hub) retry(id string) {
 	h.mu.Lock()
 	if item := h.byID[id]; item != nil {
-		item.dirty = true
+		h.markDirtyLocked(id, item)
 		item.attempts++
 		delay := 100 * time.Millisecond
 		for i := 1; i < item.attempts && delay < time.Minute; i++ {
@@ -566,8 +594,13 @@ func (h *Hub) delivered(id string) {
 }
 
 func (h *Hub) addLocked(subscription Subscription, dirty bool) {
-	item := &state{subscription: cloneSubscription(subscription), dirty: dirty, watchers: make(map[uint64]chan model.StatusRefresh)}
+	item := &state{subscription: cloneSubscription(subscription), watchers: make(map[uint64]chan model.StatusRefresh)}
 	h.byID[subscription.ID] = item
+	h.upstreamCounts[upstreamIdentity(subscription.TenantID, subscription.ClientID)]++
+	heap.Push(&h.expiries, subscriptionExpiry{id: subscription.ID, expiresAtUnixN: subscription.ExpiresAtUnixN})
+	if dirty {
+		h.markDirtyLocked(subscription.ID, item)
+	}
 	for _, recordID := range subscription.RecordIDs {
 		ids := h.byRecord[recordID]
 		if ids == nil {
@@ -584,6 +617,13 @@ func (h *Hub) removeLocked(id string) {
 		return
 	}
 	delete(h.byID, id)
+	delete(h.dirty, id)
+	upstream := upstreamIdentity(item.subscription.TenantID, item.subscription.ClientID)
+	if h.upstreamCounts[upstream] <= 1 {
+		delete(h.upstreamCounts, upstream)
+	} else {
+		h.upstreamCounts[upstream]--
+	}
 	for watcherID, watcher := range item.watchers {
 		delete(item.watchers, watcherID)
 		close(watcher)
@@ -594,6 +634,15 @@ func (h *Hub) removeLocked(id string) {
 			delete(h.byRecord, recordID)
 		}
 	}
+}
+
+func (h *Hub) markDirtyLocked(id string, item *state) {
+	item.dirty = true
+	h.dirty[id] = struct{}{}
+}
+
+func upstreamIdentity(tenantID, clientID string) string {
+	return tenantID + "\x00" + clientID
 }
 
 func (h *Hub) load() error {

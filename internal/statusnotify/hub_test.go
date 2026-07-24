@@ -238,6 +238,42 @@ func TestHubContinuousChangesDoNotStarveRefresh(t *testing.T) {
 	}
 }
 
+func TestHubExpiryHeapClosesSubscriptionWatchers(t *testing.T) {
+	t.Parallel()
+
+	signer, _ := testSigner(t)
+	resolver, createRequest := testResolverAndRequest(t, model.UpstreamNotificationRoute{}, []string{"tr1expiry"}, Channels{})
+	now := time.Now().UTC()
+	hub, err := New(Config{
+		Routes: resolver, Signer: signer, CryptoSuite: cryptosuite.INTLV1,
+		FlushInterval: time.Hour, Clock: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	subscription, err := hub.Create(context.Background(), createRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, cancel, err := hub.Watch(subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+
+	now = now.Add(defaultTTL + time.Second)
+	hub.flush()
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("expired watcher remained open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expired watcher was not closed")
+	}
+}
+
 func TestHubRejectsTamperedSubscriptionRequest(t *testing.T) {
 	t.Parallel()
 
