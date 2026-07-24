@@ -34,15 +34,15 @@ type OfflineStageResult struct {
 // OfflineResult reports only independently recomputed values. ProofLevel is
 // never copied from the descriptive label inside the evidence file.
 type OfflineResult struct {
-	Valid          bool                 `json:"valid"`
-	RecordID       string               `json:"record_id,omitempty"`
-	ProofLevel     string               `json:"proof_level,omitempty"`
-	AnchorSink     string               `json:"anchor_sink,omitempty"`
-	AnchorID       string               `json:"anchor_id,omitempty"`
-	Identity       IdentityReport       `json:"identity"`
-	Stages         []OfflineStageResult `json:"stages"`
-	NetworkAccess  bool                 `json:"network_access"`
-	ProviderAccess bool                 `json:"provider_access"`
+	Valid                  bool                 `json:"valid"`
+	RecordID               string               `json:"record_id,omitempty"`
+	ProofLevel             string               `json:"proof_level,omitempty"`
+	AnchorSink             string               `json:"anchor_sink,omitempty"`
+	AnchorID               string               `json:"anchor_id,omitempty"`
+	Identity               IdentityReport       `json:"identity"`
+	Stages                 []OfflineStageResult `json:"stages"`
+	ExternalNetworkAccess  bool                 `json:"external_network_access"`
+	ExternalProviderAccess bool                 `json:"external_provider_access"`
 }
 
 type OfflineTrust struct {
@@ -51,8 +51,7 @@ type OfflineTrust struct {
 }
 
 type OfflineOptions struct {
-	SkipAnchor     bool
-	AnchorVerifier verify.AnchorVerifier
+	SkipAnchor bool
 }
 
 // VerifyOffline verifies a complete .sproof without server, CA, provider, DNS,
@@ -96,9 +95,6 @@ func VerifyOffline(
 	}
 	if proof.AnchorResult != nil && !options.SkipAnchor {
 		verifyOptions = append(verifyOptions, verify.WithAnchor(*proof.AnchorResult))
-		if options.AnchorVerifier != nil {
-			verifyOptions = append(verifyOptions, verify.WithAnchorVerifier(options.AnchorVerifier))
-		}
 	}
 	verified, err := verify.ProofBundle(raw, proof.ProofBundle, trust.Proof, verifyOptions...)
 	if err != nil {

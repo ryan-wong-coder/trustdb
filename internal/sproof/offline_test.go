@@ -23,8 +23,12 @@ func TestVerifyOfflineReportsContainerFailureAndStops(t *testing.T) {
 	assertOfflineStage(t, result, string(verify.StageProofBundle), OfflineStageNotRun)
 	assertOfflineStage(t, result, string(verify.StageGlobalLog), OfflineStageNotPresent)
 	assertOfflineStage(t, result, string(verify.StageAnchor), OfflineStageNotPresent)
-	if result.NetworkAccess || result.ProviderAccess {
-		t.Fatalf("VerifyOffline() external access flags = network:%v provider:%v", result.NetworkAccess, result.ProviderAccess)
+	if result.ExternalNetworkAccess || result.ExternalProviderAccess {
+		t.Fatalf(
+			"VerifyOffline() external access flags = network:%v provider:%v",
+			result.ExternalNetworkAccess,
+			result.ExternalProviderAccess,
+		)
 	}
 }
 

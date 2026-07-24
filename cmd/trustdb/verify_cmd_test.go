@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emmansun/gmsm/smx509"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/wowtrust/trustdb/internal/anchor"
@@ -24,6 +29,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/httpapi"
 	"github.com/wowtrust/trustdb/internal/ingest"
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
+	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/observability"
 	"github.com/wowtrust/trustdb/internal/sproof"
@@ -55,6 +61,62 @@ func TestDecodeSingleJSONLimitBoundsResponseBody(t *testing.T) {
 	oversized := append(append([]byte(nil), data...), ' ')
 	if err := decodeSingleJSONLimit(bytes.NewReader(oversized), &dst, int64(len(data))); err == nil {
 		t.Fatal("decodeSingleJSONLimit oversized response error = nil")
+	}
+}
+
+func TestReadVerifyCertificateRootsAcceptsStrictDERAndPEM(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &smx509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "TrustDB verifier root"},
+		NotBefore:             time.Unix(100, 0),
+		NotAfter:              time.Unix(200, 0),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              smx509.KeyUsageCertSign,
+	}
+	der, err := smx509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	derPath := filepath.Join(directory, "root.der")
+	if err := os.WriteFile(derPath, der, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pemPath := filepath.Join(directory, "roots.pem")
+	pemData := append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...,
+	)
+	if err := os.WriteFile(pemPath, pemData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	roots, err := readVerifyCertificateRoots([]string{derPath, pemPath})
+	if err != nil {
+		t.Fatalf("readVerifyCertificateRoots() error = %v", err)
+	}
+	if len(roots) != 3 {
+		t.Fatalf("readVerifyCertificateRoots() count = %d, want 3", len(roots))
+	}
+	for index := range roots {
+		if !bytes.Equal(roots[index], der) {
+			t.Fatalf("root %d differs from input DER", index)
+		}
+	}
+
+	invalidPath := filepath.Join(directory, "invalid.pem")
+	if err := os.WriteFile(invalidPath, append(pemData, []byte("trailing")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readVerifyCertificateRoots([]string{invalidPath}); err == nil {
+		t.Fatal("readVerifyCertificateRoots() accepted trailing PEM data")
 	}
 }
 
@@ -261,6 +323,64 @@ func TestResolveVerifyClientPubPrefersExplicitKey(t *testing.T) {
 	}
 	if !bytes.Equal(got.Bytes, pub) {
 		t.Fatal("resolveVerifyClientPub did not return the explicit client public key")
+	}
+}
+
+func TestResolveVerifyClientPubUsesClaimSigningTime(t *testing.T) {
+	t.Parallel()
+
+	registryPublic, registryPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrySigner, err := trustcrypto.NewEd25519Signer("registry-key", registryPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryTrust, err := trustcrypto.NewEd25519PublicKey("registry-key", registryPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(t.TempDir(), "keys.tdkeys")
+	registry, err := keystore.Open(registryPath, registrySigner, registryTrust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPublic := mustPub(t)
+	_, clientDescriptor, err := readPublicKeyDescriptor(writePubKey(t, "client-key", clientPublic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.RegisterClientKey(
+		"tenant-1",
+		"client-1",
+		clientDescriptor,
+		time.Unix(100, 0),
+		time.Unix(150, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	registryPublicPath := writePubKey(t, "registry-key", registryPublic)
+	bundle := model.ProofBundle{
+		SignedClaim: model.SignedClaim{
+			Claim: model.ClientClaim{
+				TenantID:        "tenant-1",
+				ClientID:        "client-1",
+				KeyID:           "client-key",
+				ProducedAtUnixN: time.Unix(125, 0).UnixNano(),
+			},
+		},
+		AcceptedReceipt: model.AcceptedReceipt{
+			ReceivedAtUnixN: time.Unix(200, 0).UnixNano(),
+		},
+	}
+
+	resolved, err := resolveVerifyClientPub(bundle, "", registryPath, registryPublicPath)
+	if err != nil {
+		t.Fatalf("resolveVerifyClientPub() error = %v", err)
+	}
+	if !bytes.Equal(resolved.Bytes, clientPublic) {
+		t.Fatal("resolveVerifyClientPub() returned the wrong signing-time key")
 	}
 }
 

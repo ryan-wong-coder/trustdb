@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,8 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emmansun/gmsm/smx509"
 	"github.com/spf13/cobra"
 	"github.com/wowtrust/trustdb/internal/anchor"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
 	"github.com/wowtrust/trustdb/internal/keystore"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/sproof"
@@ -37,7 +40,9 @@ func newVerifyCommand(rt *runtimeConfig) *cobra.Command {
 		serverURL, recordID                                                   string
 		anchorPluginCommand, anchorPluginStartTimeout, anchorPluginRPCTimeout string
 		anchorPluginArgs                                                      []string
+		clientCARootPaths, serverCARootPaths                                  []string
 		skipAnchor                                                            bool
+		requireCertificateStatus                                              bool
 	)
 	cmd := &cobra.Command{
 		Use:   "verify",
@@ -66,7 +71,13 @@ recorded in the bundle. When an anchor is available (either via
 is upgraded to L5; pass --skip-anchor to ignore L5 anchors in server mode
 or inside a local .sproof.
 L5 always verifies an STH/global-root anchor; local --anchor requires
---global-proof because batch roots are no longer directly anchored.`,
+--global-proof because batch roots are no longer directly anchored.
+
+Local .sproof mode verifies every carried public descriptor, registry
+lifecycle, certificate chain, and CRL against independently supplied keys,
+registry keys, and --client-ca-certificate/--server-ca-certificate roots.
+It performs no network or external provider access and emits a structured
+result for every verification stage.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientPubPath = stringOrConfig(cmd, rt, "client-public-key", clientPubPath, "keys.client_public")
 			registryPath = stringOrConfig(cmd, rt, "key-registry", registryPath, "key_registry")
@@ -112,7 +123,7 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 				return usageError("verify: --anchor requires --global-proof")
 			}
 
-			bundle, globalProof, remoteAnchor, err := loadVerifyInputs(
+			bundle, globalProof, remoteAnchor, singleProof, err := loadVerifyInputs(
 				cmd.Context(),
 				remote,
 				sproofPath,
@@ -141,6 +152,21 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 			if err != nil {
 				return err
 			}
+			clientCARoots, err := readVerifyCertificateRoots(clientCARootPaths)
+			if err != nil {
+				return fmt.Errorf("read client CA roots: %w", err)
+			}
+			serverCARoots, err := readVerifyCertificateRoots(serverCARootPaths)
+			if err != nil {
+				return fmt.Errorf("read server CA roots: %w", err)
+			}
+			var registryDescriptor trustcrypto.PublicKeyDescriptor
+			if registryPubPath != "" {
+				registryDescriptor, _, err = readPublicKeyDescriptor(registryPubPath)
+				if err != nil {
+					return err
+				}
+			}
 			f, err := os.Open(filePath)
 			if err != nil {
 				return err
@@ -165,6 +191,9 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 				anchorInUse = remoteAnchor
 			}
 			if anchorInUse != nil && !isBuiltInAnchorSink(anchorInUse.SinkName) {
+				if singleProof != nil {
+					return usageError("verify: offline .sproof verification does not execute an external anchor plugin")
+				}
 				if strings.TrimSpace(anchorPluginCommand) == "" {
 					return usageError("verify: custom anchor sink requires --anchor-plugin-command")
 				}
@@ -184,13 +213,46 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 			if clientPub.KeyID != "" && clientPub.KeyID != bundle.SignedClaim.Claim.KeyID {
 				return usageError("client public descriptor key_id does not match proof claim key_id")
 			}
-			result, err := verify.ProofBundle(f, bundle, verify.TrustedKeys{
+			proofTrust := verify.TrustedKeys{
 				ClientPublicKey: clientPub,
 				ServerPublicKey: serverDescriptor,
 				CryptoProvider:  provider,
-			}, opts...)
-			if err != nil {
-				return err
+			}
+			var (
+				result        verify.Result
+				offlineResult *sproof.OfflineResult
+			)
+			if singleProof != nil {
+				verified, verifyErr := sproof.VerifyOffline(f, *singleProof, sproof.OfflineTrust{
+					Proof: proofTrust,
+					Identity: sproof.IdentityTrust{
+						ClientPublicKeys:         []trustcrypto.PublicKeyDescriptor{clientPub},
+						ServerPublicKeys:         []trustcrypto.PublicKeyDescriptor{serverDescriptor},
+						ClientCertificateRoots:   clientCARoots,
+						ServerCertificateRoots:   serverCARoots,
+						RegistryPublicKey:        registryDescriptor,
+						RequireEvidence:          len(singleProof.IdentityEvidence) != 0,
+						RequireCertificateStatus: requireCertificateStatus,
+					},
+				}, sproof.OfflineOptions{
+					SkipAnchor: skipAnchor,
+				})
+				if verifyErr != nil {
+					return verifyErr
+				}
+				offlineResult = &verified
+				result = verify.Result{
+					Valid:      verified.Valid,
+					RecordID:   verified.RecordID,
+					ProofLevel: verified.ProofLevel,
+					AnchorSink: verified.AnchorSink,
+					AnchorID:   verified.AnchorID,
+				}
+			} else {
+				result, err = verify.ProofBundle(f, bundle, proofTrust, opts...)
+				if err != nil {
+					return err
+				}
 			}
 
 			logEvent := rt.logger.Info().
@@ -202,6 +264,9 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 					Str("anchor_id", anchorInUse.AnchorID)
 			}
 			logEvent.Msg("verified proof")
+			if offlineResult != nil {
+				return rt.writeJSON(*offlineResult)
+			}
 			return rt.writeJSON(result)
 		},
 	}
@@ -214,6 +279,9 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 	cmd.Flags().StringVar(&registryPath, "key-registry", "", "key registry path")
 	cmd.Flags().StringVar(&registryPubPath, "registry-public-key", "", "registry verifier descriptor")
 	cmd.Flags().StringVar(&serverPubPath, "server-public-key", "", "server verifier descriptor")
+	cmd.Flags().StringArrayVar(&clientCARootPaths, "client-ca-certificate", nil, "verifier-local client CA certificate (DER or PEM; repeatable)")
+	cmd.Flags().StringArrayVar(&serverCARootPaths, "server-ca-certificate", nil, "verifier-local server CA certificate (DER or PEM; repeatable)")
+	cmd.Flags().BoolVar(&requireCertificateStatus, "require-certificate-status", false, "require complete signing-time CRL evidence for every carried certificate chain")
 	cmd.Flags().StringVar(&serverURL, "server", "", "TrustDB server URL (remote mode)")
 	cmd.Flags().StringVar(&recordID, "record", "", "record id to verify (remote mode)")
 	cmd.Flags().BoolVar(&skipAnchor, "skip-anchor", false, "do not fetch or verify L5 anchor")
@@ -233,6 +301,63 @@ func isBuiltInAnchorSink(name string) bool {
 	}
 }
 
+func readVerifyCertificateRoots(paths []string) ([][]byte, error) {
+	if len(paths) > formatregistry.MaxCertificateCountV2 {
+		return nil, fmt.Errorf("certificate root file count exceeds %d", formatregistry.MaxCertificateCountV2)
+	}
+	roots := make([][]byte, 0, len(paths))
+	totalBytes := 0
+	appendRoot := func(path string, der []byte) error {
+		if len(der) == 0 || len(der) > formatregistry.MaxCertificateBytesV2 {
+			return fmt.Errorf("%s contains a certificate with an invalid size", path)
+		}
+		if len(roots) >= formatregistry.MaxCertificateCountV2 {
+			return fmt.Errorf("certificate root count exceeds %d", formatregistry.MaxCertificateCountV2)
+		}
+		totalBytes += len(der)
+		if totalBytes > formatregistry.MaxCertificateChainBytesV2 {
+			return fmt.Errorf("certificate roots exceed %d bytes", formatregistry.MaxCertificateChainBytesV2)
+		}
+		certificate, err := smx509.ParseCertificate(der)
+		if err != nil || !bytes.Equal(certificate.Raw, der) {
+			return fmt.Errorf("%s contains an invalid DER certificate", path)
+		}
+		roots = append(roots, append([]byte(nil), der...))
+		return nil
+	}
+	for _, path := range paths {
+		data, err := readFileLimit(path, int64(formatregistry.MaxCertificateChainBytesV2))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		remaining := bytes.TrimSpace(data)
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			if err := appendRoot(path, data); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		for block != nil {
+			if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+				return nil, fmt.Errorf("%s contains a non-certificate PEM block", path)
+			}
+			if err := appendRoot(path, block.Bytes); err != nil {
+				return nil, err
+			}
+			remaining = bytes.TrimSpace(rest)
+			if len(remaining) == 0 {
+				break
+			}
+			block, rest = pem.Decode(remaining)
+			if block == nil {
+				return nil, fmt.Errorf("%s contains trailing non-PEM data", path)
+			}
+		}
+	}
+	return roots, nil
+}
+
 // loadVerifyInputs dispatches between local-file and HTTP-fetch modes
 // and returns the bundle plus — in remote mode — the anchor result if
 // one exists. Remote mode treats a missing anchor as "not yet
@@ -243,48 +368,48 @@ func loadVerifyInputs(
 	remote bool,
 	sproofPath, proofPath, globalProofPath, serverURL, recordID string,
 	skipAnchor bool,
-) (model.ProofBundle, *model.GlobalLogProof, *model.STHAnchorResult, error) {
+) (model.ProofBundle, *model.GlobalLogProof, *model.STHAnchorResult, *model.SingleProof, error) {
 	if !remote {
 		if sproofPath != "" {
 			proof, err := sproof.ReadFile(sproofPath)
 			if err != nil {
-				return model.ProofBundle{}, nil, nil, err
+				return model.ProofBundle{}, nil, nil, nil, err
 			}
 			if skipAnchor {
-				return proof.ProofBundle, proof.GlobalProof, nil, nil
+				return proof.ProofBundle, proof.GlobalProof, nil, &proof, nil
 			}
-			return proof.ProofBundle, proof.GlobalProof, proof.AnchorResult, nil
+			return proof.ProofBundle, proof.GlobalProof, proof.AnchorResult, &proof, nil
 		}
 		var bundle model.ProofBundle
 		if err := readCBORFile(proofPath, &bundle); err != nil {
-			return model.ProofBundle{}, nil, nil, err
+			return model.ProofBundle{}, nil, nil, nil, err
 		}
 		if globalProofPath == "" {
-			return bundle, nil, nil, nil
+			return bundle, nil, nil, nil, nil
 		}
 		var global model.GlobalLogProof
 		if err := readCBORFile(globalProofPath, &global); err != nil {
-			return model.ProofBundle{}, nil, nil, err
+			return model.ProofBundle{}, nil, nil, nil, err
 		}
-		return bundle, &global, nil, nil
+		return bundle, &global, nil, nil, nil
 	}
 	client := &http.Client{Timeout: httpFetchTimeout}
 	bundle, err := fetchProofBundle(ctx, client, serverURL, recordID)
 	if err != nil {
-		return model.ProofBundle{}, nil, nil, err
+		return model.ProofBundle{}, nil, nil, nil, err
 	}
 	global, err := fetchGlobalProof(ctx, client, serverURL, bundle.CommittedReceipt.BatchID)
 	if err != nil {
-		return model.ProofBundle{}, nil, nil, err
+		return model.ProofBundle{}, nil, nil, nil, err
 	}
 	if skipAnchor {
-		return bundle, &global, nil, nil
+		return bundle, &global, nil, nil, nil
 	}
 	ar, err := fetchAnchorResult(ctx, client, serverURL, global.STH.TreeSize)
 	if err != nil {
-		return model.ProofBundle{}, nil, nil, err
+		return model.ProofBundle{}, nil, nil, nil, err
 	}
-	return bundle, &global, ar, nil
+	return bundle, &global, ar, nil, nil
 }
 
 type proofResponseEnvelope struct {
@@ -461,7 +586,7 @@ func resolveVerifyClientPub(bundle model.ProofBundle, clientPubPath, registryPat
 			bundle.SignedClaim.Claim.TenantID,
 			bundle.SignedClaim.Claim.ClientID,
 			bundle.SignedClaim.Claim.KeyID,
-			time.Unix(0, bundle.AcceptedReceipt.ReceivedAtUnixN),
+			time.Unix(0, bundle.SignedClaim.Claim.ProducedAtUnixN),
 		)
 		if err != nil {
 			return trustcrypto.PublicKeyDescriptor{}, err
