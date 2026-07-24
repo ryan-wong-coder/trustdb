@@ -17,6 +17,8 @@ import (
 
 	"github.com/emmansun/gmsm/sm2"
 
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/sdfsigner"
 	"github.com/wowtrust/trustdb/sdk/signerplugin"
 )
@@ -77,6 +79,9 @@ func TestQualifiedSDFProviderEndToEnd(t *testing.T) {
 		}
 		clear(random)
 	}
+	descriptor := qualificationDescriptor(environment.Config, uint32(keyIndexValue), expectedPublic)
+	var wrappedKeys []sdfsigner.WrappedSM4Key
+	var iv, plaintext, ciphertext []byte
 	if environment.Config.RequiredCapabilities&sdfsigner.SM4Capabilities == sdfsigner.SM4Capabilities {
 		wrapped, generated, err := direct.GenerateSM4Session(context.Background())
 		if err != nil {
@@ -84,30 +89,16 @@ func TestQualifiedSDFProviderEndToEnd(t *testing.T) {
 			_ = direct.Close()
 			t.Fatalf("GenerateSM4Session() error = %v", err)
 		}
-		encoded, err := sdfsigner.MarshalWrappedSM4Key(wrapped)
-		if err != nil {
-			clear(adapterConfig)
-			_ = generated.Close()
-			_ = direct.Close()
-			t.Fatalf("MarshalWrappedSM4Key() error = %v", err)
-		}
-		durable, err := sdfsigner.UnmarshalWrappedSM4Key(encoded)
-		clear(encoded)
-		if err != nil {
-			clear(adapterConfig)
-			_ = generated.Close()
-			_ = direct.Close()
-			t.Fatalf("UnmarshalWrappedSM4Key() error = %v", err)
-		}
-		iv := make([]byte, sdfsigner.SM4BlockBytes)
+		wrappedKeys = append(wrappedKeys, wrapped)
+		iv = make([]byte, sdfsigner.SM4BlockBytes)
 		if _, err := rand.Read(iv); err != nil {
 			clear(adapterConfig)
 			_ = generated.Close()
 			_ = direct.Close()
 			t.Fatalf("generate IV error = %v", err)
 		}
-		plaintext := []byte("trustdb-sdf-sm4!")
-		ciphertext, err := generated.EncryptCBC(context.Background(), iv, plaintext)
+		plaintext = []byte("trustdb-sdf-sm4!")
+		ciphertext, err = generated.EncryptCBC(context.Background(), iv, plaintext)
 		if err != nil {
 			clear(adapterConfig)
 			_ = generated.Close()
@@ -127,25 +118,58 @@ func TestQualifiedSDFProviderEndToEnd(t *testing.T) {
 			_ = direct.Close()
 			t.Fatalf("generated session Close() error = %v", err)
 		}
-		if err := direct.Close(); err != nil {
-			clear(adapterConfig)
-			clear(ciphertext)
-			t.Fatalf("first provider Close() error = %v", err)
-		}
-
-		restoredBackend, err := sdfsigner.OpenNativeBackend(environment.AdapterPath, adapterConfig)
+	}
+	recoveryArtifact, err := direct.ExportRecoveryBundle(
+		context.Background(),
+		[]keydescriptor.Descriptor{descriptor},
+		wrappedKeys,
+	)
+	if err != nil {
 		clear(adapterConfig)
-		if err != nil {
-			clear(ciphertext)
-			t.Fatalf("reopen native backend error = %v", err)
-		}
-		restoredProvider, err := sdfsigner.New(context.Background(), environment.Config, restoredBackend)
-		if err != nil {
-			clear(ciphertext)
-			_ = restoredBackend.Close()
-			t.Fatalf("restart provider error = %v", err)
-		}
-		restored, err := restoredProvider.ImportSM4Session(context.Background(), durable)
+		clear(ciphertext)
+		_ = direct.Close()
+		t.Fatalf("ExportRecoveryBundle() error = %v", err)
+	}
+	if err := direct.Close(); err != nil {
+		clear(adapterConfig)
+		clear(recoveryArtifact)
+		clear(ciphertext)
+		t.Fatalf("first provider Close() error = %v", err)
+	}
+
+	restoredBackend, err := sdfsigner.OpenNativeBackend(environment.AdapterPath, adapterConfig)
+	clear(adapterConfig)
+	if err != nil {
+		clear(recoveryArtifact)
+		clear(ciphertext)
+		t.Fatalf("reopen native backend error = %v", err)
+	}
+	restoredProvider, err := sdfsigner.New(context.Background(), environment.Config, restoredBackend)
+	if err != nil {
+		clear(recoveryArtifact)
+		clear(ciphertext)
+		_ = restoredBackend.Close()
+		t.Fatalf("restart provider error = %v", err)
+	}
+	restoredRecovery, err := restoredProvider.RestoreRecoveryBundle(context.Background(), recoveryArtifact)
+	clear(recoveryArtifact)
+	if err != nil {
+		clear(ciphertext)
+		_ = restoredProvider.Close()
+		t.Fatalf("RestoreRecoveryBundle() error = %v", err)
+	}
+	if len(restoredRecovery.SignerDescriptors) != 1 ||
+		!bytes.Equal(restoredRecovery.SignerDescriptors[0].PublicKey.Bytes, expectedPublic) ||
+		len(restoredRecovery.WrappedSM4Keys) != len(wrappedKeys) {
+		clear(ciphertext)
+		_ = restoredProvider.Close()
+		t.Fatal("restored recovery inventory does not match qualification inputs")
+	}
+	if len(wrappedKeys) != 0 {
+		restored, err := restoredProvider.ImportSM4Session(
+			context.Background(),
+			restoredRecovery.WrappedSM4Keys[0],
+		)
 		if err != nil {
 			clear(ciphertext)
 			_ = restoredProvider.Close()
@@ -164,14 +188,9 @@ func TestQualifiedSDFProviderEndToEnd(t *testing.T) {
 			_ = restoredProvider.Close()
 			t.Fatalf("restored session Close() error = %v", err)
 		}
-		if err := restoredProvider.Close(); err != nil {
-			t.Fatalf("restored provider Close() error = %v", err)
-		}
-	} else {
-		clear(adapterConfig)
-		if err := direct.Close(); err != nil {
-			t.Fatalf("direct Close() error = %v", err)
-		}
+	}
+	if err := restoredProvider.Close(); err != nil {
+		t.Fatalf("restored provider Close() error = %v", err)
 	}
 
 	process, err := signerplugin.StartProcess(context.Background(), signerplugin.ProcessConfig{
@@ -219,6 +238,27 @@ func TestQualifiedSDFProviderEndToEnd(t *testing.T) {
 	close(failures)
 	for failure := range failures {
 		t.Error(failure)
+	}
+}
+
+func qualificationDescriptor(config sdfsigner.Config, keyIndex uint32, publicKey []byte) keydescriptor.Descriptor {
+	return keydescriptor.Descriptor{
+		SchemaVersion: keydescriptor.SchemaV1,
+		Kind:          keydescriptor.KindSigner,
+		Provider:      keydescriptor.ProviderSDF,
+		CryptoSuite:   cryptosuite.CNSMV1,
+		KeyID:         "qualified-sdf-sm2",
+		Algorithm:     cryptosuite.SignatureSM2SM3,
+		SM2UserID:     cryptosuite.SM2DefaultUserID,
+		PublicKey: keydescriptor.PublicKeyMaterial{
+			Encoding: cryptosuite.SM2PublicKeyEncoding,
+			Bytes:    append([]byte(nil), publicKey...),
+		},
+		SDF: &keydescriptor.SDFKeyReference{
+			DeviceRef:     config.DeviceRef,
+			KeyIndex:      keyIndex,
+			CredentialRef: config.CredentialRef,
+		},
 	}
 }
 
