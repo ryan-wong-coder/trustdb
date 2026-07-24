@@ -48,7 +48,7 @@ func TestRegistryPinsCanonicalSuites(t *testing.T) {
 	if !ok {
 		t.Fatal("CN_SM_V1 missing from registry")
 	}
-	if cn.Availability != AvailabilityReserved ||
+	if cn.Availability != AvailabilityAvailable ||
 		cn.ContentHash != (HashSpec{Algorithm: HashSM3, DigestBytes: 32}) ||
 		cn.ClaimHash != (HashSpec{Algorithm: HashSM3, DigestBytes: 32}) ||
 		cn.SignatureHash != (HashSpec{Algorithm: HashSM3, DigestBytes: 32}) ||
@@ -127,12 +127,12 @@ func TestAllReturnsStableSortedRegistry(t *testing.T) {
 	}
 }
 
-func TestRequireAvailableRejectsReservedAndUnknownSuites(t *testing.T) {
+func TestRequireAvailableAcceptsImplementedSuitesAndRejectsUnknown(t *testing.T) {
 	if _, err := RequireAvailable(INTLV1); err != nil {
 		t.Fatalf("RequireAvailable(INTL_V1) error = %v", err)
 	}
-	if _, err := RequireAvailable(CNSMV1); !errors.Is(err, ErrUnavailableSuite) {
-		t.Fatalf("RequireAvailable(CN_SM_V1) error = %v, want ErrUnavailableSuite", err)
+	if _, err := RequireAvailable(CNSMV1); err != nil {
+		t.Fatalf("RequireAvailable(CN_SM_V1) error = %v", err)
 	}
 	if _, err := RequireAvailable(ID("UNKNOWN")); !errors.Is(err, ErrUnknownSuite) {
 		t.Fatalf("RequireAvailable(UNKNOWN) error = %v, want ErrUnknownSuite", err)

@@ -26,6 +26,10 @@ const (
 )
 
 const (
+	// DigestSize is the fixed byte width shared by all suites registered in
+	// this generation. The algorithm remains suite-selected (SHA-256 or SM3).
+	DigestSize = 32
+
 	HashSHA256 = "sha256"
 	HashSM3    = "sm3"
 
@@ -159,7 +163,7 @@ var registry = map[ID]Suite{
 	},
 	CNSMV1: {
 		ID:                   CNSMV1,
-		Availability:         AvailabilityReserved,
+		Availability:         AvailabilityAvailable,
 		ContentHash:          HashSpec{Algorithm: HashSM3, DigestBytes: 32},
 		ClaimHash:            HashSpec{Algorithm: HashSM3, DigestBytes: 32},
 		SignatureHash:        HashSpec{Algorithm: HashSM3, DigestBytes: 32},

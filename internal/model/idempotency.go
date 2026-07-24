@@ -1,8 +1,10 @@
 package model
 
+import "github.com/wowtrust/trustdb/internal/cryptosuite"
+
 // SchemaIdempotencyDecision identifies the durable projection that preserves
 // an accepted ingest decision independently of WAL retention and replay.
-const SchemaIdempotencyDecision = "trustdb.idempotency-decision.v1"
+const SchemaIdempotencyDecision = "trustdb.idempotency-decision.v2"
 
 // IdempotencyIdentity is the full namespace of a client-provided idempotency
 // key. None of its components may be omitted for a durable decision.
@@ -16,6 +18,7 @@ type IdempotencyIdentity struct {
 // retry. BatchID ties the projection to the committed batch that published it.
 type IdempotencyDecision struct {
 	SchemaVersion string              `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID      `cbor:"crypto_suite" json:"crypto_suite"`
 	Identity      IdempotencyIdentity `cbor:"identity" json:"identity"`
 	ClaimHash     []byte              `cbor:"claim_hash" json:"claim_hash"`
 	Record        ServerRecord        `cbor:"server_record" json:"server_record"`

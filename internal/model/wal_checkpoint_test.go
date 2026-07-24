@@ -4,11 +4,11 @@ import (
 	"testing"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
 )
 
-// legacyWALCheckpoint pins the v1 wire shape. A rollback binary can decode a
-// v2 checkpoint safely because contiguous coverage is signaled only by the
-// schema string, not by a new CBOR field rejected by strict decoders.
+// legacyWALCheckpoint pins the pre-suite wire shape so the V3 cutover can
+// prove that old readers fail closed instead of silently accepting V3 state.
 type legacyWALCheckpoint struct {
 	SchemaVersion   string `cbor:"schema_version"`
 	SegmentID       uint64 `cbor:"segment_id"`
@@ -18,9 +18,10 @@ type legacyWALCheckpoint struct {
 	RecordedAtUnixN int64  `cbor:"recorded_at_unix_nano"`
 }
 
-func TestContiguousWALCheckpointKeepsLegacyWireShape(t *testing.T) {
+func TestContiguousWALCheckpointV3RejectsLegacyDecoder(t *testing.T) {
 	want := WALCheckpoint{
 		SchemaVersion:   SchemaWALCheckpointContiguous,
+		CryptoSuite:     cryptosuite.INTLV1,
 		SegmentID:       7,
 		LastSequence:    42,
 		LastOffset:      8192,
@@ -32,12 +33,7 @@ func TestContiguousWALCheckpointKeepsLegacyWireShape(t *testing.T) {
 		t.Fatalf("Marshal() error = %v", err)
 	}
 	var got legacyWALCheckpoint
-	if err := cborx.Unmarshal(data, &got); err != nil {
-		t.Fatalf("legacy decoder rejected v2 checkpoint: %v", err)
-	}
-	if got.SchemaVersion != want.SchemaVersion || got.SegmentID != want.SegmentID ||
-		got.LastSequence != want.LastSequence || got.LastOffset != want.LastOffset ||
-		got.BatchID != want.BatchID || got.RecordedAtUnixN != want.RecordedAtUnixN {
-		t.Fatalf("legacy decode = %+v, want %+v", got, want)
+	if err := cborx.Unmarshal(data, &got); err == nil {
+		t.Fatal("legacy decoder accepted V3 checkpoint with crypto_suite")
 	}
 }

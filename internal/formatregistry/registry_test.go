@@ -21,20 +21,20 @@ func TestRegistryPinsCurrentAndReservedGenerations(t *testing.T) {
 		migration    MigrationPolicy
 		maxBytes     int64
 	}{
-		ModelV1:       {FamilyModel, 1, AvailabilityAvailable, MigrationRetireOnCutover, 0},
-		ModelV2:       {FamilyModel, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
+		ModelV1:       {FamilyModel, 1, AvailabilityReserved, MigrationRetireOnCutover, 0},
+		ModelV2:       {FamilyModel, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
 		SingleProofV1: {FamilySingleProof, 1, AvailabilityAvailable, MigrationRetireOnCutover, 16 << 20},
 		SingleProofV2: {FamilySingleProof, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxSingleProofBytesV2},
-		BackupV4:      {FamilyBackup, 4, AvailabilityAvailable, MigrationRetireOnCutover, 128 << 20},
-		BackupV5:      {FamilyBackup, 5, AvailabilityReserved, MigrationDestructiveCutover, MaxBackupEntryBytesV2},
-		WALV1:         {FamilyWAL, 1, AvailabilityAvailable, MigrationRetireOnCutover, 0},
-		WALV2:         {FamilyWAL, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
-		ProofstoreV4:  {FamilyProofstore, 4, AvailabilityAvailable, MigrationRetireOnCutover, 64 << 20},
-		ProofstoreV5:  {FamilyProofstore, 5, AvailabilityReserved, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
-		HTTPV1:        {FamilyHTTP, 1, AvailabilityAvailable, MigrationRetireOnCutover, 16 << 20},
-		HTTPV2:        {FamilyHTTP, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
-		GRPCV1:        {FamilyGRPC, 1, AvailabilityAvailable, MigrationRetireOnCutover, 16 << 20},
-		GRPCV2:        {FamilyGRPC, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
+		BackupV4:      {FamilyBackup, 4, AvailabilityReserved, MigrationRetireOnCutover, 128 << 20},
+		BackupV5:      {FamilyBackup, 5, AvailabilityAvailable, MigrationDestructiveCutover, MaxBackupEntryBytesV2},
+		WALV1:         {FamilyWAL, 1, AvailabilityReserved, MigrationRetireOnCutover, 0},
+		WALV2:         {FamilyWAL, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
+		ProofstoreV4:  {FamilyProofstore, 4, AvailabilityReserved, MigrationRetireOnCutover, 64 << 20},
+		ProofstoreV5:  {FamilyProofstore, 5, AvailabilityAvailable, MigrationDestructiveCutover, MaxStoredObjectBytesV2},
+		HTTPV1:        {FamilyHTTP, 1, AvailabilityReserved, MigrationRetireOnCutover, 16 << 20},
+		HTTPV2:        {FamilyHTTP, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
+		GRPCV1:        {FamilyGRPC, 1, AvailabilityReserved, MigrationRetireOnCutover, 16 << 20},
+		GRPCV2:        {FamilyGRPC, 2, AvailabilityAvailable, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
 		NATSV1:        {FamilyNATS, 1, AvailabilityAvailable, MigrationRetireOnCutover, MaxNATSTransportBytesV1},
 		NATSV2:        {FamilyNATS, 2, AvailabilityReserved, MigrationDestructiveCutover, MaxTransportMessageBytesV2},
 		SDKV1:         {FamilySDK, 1, AvailabilityAvailable, MigrationRetireOnCutover, 16 << 20},
@@ -75,13 +75,13 @@ func TestRegistryPinsCurrentAndReservedGenerations(t *testing.T) {
 		} else if !descriptor.RejectUnknownFields || !descriptor.RejectUnknownEntries {
 			t.Fatalf("descriptor %q must reject unknown fields and entries", descriptor.Identifier)
 		}
-		if descriptor.Availability == AvailabilityAvailable {
+		if descriptor.SuiteField == "" {
 			if !reflect.DeepEqual(descriptor.AllowedSuites, []cryptosuite.ID{cryptosuite.INTLV1}) || descriptor.SuiteField != "" {
-				t.Fatalf("current descriptor %q has unexpected suite binding: %#v", descriptor.Identifier, descriptor)
+				t.Fatalf("single-suite descriptor %q has unexpected suite binding: %#v", descriptor.Identifier, descriptor)
 			}
 		} else {
 			if !reflect.DeepEqual(descriptor.AllowedSuites, []cryptosuite.ID{cryptosuite.CNSMV1, cryptosuite.INTLV1}) || descriptor.SuiteField != "crypto_suite" {
-				t.Fatalf("reserved descriptor %q has unexpected suite binding: %#v", descriptor.Identifier, descriptor)
+				t.Fatalf("crypto-agile descriptor %q has unexpected suite binding: %#v", descriptor.Identifier, descriptor)
 			}
 		}
 	}
@@ -109,14 +109,14 @@ func TestRegistryAllIsSortedAndDefensivelyCopied(t *testing.T) {
 }
 
 func TestRuntimeGatesRejectReservedFormatsAndSuites(t *testing.T) {
-	if _, _, err := RequireWritable(ModelV1, cryptosuite.INTLV1); err != nil {
-		t.Fatalf("RequireWritable(current INTL_V1) error = %v", err)
+	if _, _, err := RequireWritable(ModelV1, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
+		t.Fatalf("RequireWritable(retired format) error = %v, want ErrUnavailableFormat", err)
 	}
-	if _, _, err := RequireWritable(ModelV2, cryptosuite.INTLV1); !errors.Is(err, ErrUnavailableFormat) {
-		t.Fatalf("RequireWritable(reserved format) error = %v, want ErrUnavailableFormat", err)
+	if _, _, err := RequireWritable(ModelV2, cryptosuite.INTLV1); err != nil {
+		t.Fatalf("RequireWritable(V2 INTL_V1) error = %v", err)
 	}
-	if _, _, err := RequireWritable(ModelV1, cryptosuite.CNSMV1); !errors.Is(err, ErrSuiteNotAllowed) {
-		t.Fatalf("RequireWritable(current CN_SM_V1) error = %v, want ErrSuiteNotAllowed", err)
+	if _, _, err := RequireWritable(ModelV2, cryptosuite.CNSMV1); err != nil {
+		t.Fatalf("RequireWritable(V2 CN_SM_V1) error = %v", err)
 	}
 	if err := RequireSuite(ModelV2, cryptosuite.CNSMV1); err != nil {
 		t.Fatalf("RequireSuite(reserved planned combination) error = %v", err)
@@ -172,13 +172,15 @@ func TestModelSchemaTransitionsCoverCurrentModelSchemas(t *testing.T) {
 		if transition.Current != current {
 			t.Fatalf("artifact %q current schema = %q, want %q", transition.Artifact, transition.Current, current)
 		}
-		if transition.Next == "" || transition.Next == transition.Current {
-			t.Fatalf("artifact %q has invalid next schema %q", transition.Artifact, transition.Next)
+		if transition.Next != "" {
+			if transition.Next == transition.Current {
+				t.Fatalf("artifact %q has invalid next schema %q", transition.Artifact, transition.Next)
+			}
+			if _, exists := seenNext[transition.Next]; exists {
+				t.Fatalf("duplicate next schema %q", transition.Next)
+			}
+			seenNext[transition.Next] = struct{}{}
 		}
-		if _, exists := seenNext[transition.Next]; exists {
-			t.Fatalf("duplicate next schema %q", transition.Next)
-		}
-		seenNext[transition.Next] = struct{}{}
 	}
 }
 
@@ -257,7 +259,7 @@ func TestRegistrySnapshotCanonicalCBORGolden(t *testing.T) {
 		t.Fatalf("marshal registry snapshot: %v", err)
 	}
 	digest := sha256.Sum256(encoded)
-	const wantSHA256 = "8b8ec7da0aefe597b86289f584504186e0e339bd9fceb6ebaf9528ab80c651c8"
+	const wantSHA256 = "b40681a39c1e6a23c3f34c14efb9a0985198d28c26810f08e4ab984d717f2c7d"
 	if got := hex.EncodeToString(digest[:]); got != wantSHA256 {
 		t.Fatalf("registry snapshot SHA-256 = %s, want %s", got, wantSHA256)
 	}

@@ -411,7 +411,7 @@ func TestRegistryV2CanonicalFileGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(encoded)
-	const wantSHA256 = "501b71c13f875c545d34b0d0b620638076d5909dae273aed012d5a2647f2b810"
+	const wantSHA256 = "0d1d9721ddc9b262b17c069d08dc0879eac91922d95d46ed3cd1bbe7636b62f6"
 	if got := hex.EncodeToString(digest[:]); got != wantSHA256 {
 		t.Fatalf("registry V2 golden SHA-256 = %s, want %s", got, wantSHA256)
 	}
