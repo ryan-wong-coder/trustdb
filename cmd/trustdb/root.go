@@ -561,6 +561,8 @@ func configString(cfg trustconfig.Config, key string) string {
 		return cfg.Server.ID
 	case "server.listen", "server_listen":
 		return cfg.Server.Listen
+	case "server.grpc_listen", "server_grpc_listen":
+		return cfg.Server.GRPCListen
 	case "server.key_id", "server_key_id":
 		return cfg.Server.KeyID
 	case "registry.key_id", "registry_key_id":
