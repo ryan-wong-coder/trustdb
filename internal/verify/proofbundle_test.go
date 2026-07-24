@@ -146,6 +146,9 @@ func TestProofBundleRejectsAcceptedReceiptRecordIDMismatch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "accepted receipt record_id mismatch") {
 		t.Fatalf("ProofBundle error = %v, want accepted receipt record_id mismatch", err)
 	}
+	if stage, ok := FailedStage(err); !ok || stage != StageBundleBindings {
+		t.Fatalf("FailedStage() = %q, %v, want %q", stage, ok, StageBundleBindings)
+	}
 }
 
 func TestProofBundleRejectsCommittedReceiptRecordIDMismatch(t *testing.T) {
@@ -156,6 +159,22 @@ func TestProofBundleRejectsCommittedReceiptRecordIDMismatch(t *testing.T) {
 	_, err := ProofBundle(bytes.NewReader(f.raw), f.bundle, f.keys)
 	if err == nil || !strings.Contains(err.Error(), "committed receipt record_id mismatch") {
 		t.Fatalf("ProofBundle error = %v, want committed receipt record_id mismatch", err)
+	}
+	if stage, ok := FailedStage(err); !ok || stage != StageBundleBindings {
+		t.Fatalf("FailedStage() = %q, %v, want %q", stage, ok, StageBundleBindings)
+	}
+}
+
+func TestProofBundleReportsContentFailureStage(t *testing.T) {
+	t.Parallel()
+	f := newProofBundleFixture(t)
+
+	_, err := ProofBundle(bytes.NewReader(append(f.raw, '!')), f.bundle, f.keys)
+	if err == nil {
+		t.Fatal("ProofBundle(tampered content) error = nil")
+	}
+	if stage, ok := FailedStage(err); !ok || stage != StageContent {
+		t.Fatalf("FailedStage() = %q, %v, want %q", stage, ok, StageContent)
 	}
 }
 
@@ -176,5 +195,8 @@ func TestProofBundleVerifiesGlobalLogSTHSignature(t *testing.T) {
 	_, err = ProofBundle(bytes.NewReader(f.raw), f.bundle, f.keys, WithGlobalProof(proof))
 	if err == nil || !strings.Contains(err.Error(), "verify signed tree head") {
 		t.Fatalf("ProofBundle tampered STH error = %v, want signed tree head verification error", err)
+	}
+	if stage, ok := FailedStage(err); !ok || stage != StageGlobalLog {
+		t.Fatalf("FailedStage() = %q, %v, want %q", stage, ok, StageGlobalLog)
 	}
 }

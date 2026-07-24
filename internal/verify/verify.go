@@ -81,47 +81,47 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		apply(&o)
 	}
 	if bundle.SchemaVersion != model.SchemaProofBundle {
-		return Result{}, fmt.Errorf("verify: unexpected proof bundle schema: %s", bundle.SchemaVersion)
+		return Result{}, failStage(StageProofBundle, fmt.Errorf("verify: unexpected proof bundle schema: %s", bundle.SchemaVersion))
 	}
 	suite, err := cryptosuite.RequireAvailable(provider.Suite())
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageProofBundle, err)
 	}
 	if err := modelsuite.Require(suite.ID, bundle); err != nil {
 		return Result{}, fmt.Errorf("verify: proof bundle crypto_suite: %w", err)
 	}
 	sum, n, err := trustcrypto.HashReaderWithProvider(provider, bundle.SignedClaim.Claim.Content.HashAlg, raw)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageContent, err)
 	}
 	if n != bundle.SignedClaim.Claim.Content.ContentLength {
-		return Result{}, fmt.Errorf("verify: content length mismatch: got %d want %d", n, bundle.SignedClaim.Claim.Content.ContentLength)
+		return Result{}, failStage(StageContent, fmt.Errorf("verify: content length mismatch: got %d want %d", n, bundle.SignedClaim.Claim.Content.ContentLength))
 	}
 	if !bytes.Equal(sum, bundle.SignedClaim.Claim.Content.ContentHash) {
-		return Result{}, fmt.Errorf("verify: content hash mismatch")
+		return Result{}, failStage(StageContent, fmt.Errorf("verify: content hash mismatch"))
 	}
 	verified, err := claim.VerifyWithProvider(context.Background(), bundle.SignedClaim, keys.ClientPublicKey, provider)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageClientClaim, err)
 	}
 	if verified.RecordID != bundle.RecordID || verified.RecordID != bundle.ServerRecord.RecordID {
-		return Result{}, fmt.Errorf("verify: record id mismatch")
+		return Result{}, failStage(StageBundleBindings, fmt.Errorf("verify: record id mismatch"))
 	}
 	if err := validateBundleBindings(bundle, verified, provider); err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageBundleBindings, err)
 	}
 	if err := receipt.VerifyAcceptedWithProvider(context.Background(), bundle.AcceptedReceipt, keys.ServerPublicKey, provider); err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageAcceptedReceipt, err)
 	}
 	if err := receipt.VerifyCommittedWithProvider(context.Background(), bundle.CommittedReceipt, keys.ServerPublicKey, provider); err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageCommittedReceipt, err)
 	}
 	leaf, err := merkle.HashLeafForSuite(suite.ID, suite.Merkle.Algorithm, bundle.ServerRecord)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageBatchMerkle, err)
 	}
 	if !bytes.Equal(leaf, bundle.CommittedReceipt.LeafHash) {
-		return Result{}, fmt.Errorf("verify: leaf hash mismatch")
+		return Result{}, failStage(StageBatchMerkle, fmt.Errorf("verify: leaf hash mismatch"))
 	}
 	ok, err := merkle.VerifyForSuite(
 		suite.ID,
@@ -133,10 +133,10 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		bundle.CommittedReceipt.BatchRoot,
 	)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failStage(StageBatchMerkle, err)
 	}
 	if !ok {
-		return Result{}, fmt.Errorf("verify: merkle proof failed")
+		return Result{}, failStage(StageBatchMerkle, fmt.Errorf("verify: merkle proof failed"))
 	}
 	evidence := prooflevel.EvidenceFor(prooflevel.L3)
 	result := Result{
@@ -146,17 +146,17 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	}
 	if o.global != nil {
 		if err := VerifyGlobalLogProof(bundle, *o.global, keys.ServerPublicKey, provider); err != nil {
-			return Result{}, err
+			return Result{}, failStage(StageGlobalLog, err)
 		}
 		evidence.GlobalLogProof = true
 		result.ProofLevel = prooflevel.Evaluate(evidence).String()
 	}
 	if o.anchor != nil {
 		if o.global == nil {
-			return Result{}, fmt.Errorf("verify: L5 anchor requires a global log proof")
+			return Result{}, failStage(StageAnchor, fmt.Errorf("verify: L5 anchor requires a global log proof"))
 		}
 		if err := AnchorConsistencyWithVerifier(*o.global, *o.anchor, o.anchorVerifier); err != nil {
-			return Result{}, err
+			return Result{}, failStage(StageAnchor, err)
 		}
 		evidence.STHAnchorResult = true
 		result.ProofLevel = prooflevel.Evaluate(evidence).String()
