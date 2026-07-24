@@ -248,6 +248,23 @@ func TestSubscribeNATSStatusRefreshNilContextUsesBackground(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for status refresh with nil context")
 	}
+	conn.Close()
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("events channel remained open after NATS connection close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("events channel did not close after NATS connection close")
+	}
+	select {
+	case _, ok := <-errorsCh:
+		if ok {
+			t.Fatal("errors channel remained open after NATS connection close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("errors channel did not close after NATS connection close")
+	}
 }
 
 func signedStatusRefreshCBOR(t *testing.T, privateKey ed25519.PrivateKey, version uint64) []byte {

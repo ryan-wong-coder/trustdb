@@ -102,21 +102,27 @@ func SubscribeNATSStatusRefresh(ctx context.Context, conn *nats.Conn, subject, q
 	events := make(chan StatusRefresh, 1)
 	errorsCh := make(chan error, 1)
 	messages := make(chan *nats.Msg, 64)
+	closed := conn.StatusChanged(nats.CLOSED)
 	subscription, err := conn.ChanQueueSubscribe(subject, queueGroup, messages)
 	if err != nil {
+		conn.RemoveStatusListener(closed)
 		return nil, nil, fmt.Errorf("sdk: subscribe NATS status refresh: %w", err)
 	}
 	if err := conn.Flush(); err != nil {
 		_ = subscription.Unsubscribe()
+		conn.RemoveStatusListener(closed)
 		return nil, nil, fmt.Errorf("sdk: flush NATS subscription: %w", err)
 	}
 	go func() {
+		defer conn.RemoveStatusListener(closed)
 		defer subscription.Unsubscribe()
 		defer close(events)
 		defer close(errorsCh)
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-closed:
 				return
 			case message := <-messages:
 				if message == nil {
