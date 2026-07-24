@@ -39,6 +39,9 @@ func TestTiKVConcurrentSuiteInitializationHasOneWinner(t *testing.T) {
 				Keyspace:      os.Getenv("TRUSTDB_TIKV_KEYSPACE"),
 				Namespace:     namespace,
 				CryptoSuite:   suiteID,
+				NodeID:        "integration-node",
+				LogID:         "integration-log",
+				NamespaceID:   namespace,
 			})
 			if err == nil {
 				err = store.Close()
@@ -538,6 +541,10 @@ func openIntegrationStoreWithoutProjection(t *testing.T, namespace, nodeID, walI
 		CheckpointWALID:  walID,
 		RecordIndexMode:  tikvstore.RecordIndexModeFull,
 		ArtifactSyncMode: tikvstore.ArtifactSyncModeChunk,
+		CryptoSuite:      cryptosuite.INTLV1,
+		NodeID:           "integration-node",
+		LogID:            "integration-log",
+		NamespaceID:      namespace,
 	})
 	if err != nil {
 		t.Fatalf("open TiKV store: %v", err)
