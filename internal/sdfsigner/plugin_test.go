@@ -190,6 +190,9 @@ func TestPluginRandomAndSM4KEKContract(t *testing.T) {
 	if wrapped.KEKID != "backup-kek-v1" || wrapped.KEKIndex != 11 || len(wrapped.Wrapped) == 0 {
 		t.Fatalf("wrapped key metadata = %+v", wrapped)
 	}
+	if wrapped.Device != backend.identity {
+		t.Fatalf("wrapped device identity = %+v", wrapped.Device)
+	}
 	iv := []byte("0123456789abcdef")
 	plaintext := []byte("block-0000000001block-0000000002")
 	ciphertext, err := generated.EncryptCBC(context.Background(), iv, plaintext)
@@ -217,6 +220,75 @@ func TestPluginRandomAndSM4KEKContract(t *testing.T) {
 	}
 	if backend.destroyCalls.Load() != 1 {
 		t.Fatal("generated session key was not destroyed exactly once")
+	}
+}
+
+func TestWrappedSM4KeyRestoresOnlyToSameDeviceAndKEK(t *testing.T) {
+	t.Parallel()
+	firstBackend := newFakeBackend(t)
+	first, err := New(context.Background(), testConfig(), firstBackend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, generated, err := first.GenerateSM4Session(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	iv := []byte("0123456789abcdef")
+	plaintext := []byte("block-0000000001")
+	ciphertext, err := generated.EncryptCBC(context.Background(), iv, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := generated.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondBackend := newFakeBackend(t)
+	second, err := New(context.Background(), testConfig(), secondBackend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	restored, err := second.ImportSM4Session(context.Background(), wrapped)
+	if err != nil {
+		t.Fatalf("ImportSM4Session() after process restart error = %v", err)
+	}
+	roundTrip, err := restored.DecryptCBC(context.Background(), iv, ciphertext)
+	if err != nil || string(roundTrip) != string(plaintext) {
+		t.Fatalf("restored DecryptCBC() = %q, %v", roundTrip, err)
+	}
+	if err := restored.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	changedDeviceBackend := newFakeBackend(t)
+	changedDeviceBackend.identity.Serial = "replacement-serial"
+	changedDevice, err := New(context.Background(), testConfig(), changedDeviceBackend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer changedDevice.Close()
+	if _, err := changedDevice.ImportSM4Session(context.Background(), wrapped); err == nil {
+		t.Fatal("restore accepted a replacement device")
+	} else {
+		requireProviderCode(t, err, signerplugin.ErrorInvalidArgument)
+	}
+
+	changedKEKConfig := testConfig()
+	changedKEKConfig.KEKID = "backup-kek-v2"
+	changedKEK, err := New(context.Background(), changedKEKConfig, newFakeBackend(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer changedKEK.Close()
+	if _, err := changedKEK.ImportSM4Session(context.Background(), wrapped); err == nil {
+		t.Fatal("restore accepted a different KEK identity")
+	} else {
+		requireProviderCode(t, err, signerplugin.ErrorInvalidArgument)
 	}
 }
 

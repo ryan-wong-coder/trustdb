@@ -252,12 +252,13 @@ func (p *Plugin) GenerateSM4Session(ctx context.Context) (WrappedSM4Key, *SM4Ses
 		_ = session.Close()
 		return WrappedSM4Key{}, nil, providerError(newFault(faultPrecondition))
 	}
-	return WrappedSM4Key{
-			KEKID: p.config.KEKID, KEKIndex: p.config.KEKIndex,
-			Wrapped: append([]byte(nil), wrapped...),
-		},
-		&SM4Session{session: session, handle: handle},
-		nil
+	durable, durableErr := NewWrappedSM4Key(p.identity, p.config.KEKID, p.config.KEKIndex, wrapped)
+	if durableErr != nil {
+		_ = session.DestroySessionKey(context.Background(), handle)
+		_ = session.Close()
+		return WrappedSM4Key{}, nil, providerError(newFault(faultInternal))
+	}
+	return durable, &SM4Session{session: session, handle: handle}, nil
 }
 
 // ImportSM4Session imports only a KEK-wrapped session key. Exact KEK identity
@@ -266,7 +267,11 @@ func (p *Plugin) ImportSM4Session(ctx context.Context, wrapped WrappedSM4Key) (*
 	if p == nil || p.required&SM4Capabilities != SM4Capabilities {
 		return nil, providerError(newFault(faultUnsupported))
 	}
-	if wrapped.KEKID != p.config.KEKID || wrapped.KEKIndex != p.config.KEKIndex ||
+	if err := wrapped.Validate(); err != nil {
+		return nil, providerError(newFault(faultInvalid))
+	}
+	if wrapped.Device != p.identity ||
+		wrapped.KEKID != p.config.KEKID || wrapped.KEKIndex != p.config.KEKIndex ||
 		len(wrapped.Wrapped) == 0 || len(wrapped.Wrapped) > MaxWrappedKeyBytes {
 		return nil, providerError(newFault(faultInvalid))
 	}

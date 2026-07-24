@@ -80,11 +80,11 @@ type Config struct {
 // adapter. DeviceID must equal Config.DeviceRef. The remaining fields are
 // pinned for the sidecar lifetime so device replacement fails closed.
 type DeviceIdentity struct {
-	AdapterID      string
-	AdapterVersion string
-	DeviceID       string
-	Serial         string
-	Firmware       string
+	AdapterID      string `cbor:"adapter_id" json:"adapter_id"`
+	AdapterVersion string `cbor:"adapter_version" json:"adapter_version"`
+	DeviceID       string `cbor:"device_id" json:"device_id"`
+	Serial         string `cbor:"serial" json:"serial"`
+	Firmware       string `cbor:"firmware" json:"firmware"`
 }
 
 // Backend discovers one configured device. Native library loading and device
@@ -133,13 +133,20 @@ func (h SessionKeyHandle) adapterValue() uint64 {
 	return h.value
 }
 
-// WrappedSM4Key is the complete durable representation of a generated SDF
-// session key. Logical backup may copy this structure but never an active
-// SessionKeyHandle or credential.
+// WrappedSM4Key is the versioned durable representation of a generated SDF
+// session key. ChecksumSM3 detects accidental corruption; it is unkeyed and
+// therefore is not an authenticity control. Device KEK protection and any
+// enclosing backup AEAD/MAC remain separate requirements. This object is not
+// automatically included in TrustDB logical backups.
 type WrappedSM4Key struct {
-	KEKID    string
-	KEKIndex uint32
-	Wrapped  []byte
+	SchemaVersion string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   string         `cbor:"crypto_suite" json:"crypto_suite"`
+	Algorithm     string         `cbor:"algorithm" json:"algorithm"`
+	Device        DeviceIdentity `cbor:"device" json:"device"`
+	KEKID         string         `cbor:"kek_id" json:"kek_id"`
+	KEKIndex      uint32         `cbor:"kek_index" json:"kek_index"`
+	Wrapped       []byte         `cbor:"wrapped" json:"wrapped"`
+	ChecksumSM3   []byte         `cbor:"checksum_sm3" json:"checksum_sm3"`
 }
 
 // CredentialSource reads an access credential just in time. Implementations

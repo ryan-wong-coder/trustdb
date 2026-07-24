@@ -35,3 +35,12 @@ does not change the default software-signer path. Follow
 for token preparation, owner-only PIN files, mechanism profiles, and hardware
 qualification. macOS and Windows packages do not currently bundle this
 optional native sidecar.
+
+Linux packages also contain `bin/trustdb-signer-sdf`. It loads only TrustDB's
+versioned adapter ABI; it does not bundle, link, or qualify a proprietary SDF
+library. Build the deployment-specific adapter shim against the purchased
+device SDK, mount owner-only adapter configuration and credential files, and
+follow
+[`docs/integrations/SDF_SIGNER.md`](https://github.com/wowtrust/trustdb/blob/main/docs/integrations/SDF_SIGNER.md).
+The ordinary TrustDB server remains usable without SDF, and no adapter is
+loaded until the `sdf` signer plugin is explicitly configured.
