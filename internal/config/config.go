@@ -75,20 +75,20 @@ server:
 nats:
   enabled: false
   urls: ["nats://127.0.0.1:4222"]
-  stream: "TRUSTDB_INGRESS"
-  subject: "trustdb.ingress.v1.claims"
-  durable: "trustdb-ingress"
+  stream: "TRUSTDB_INGRESS_V2"
+  subject: "trustdb.ingress.v2.claims"
+  durable: "trustdb-ingress-v2"
   provision: true
   stream_storage: "file"
   stream_replicas: 1
   stream_max_bytes: 10737418240
   stream_max_age: "0s"
-  result_stream: "TRUSTDB_INGRESS_RESULTS"
-  result_subject: "trustdb.ingress.v1.results.*"
+  result_stream: "TRUSTDB_INGRESS_V2_RESULTS"
+  result_subject: "trustdb.ingress.v2.results.*"
   result_max_bytes: 10737418240
   result_max_age: "24h"
-  dlq_stream: "TRUSTDB_INGRESS_DLQ"
-  dlq_subject: "trustdb.ingress.v1.dlq.*"
+  dlq_stream: "TRUSTDB_INGRESS_V2_DLQ"
+  dlq_subject: "trustdb.ingress.v2.dlq.*"
   dlq_max_bytes: 1073741824
   dlq_max_age: "0s"
   duplicate_window: "2m"
@@ -496,20 +496,20 @@ func Default() Config {
 		},
 		NATS: NATS{
 			URLs:            []string{"nats://127.0.0.1:4222"},
-			Stream:          "TRUSTDB_INGRESS",
-			Subject:         "trustdb.ingress.v1.claims",
-			Durable:         "trustdb-ingress",
+			Stream:          "TRUSTDB_INGRESS_V2",
+			Subject:         "trustdb.ingress.v2.claims",
+			Durable:         "trustdb-ingress-v2",
 			Provision:       true,
 			StreamStorage:   "file",
 			StreamReplicas:  1,
 			StreamMaxBytes:  10 << 30,
 			StreamMaxAge:    "0s",
-			ResultStream:    "TRUSTDB_INGRESS_RESULTS",
-			ResultSubject:   "trustdb.ingress.v1.results.*",
+			ResultStream:    "TRUSTDB_INGRESS_V2_RESULTS",
+			ResultSubject:   "trustdb.ingress.v2.results.*",
 			ResultMaxBytes:  10 << 30,
 			ResultMaxAge:    "24h",
-			DLQStream:       "TRUSTDB_INGRESS_DLQ",
-			DLQSubject:      "trustdb.ingress.v1.dlq.*",
+			DLQStream:       "TRUSTDB_INGRESS_V2_DLQ",
+			DLQSubject:      "trustdb.ingress.v2.dlq.*",
 			DLQMaxBytes:     1 << 30,
 			DLQMaxAge:       "0s",
 			DuplicateWindow: "2m",

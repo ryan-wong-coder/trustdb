@@ -137,7 +137,7 @@ func (s *JetStreamOutcomeSink) storeImmutable(ctx context.Context, stream jetstr
 }
 
 func outcomeSubject(pattern, id string) (string, error) {
-	if !validDigestID(id, messageIDPrefix) && !validDigestID(id, "tnj1") {
+	if !validDigestID(id, messageIDPrefix) && !validDigestID(id, rejectionPrefix) {
 		return "", fmt.Errorf("invalid NATS outcome identity %q", id)
 	}
 	if !strings.HasSuffix(pattern, ".*") {

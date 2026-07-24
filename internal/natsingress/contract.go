@@ -13,17 +13,20 @@ import (
 	"strings"
 
 	"github.com/wowtrust/trustdb/internal/cborx"
+	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
 	"github.com/wowtrust/trustdb/internal/model"
+	"github.com/wowtrust/trustdb/internal/modelsuite"
 	"github.com/wowtrust/trustdb/internal/prooflevel"
 	"github.com/wowtrust/trustdb/internal/submission"
 	"github.com/wowtrust/trustdb/internal/trusterr"
 )
 
 const (
-	SchemaRequest = "trustdb.nats-ingress-request.v1"
-	SchemaResult  = "trustdb.nats-ingress-result.v1"
+	SchemaRequest = "trustdb.nats-ingress-request.v2"
+	SchemaResult  = "trustdb.nats-ingress-result.v2"
 
-	ContentType         = "application/vnd.trustdb.nats-ingress+cbor"
+	ContentType         = "application/vnd.trustdb.nats-ingress.v2+cbor"
 	HeaderContentType   = "Content-Type"
 	HeaderSchemaVersion = "TrustDB-Schema-Version"
 	HeaderMessageID     = "Nats-Msg-Id"
@@ -33,10 +36,12 @@ const (
 )
 
 const (
-	messageIDDomain = "trustdb.nats-message-id.v1"
-	routingDomain   = "trustdb.nats-routing-key.v1"
-	messageIDPrefix = "tnm1"
-	routingPrefix   = "tnr1"
+	messageIDDomain = "trustdb.nats-message-id.v2"
+	routingDomain   = "trustdb.nats-routing-key.v2"
+	rejectionDomain = "trustdb.nats-rejection.v2"
+	messageIDPrefix = "tnm2"
+	routingPrefix   = "tnr2"
+	rejectionPrefix = "tnj2"
 )
 
 var base32NoPadding = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -45,16 +50,18 @@ var base32NoPadding = base32.StdEncoding.WithPadding(base32.NoPadding)
 // the complete canonical SignedClaim and must match it during decoding.
 type Request struct {
 	SchemaVersion string            `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID    `cbor:"crypto_suite" json:"crypto_suite"`
 	MessageID     string            `cbor:"message_id" json:"message_id"`
 	SignedClaim   model.SignedClaim `cbor:"signed_claim" json:"signed_claim"`
 }
 
 // Result carries exactly one accepted outcome or one coded failure.
 type Result struct {
-	SchemaVersion string    `cbor:"schema_version" json:"schema_version"`
-	MessageID     string    `cbor:"message_id" json:"message_id"`
-	Accepted      *Accepted `cbor:"accepted,omitempty" json:"accepted,omitempty"`
-	Error         *Failure  `cbor:"error,omitempty" json:"error,omitempty"`
+	SchemaVersion string         `cbor:"schema_version" json:"schema_version"`
+	CryptoSuite   cryptosuite.ID `cbor:"crypto_suite" json:"crypto_suite"`
+	MessageID     string         `cbor:"message_id" json:"message_id"`
+	Accepted      *Accepted      `cbor:"accepted,omitempty" json:"accepted,omitempty"`
+	Error         *Failure       `cbor:"error,omitempty" json:"error,omitempty"`
 }
 
 // Accepted mirrors the transport-neutral Submission Service outcome.
@@ -85,6 +92,7 @@ func NewRequest(signed model.SignedClaim) (Request, error) {
 	}
 	return Request{
 		SchemaVersion: SchemaRequest,
+		CryptoSuite:   signed.CryptoSuite,
 		MessageID:     messageID,
 		SignedClaim:   signed,
 	}, nil
@@ -100,7 +108,7 @@ func MessageID(signed model.SignedClaim) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("canonicalize signed claim for NATS message_id: %w", err)
 	}
-	return digestIdentity(messageIDPrefix, messageIDDomain, string(canonical)), nil
+	return digestIdentity(messageIDPrefix, messageIDDomain, string(signed.CryptoSuite), string(canonical)), nil
 }
 
 // RoutingKey is stable for one signed tenant/client identity. A future runtime
@@ -108,12 +116,13 @@ func MessageID(signed model.SignedClaim) (string, error) {
 // routing metadata.
 func RoutingKey(signed model.SignedClaim) string {
 	claim := signed.Claim
-	return digestIdentity(routingPrefix, routingDomain, claim.TenantID, claim.ClientID)
+	return digestIdentity(routingPrefix, routingDomain, string(signed.CryptoSuite), claim.TenantID, claim.ClientID)
 }
 
 func NewAcceptedResult(request Request, outcome submission.Outcome) (Result, error) {
 	result := Result{
 		SchemaVersion: SchemaResult,
+		CryptoSuite:   request.CryptoSuite,
 		MessageID:     request.MessageID,
 		Accepted: &Accepted{
 			RecordID:        outcome.RecordID,
@@ -138,6 +147,7 @@ func NewErrorResult(request Request, err error) (Result, error) {
 	}
 	result := Result{
 		SchemaVersion: SchemaResult,
+		CryptoSuite:   request.CryptoSuite,
 		MessageID:     request.MessageID,
 		Error: &Failure{
 			Code:    trusterr.CodeOf(err),
@@ -190,8 +200,14 @@ func (r Request) Validate() error {
 	if r.SchemaVersion != SchemaRequest {
 		return fmt.Errorf("unexpected NATS ingress request schema: %s", r.SchemaVersion)
 	}
+	if _, _, err := formatregistry.RequireWritable(formatregistry.NATSV2, r.CryptoSuite); err != nil {
+		return fmt.Errorf("NATS ingress request crypto_suite: %w", err)
+	}
 	if err := validateSignedClaimIdentity(r.SignedClaim); err != nil {
 		return err
+	}
+	if err := cryptosuite.RequireSame(r.CryptoSuite, r.SignedClaim.CryptoSuite); err != nil {
+		return fmt.Errorf("NATS ingress request suite mismatch: %w", err)
 	}
 	want, err := MessageID(r.SignedClaim)
 	if err != nil {
@@ -204,6 +220,12 @@ func (r Request) Validate() error {
 }
 
 func validateSignedClaimIdentity(signed model.SignedClaim) error {
+	if _, _, err := formatregistry.RequireWritable(formatregistry.NATSV2, signed.CryptoSuite); err != nil {
+		return fmt.Errorf("NATS ingress signed claim crypto_suite: %w", err)
+	}
+	if err := modelsuite.Require(signed.CryptoSuite, signed); err != nil {
+		return fmt.Errorf("NATS ingress signed claim suite mismatch: %w", err)
+	}
 	if signed.SchemaVersion != model.SchemaSignedClaim {
 		return fmt.Errorf("unexpected signed claim schema: %s", signed.SchemaVersion)
 	}
@@ -221,6 +243,9 @@ func (r Result) Validate() error {
 	if r.SchemaVersion != SchemaResult {
 		return fmt.Errorf("unexpected NATS ingress result schema: %s", r.SchemaVersion)
 	}
+	if _, _, err := formatregistry.RequireWritable(formatregistry.NATSV2, r.CryptoSuite); err != nil {
+		return fmt.Errorf("NATS ingress result crypto_suite: %w", err)
+	}
 	if !validDigestID(r.MessageID, messageIDPrefix) {
 		return errors.New("NATS ingress result has invalid message_id")
 	}
@@ -228,7 +253,7 @@ func (r Result) Validate() error {
 		return errors.New("NATS ingress result must contain exactly one of accepted or error")
 	}
 	if r.Accepted != nil {
-		return r.Accepted.validate()
+		return r.Accepted.validate(r.CryptoSuite)
 	}
 	return r.Error.validate()
 }
@@ -243,10 +268,19 @@ func (r Result) ValidateFor(request Request) error {
 	if r.MessageID != request.MessageID {
 		return fmt.Errorf("NATS ingress result message_id %q does not match request %q", r.MessageID, request.MessageID)
 	}
+	if err := cryptosuite.RequireSame(request.CryptoSuite, r.CryptoSuite); err != nil {
+		return fmt.Errorf("NATS ingress result suite mismatch: %w", err)
+	}
 	return nil
 }
 
-func (a Accepted) validate() error {
+func (a Accepted) validate(suiteID cryptosuite.ID) error {
+	if err := modelsuite.Require(suiteID, a.ServerRecord); err != nil {
+		return fmt.Errorf("NATS ingress accepted result suite mismatch: %w", err)
+	}
+	if err := modelsuite.Require(suiteID, a.AcceptedReceipt); err != nil {
+		return fmt.Errorf("NATS ingress accepted result suite mismatch: %w", err)
+	}
 	if a.RecordID == "" || a.RecordID != a.ServerRecord.RecordID || a.RecordID != a.AcceptedReceipt.RecordID {
 		return errors.New("NATS ingress accepted result has inconsistent record_id")
 	}

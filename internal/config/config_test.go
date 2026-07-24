@@ -85,10 +85,10 @@ func TestDefaultYAMLIsStructured(t *testing.T) {
 	if Default().NATS.Workers != 0 {
 		t.Fatalf("default nats.workers = %d, want automatic sizing (0)", Default().NATS.Workers)
 	}
-	if Default().NATS.ResultStream != "TRUSTDB_INGRESS_RESULTS" || Default().NATS.ResultSubject != "trustdb.ingress.v1.results.*" || Default().NATS.ResultMaxAge != "24h" {
+	if Default().NATS.ResultStream != "TRUSTDB_INGRESS_V2_RESULTS" || Default().NATS.ResultSubject != "trustdb.ingress.v2.results.*" || Default().NATS.ResultMaxAge != "24h" {
 		t.Fatalf("default NATS result topology = %+v", Default().NATS)
 	}
-	if Default().NATS.DLQStream != "TRUSTDB_INGRESS_DLQ" || Default().NATS.DLQSubject != "trustdb.ingress.v1.dlq.*" || Default().NATS.DLQMaxAge != "0s" {
+	if Default().NATS.DLQStream != "TRUSTDB_INGRESS_V2_DLQ" || Default().NATS.DLQSubject != "trustdb.ingress.v2.dlq.*" || Default().NATS.DLQMaxAge != "0s" {
 		t.Fatalf("default NATS DLQ topology = %+v", Default().NATS)
 	}
 }
@@ -212,7 +212,7 @@ func TestValidateRejectsInvalidEnabledNATSConfig(t *testing.T) {
 		{name: "invalid result subject", mutate: func(n *NATS) { n.ResultSubject = "trustdb.results" }, want: "nats.result_subject"},
 		{name: "invalid DLQ subject", mutate: func(n *NATS) { n.DLQSubject = "trustdb.dlq.>" }, want: "nats.dlq_subject"},
 		{name: "overlapping outcome subjects", mutate: func(n *NATS) { n.DLQSubject = n.ResultSubject }, want: "must not overlap"},
-		{name: "result overlaps ingress", mutate: func(n *NATS) { n.ResultSubject = "trustdb.ingress.v1.*" }, want: "must not overlap"},
+		{name: "result overlaps ingress", mutate: func(n *NATS) { n.ResultSubject = "trustdb.ingress.v2.*" }, want: "must not overlap"},
 		{name: "zero result bytes", mutate: func(n *NATS) { n.ResultMaxBytes = 0 }, want: "nats.result_max_bytes"},
 		{name: "negative result max age", mutate: func(n *NATS) { n.ResultMaxAge = "-1s" }, want: "nats.result_max_age"},
 		{name: "zero DLQ bytes", mutate: func(n *NATS) { n.DLQMaxBytes = 0 }, want: "nats.dlq_max_bytes"},
