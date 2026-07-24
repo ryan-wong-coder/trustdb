@@ -24,6 +24,12 @@ Compatibility reports and CI use three distinct levels:
 | `runtime` | The exact row completed all required operations and produced reviewable evidence. | Other rows, patches, architectures, or release tags are compatible. |
 
 The validator defaults to `runtime`. A partial smoke is recorded as `partial`, never `verified`.
+Changing a matrix row to `runtime_status=verified` is insufficient by itself:
+the validator requires a committed repository-relative evidence file whose component
+pins, complete artifact digest set, negotiated crypto mode, transaction/proof/event
+results, block roots, PBFT signatures and node identities, and stale `blockLimit`
+rejection all match that exact row. Compiler-independent raw-EVM diagnostics can
+never satisfy runtime admission.
 
 ## Exact pins and provenance
 

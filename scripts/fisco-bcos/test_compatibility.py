@@ -69,6 +69,31 @@ class CompatibilityBaselineTest(unittest.TestCase):
         with self.assertRaisesRegex(compatibility.BaselineError, "raw-EVM diagnostic"):
             compatibility.validate_baseline(invalid)
 
+    def test_verified_runtime_requires_committed_evidence(self) -> None:
+        invalid = copy.deepcopy(self.baseline)
+        row = next(
+            item
+            for item in invalid["matrix"]
+            if item["deployment"] == "air"
+            and item["crypto"] == "standard"
+            and item["platform"] == "linux/amd64"
+        )
+        row["runtime_status"] = "verified"
+        with self.assertRaisesRegex(compatibility.BaselineError, "requires committed evidence"):
+            compatibility.validate_baseline(invalid)
+
+    def test_evidence_must_match_exact_artifact_digest_set(self) -> None:
+        invalid = copy.deepcopy(self.baseline)
+        row = next(item for item in invalid["matrix"] if item.get("evidence"))
+        evidence_path = compatibility.REPO_ROOT / row["evidence"]
+        evidence = compatibility.load_baseline(evidence_path)
+        evidence["artifacts"] = dict(evidence["artifacts"])
+        artifact_name = next(iter(evidence["artifacts"]))
+        evidence["artifacts"][artifact_name] = "0" * 64
+        with mock.patch.object(compatibility, "load_baseline", return_value=evidence):
+            with self.assertRaisesRegex(compatibility.BaselineError, "artifact digest set mismatch"):
+                compatibility.validate_baseline(invalid)
+
     def test_corrupt_cache_is_replaced_only_when_downloads_are_allowed(self) -> None:
         expected = b"pinned artifact bytes"
         artifact = {

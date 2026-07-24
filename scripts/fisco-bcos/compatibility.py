@@ -68,7 +68,7 @@ def validate_artifact(component: str, artifact: dict[str, Any]) -> None:
 
 
 def validate_evidence(
-    baseline_id: str, row: dict[str, Any], evidence_reference: str
+    baseline: dict[str, Any], row: dict[str, Any], evidence_reference: str
 ) -> None:
     relative = Path(evidence_reference)
     require(
@@ -81,7 +81,11 @@ def validate_evidence(
     except BaselineError as exc:
         raise BaselineError(f"invalid matrix evidence {evidence_reference}: {exc}") from exc
     key = (row["deployment"], row["crypto"], row["platform"])
-    require(evidence.get("baseline_id") == baseline_id, f"evidence {key} baseline mismatch")
+    require(evidence.get("schema_version") == 1, f"evidence {key} schema mismatch")
+    require(
+        evidence.get("baseline_id") == baseline["baseline_id"],
+        f"evidence {key} baseline mismatch",
+    )
     require(
         evidence.get("profile")
         == {
@@ -93,10 +97,127 @@ def validate_evidence(
     )
     admitted = evidence.get("admitted")
     require(isinstance(admitted, bool), f"evidence {key} requires boolean admitted")
+    require(
+        isinstance(evidence.get("command"), str) and evidence["command"],
+        f"evidence {key} requires the exact smoke command",
+    )
+    require(
+        isinstance(evidence.get("host"), str) and evidence["host"],
+        f"evidence {key} requires the host platform",
+    )
+    require(
+        evidence.get("node_commit") == baseline["components"]["node"]["commit"],
+        f"evidence {key} node commit mismatch",
+    )
+    require(
+        evidence.get("node_version")
+        == baseline["components"]["node"]["tag"].removeprefix("v"),
+        f"evidence {key} node version mismatch",
+    )
+    require(
+        evidence.get("sm_crypto") is (row["crypto"] == "guomi"),
+        f"evidence {key} negotiated crypto mode mismatch",
+    )
+
+    pins = evidence.get("pins")
+    expected_pins = {
+        "node": f"{baseline['components']['node']['tag']}@{baseline['components']['node']['commit']}",
+        "go_sdk": f"{baseline['components']['go_sdk']['tag']}@{baseline['components']['go_sdk']['commit']}",
+        "c_sdk_source": baseline["components"]["go_sdk"]["c_sdk_module"]["commit"],
+        "c_sdk_native": f"{baseline['components']['c_sdk']['tag']}@{baseline['components']['c_sdk']['commit']}",
+        "solidity": f"{baseline['components']['solidity']['tag']}@{baseline['components']['solidity']['commit']}",
+        "tassl": f"{baseline['components']['tassl']['tag']}@{baseline['components']['tassl']['commit']}",
+    }
+    require(pins == expected_pins, f"evidence {key} component pins mismatch")
+
+    expected_artifacts = {
+        artifact["name"]: artifact["sha256"]
+        for _component, artifact in iter_artifacts(
+            baseline, row["platform"], row["crypto"]
+        )
+    }
+    require(
+        evidence.get("artifacts") == expected_artifacts,
+        f"evidence {key} artifact digest set mismatch",
+    )
+
+    results = evidence.get("results")
+    require(isinstance(results, dict), f"evidence {key} requires runtime results")
+    deployment = results.get("deployment")
+    event_transaction = results.get("event_transaction")
+    containing_block = results.get("containing_block")
+    consensus = results.get("consensus")
+    for label, transaction in (
+        ("deployment", deployment),
+        ("event transaction", event_transaction),
+    ):
+        require(isinstance(transaction, dict), f"evidence {key} lacks {label}")
+        require(transaction.get("status") == 0, f"evidence {key} {label} failed")
+        require(
+            isinstance(transaction.get("transaction_hash"), str)
+            and transaction["transaction_hash"].startswith("0x")
+            and len(transaction["transaction_hash"]) == 66,
+            f"evidence {key} {label} hash is invalid",
+        )
+        require(
+            isinstance(transaction.get("transaction_proof"), list)
+            and transaction["transaction_proof"],
+            f"evidence {key} {label} transaction proof is absent",
+        )
+        require(
+            isinstance(transaction.get("receipt_proof"), list)
+            and transaction["receipt_proof"],
+            f"evidence {key} {label} receipt proof is absent",
+        )
+    require(
+        event_transaction.get("event_transaction_match") is True,
+        f"evidence {key} event is not bound to the submitted transaction",
+    )
+    require(isinstance(containing_block, dict), f"evidence {key} lacks containing block")
+    for field in ("hash", "transactions_root", "receipts_root"):
+        require(
+            isinstance(containing_block.get(field), str)
+            and containing_block[field].startswith("0x")
+            and len(containing_block[field]) == 66,
+            f"evidence {key} containing block {field} is invalid",
+        )
+    require(
+        isinstance(containing_block.get("signature_count"), int)
+        and containing_block["signature_count"] >= 3,
+        f"evidence {key} lacks PBFT block signatures",
+    )
+    require(isinstance(consensus, dict), f"evidence {key} lacks consensus metadata")
+    require(consensus.get("connected_nodes") == 4, f"evidence {key} node count mismatch")
+    require(consensus.get("sealers") == 4, f"evidence {key} sealer count mismatch")
+    require(
+        consensus.get("minimum_required_quorum") == 3,
+        f"evidence {key} quorum mismatch",
+    )
+    node_ids = consensus.get("node_ids")
+    require(
+        isinstance(node_ids, list)
+        and len(node_ids) == 4
+        and all(isinstance(node_id, str) and node_id for node_id in node_ids)
+        and len(set(node_ids)) == 4,
+        f"evidence {key} requires four unique node identities",
+    )
+    require(
+        results.get("stale_block_limit_rejected") is True,
+        f"evidence {key} did not reject stale blockLimit",
+    )
     if evidence.get("probe_source") == "compiler-independent-raw-evm-log0":
         require(
             row["runtime_status"] != "verified",
             f"raw-EVM diagnostic cannot verify runtime row {key}",
+        )
+    if row["runtime_status"] == "verified":
+        require(
+            evidence.get("evidence_class") == "runtime_verified",
+            f"verified runtime row {key} requires runtime_verified evidence",
+        )
+        require(
+            evidence.get("compiler_executable") is True,
+            f"verified runtime row {key} requires the pinned compiler",
         )
     require(
         admitted == (row["runtime_status"] == "verified"),
@@ -160,12 +281,17 @@ def validate_baseline(value: dict[str, Any]) -> None:
         if row["artifact_status"] == "unavailable":
             require(row["runtime_status"] == "unsupported", f"unavailable row {key} must be unsupported")
         evidence_reference = row.get("evidence")
+        if row["runtime_status"] == "verified":
+            require(
+                isinstance(evidence_reference, str) and evidence_reference,
+                f"verified runtime row {key} requires committed evidence",
+            )
         if evidence_reference is not None:
             require(
                 isinstance(evidence_reference, str) and evidence_reference,
                 f"matrix evidence reference {key} must be a non-empty string",
             )
-            validate_evidence(value["baseline_id"], row, evidence_reference)
+            validate_evidence(value, row, evidence_reference)
 
     for deployment in DEPLOYMENTS:
         for crypto in CRYPTO_MODES:
