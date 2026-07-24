@@ -1,0 +1,151 @@
+name: SDF Provider
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/sdf-provider.yml"
+      - ".github/workflows/sdf-vendor-smoke.yml"
+      - "cmd/trustdb-signer-sdf/**"
+      - "internal/sdfsigner/**"
+      - "sdk/sdfadapter/**"
+      - "packaging/release/build-server.sh"
+      - "packaging/RELEASE_PACKAGE.md"
+      - "docs/integrations/SDF_SIGNER.md"
+      - "formats/SDF_RECOVERY_BUNDLE_V1.md"
+      - "configs/README.md"
+      - "go.mod"
+      - "go.sum"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/sdf-provider.yml"
+      - ".github/workflows/sdf-vendor-smoke.yml"
+      - "cmd/trustdb-signer-sdf/**"
+      - "internal/sdfsigner/**"
+      - "sdk/sdfadapter/**"
+      - "packaging/release/build-server.sh"
+      - "packaging/RELEASE_PACKAGE.md"
+      - "docs/integrations/SDF_SIGNER.md"
+      - "formats/SDF_RECOVERY_BUNDLE_V1.md"
+      - "configs/README.md"
+      - "go.mod"
+      - "go.sum"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdf-provider-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-native:
+    name: Native ABI · ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-24.04
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run portable and native contract tests
+        run: |
+          go test -count=1 ./internal/sdfsigner ./cmd/trustdb-signer-sdf
+          go test -count=1 -tags=sdf ./internal/sdfsigner ./cmd/trustdb-signer-sdf
+          go vet -tags=sdf ./internal/sdfsigner ./cmd/trustdb-signer-sdf
+
+      - name: Run race contract tests
+        if: matrix.name == 'linux-amd64'
+        run: go test -race -count=1 -tags=sdf ./internal/sdfsigner ./cmd/trustdb-signer-sdf
+
+      - name: Build native sidecar
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p "$RUNNER_TEMP/trustdb-sdf/bin"
+          go build -trimpath -tags=sdf \
+            -o "$RUNNER_TEMP/trustdb-sdf/bin/trustdb-signer-sdf" \
+            ./cmd/trustdb-signer-sdf
+          file "$RUNNER_TEMP/trustdb-sdf/bin/trustdb-signer-sdf"
+          ldd "$RUNNER_TEMP/trustdb-sdf/bin/trustdb-signer-sdf"
+
+      - name: Verify Linux release package
+        if: matrix.name == 'linux-amd64'
+        env:
+          VERSION: "0.0.0-sdf-smoke"
+          BUILD_DATE: "2026-07-24T00:00:00Z"
+          TARGET_OS: linux
+          TARGET_ARCH: amd64
+          CGO_ENABLED: "1"
+          ARCHIVE_KIND: tar.gz
+          GITHUB_SHA: "sdf-packaging-smoke"
+        run: |
+          mkdir -p release-admin
+          bash packaging/release/build-server.sh
+          tar -tzf release-output/trustdb-0.0.0-sdf-smoke-linux-amd64.tar.gz \
+            | grep -F "/bin/trustdb-signer-sdf"
+
+  portable-platforms:
+    name: Portable contract · ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-amd64
+            runner: macos-15-intel
+            native: true
+          - name: macos-arm64
+            runner: macos-15
+            native: true
+          - name: windows-amd64
+            runner: windows-2025
+            native: false
+          - name: windows-arm64
+            runner: windows-11-arm
+            native: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test portable provider and stub
+        run: go test -count=1 ./internal/sdfsigner ./cmd/trustdb-signer-sdf
+
+      - name: Build portable diagnostic stub
+        run: go build ./cmd/trustdb-signer-sdf
+
+      - name: Test native adapter on macOS
+        if: matrix.native
+        env:
+          CGO_ENABLED: "1"
+        run: go test -count=1 -tags=sdf ./internal/sdfsigner ./cmd/trustdb-signer-sdf
+
+      - name: Build native adapter sidecar on macOS
+        if: matrix.native
+        env:
+          CGO_ENABLED: "1"
+        run: go build -trimpath -tags=sdf ./cmd/trustdb-signer-sdf

@@ -12,6 +12,7 @@ archive_kind="${ARCHIVE_KIND:-tar.gz}"
 package="trustdb-$VERSION-$TARGET_OS-$TARGET_ARCH"
 output="release-bin/trustdb$exe_suffix"
 pkcs11_output="release-bin/trustdb-signer-pkcs11$exe_suffix"
+sdf_output="release-bin/trustdb-signer-sdf$exe_suffix"
 root="release-stage/$package"
 
 actual_os="$(go env GOOS)"
@@ -37,6 +38,10 @@ if [ "$TARGET_OS" = "linux" ] && [ "$CGO_ENABLED" = "1" ]; then
     -ldflags="-s -w" \
     -o "$pkcs11_output" ./cmd/trustdb-signer-pkcs11
   cp "$pkcs11_output" "$root/bin/"
+  go build -trimpath -tags=sdf \
+    -ldflags="-s -w" \
+    -o "$sdf_output" ./cmd/trustdb-signer-sdf
+  cp "$sdf_output" "$root/bin/"
 fi
 cp release-bin/version.json "$root/BUILD_INFO.json"
 cp -R release-admin/. "$root/admin/"

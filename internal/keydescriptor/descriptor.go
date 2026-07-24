@@ -225,7 +225,13 @@ func Unmarshal(data []byte) (Descriptor, error) {
 		return Descriptor{}, invalid("encoded descriptor is too large")
 	}
 	var descriptor Descriptor
-	if err := cborx.UnmarshalLimit(data, &descriptor, maxDescriptorBytes); err != nil {
+	if err := cborx.UnmarshalLimits(
+		data,
+		&descriptor,
+		maxDescriptorBytes,
+		formatregistry.MaxCertificateCountV2,
+		16,
+	); err != nil {
 		return Descriptor{}, fmt.Errorf("%w: %v", ErrInvalidDescriptor, err)
 	}
 	if err := descriptor.Validate(); err != nil {

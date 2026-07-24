@@ -46,6 +46,12 @@ and production qualification checklist are documented in
 The native module is linked only into the sidecar built with `-tags=pkcs11`,
 not into the TrustDB server.
 
+The optional SDF sidecar, stable deployment-owned adapter ABI, exact
+SM2-digest boundary, SM4 KEK handle/envelope rules, cross-platform gates, and
+real-device qualification procedure are documented in
+[`docs/integrations/SDF_SIGNER.md`](../docs/integrations/SDF_SIGNER.md). Vendor
+SDKs and proprietary libraries remain outside TrustDB core.
+
 Signer plugins are trusted executables and run with the TrustDB process's OS
 account; environment filtering is not a filesystem or syscall sandbox. Do not
 put credentials in `args`, because operating-system process listings may expose

@@ -1,0 +1,151 @@
+name: SDF Vendor Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_id:
+        description: Change-controlled qualification record identifier
+        required: true
+        type: string
+      vendor_profile:
+        description: Non-secret adapter/device profile name
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdf-vendor-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualified-device:
+    name: Gated hardware smoke
+    if: github.ref == 'refs/heads/main'
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - sdf-vendor
+    environment: sdf-vendor-qualification
+    timeout-minutes: 25
+    env:
+      TRUSTDB_SDF_ADAPTER: ${{ vars.SDF_ADAPTER_PATH }}
+      TRUSTDB_SDF_ADAPTER_CONFIG_FILE: ${{ vars.SDF_ADAPTER_CONFIG_FILE }}
+      TRUSTDB_SDF_DEVICE_REF: ${{ vars.SDF_DEVICE_REF }}
+      TRUSTDB_SDF_CREDENTIAL_REF: ${{ vars.SDF_CREDENTIAL_REF }}
+      TRUSTDB_SDF_CREDENTIAL_FILE: ${{ vars.SDF_CREDENTIAL_FILE }}
+      TRUSTDB_SDF_CAPABILITIES: ${{ vars.SDF_CAPABILITIES }}
+      TRUSTDB_SDF_KEK_ID: ${{ vars.SDF_KEK_ID }}
+      TRUSTDB_SDF_KEK_INDEX: ${{ vars.SDF_KEK_INDEX }}
+      TRUSTDB_SDF_MAX_CONCURRENCY: ${{ vars.SDF_MAX_CONCURRENCY }}
+      TRUSTDB_SDF_INTEGRATION_KEY_INDEX: ${{ vars.SDF_SIGNING_KEY_INDEX }}
+      TRUSTDB_SDF_INTEGRATION_PUBLIC_KEY_HEX: ${{ vars.SDF_SIGNING_PUBLIC_KEY_HEX }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate qualification identifiers
+        shell: bash
+        env:
+          QUALIFICATION_ID: ${{ inputs.qualification_id }}
+          VENDOR_PROFILE: ${{ inputs.vendor_profile }}
+        run: |
+          set -euo pipefail
+          identifier='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+          for value in "$QUALIFICATION_ID" "$VENDOR_PROFILE"; do
+            if [[ ! "$value" =~ $identifier ]]; then
+              echo "::error::Qualification inputs must be 1-128 byte single-line identifiers using A-Z, a-z, 0-9, dot, underscore, or hyphen"
+              exit 1
+            fi
+          done
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Validate pre-provisioned qualification boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in \
+            TRUSTDB_SDF_ADAPTER \
+            TRUSTDB_SDF_ADAPTER_CONFIG_FILE \
+            TRUSTDB_SDF_DEVICE_REF \
+            TRUSTDB_SDF_CREDENTIAL_REF \
+            TRUSTDB_SDF_CREDENTIAL_FILE \
+            TRUSTDB_SDF_INTEGRATION_KEY_INDEX \
+            TRUSTDB_SDF_INTEGRATION_PUBLIC_KEY_HEX; do
+            test -n "${!name}"
+          done
+          test -r "$TRUSTDB_SDF_ADAPTER"
+          for path in "$TRUSTDB_SDF_ADAPTER_CONFIG_FILE" "$TRUSTDB_SDF_CREDENTIAL_FILE"; do
+            test -f "$path"
+            test ! -L "$path"
+            if find "$path" -prune -perm /077 | grep -q .; then
+              echo "::error::SDF secret/config files must deny group and other permissions"
+              exit 1
+            fi
+          done
+
+      - name: Build isolated SDF sidecar
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -trimpath -tags=sdf \
+            -o "$RUNNER_TEMP/trustdb-signer-sdf" \
+            ./cmd/trustdb-signer-sdf
+          echo "TRUSTDB_SDF_INTEGRATION_BINARY=$RUNNER_TEMP/trustdb-signer-sdf" \
+            >>"$GITHUB_ENV"
+
+      - name: Run native and supervised hardware contract
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -o pipefail
+          go test -json -count=1 -timeout=15m \
+            -tags="sdf sdf_vendor_integration" \
+            ./internal/sdfsigner \
+            | tee "$RUNNER_TEMP/sdf-vendor-result.jsonl"
+
+      - name: Verify qualification output excludes input file contents
+        shell: bash
+        run: |
+          python3 - "$RUNNER_TEMP/sdf-vendor-result.jsonl" \
+            "$TRUSTDB_SDF_ADAPTER_CONFIG_FILE" \
+            "$TRUSTDB_SDF_CREDENTIAL_FILE" <<'PY'
+          import pathlib
+          import sys
+
+          output = pathlib.Path(sys.argv[1]).read_bytes()
+          for source_name in sys.argv[2:]:
+              source = pathlib.Path(source_name).read_bytes()
+              if source and source in output:
+                  raise SystemExit(
+                      "qualification output contains protected input file contents"
+                  )
+          PY
+
+      - name: Record non-secret qualification metadata
+        shell: bash
+        env:
+          QUALIFICATION_ID: ${{ inputs.qualification_id }}
+          VENDOR_PROFILE: ${{ inputs.vendor_profile }}
+        run: |
+          printf 'qualification_id=%s\nvendor_profile=%s\ncommit=%s\nrun_id=%s\n' \
+            "$QUALIFICATION_ID" "$VENDOR_PROFILE" "$GITHUB_SHA" "$GITHUB_RUN_ID" \
+            >"$RUNNER_TEMP/sdf-qualification.txt"
+
+      - name: Upload qualification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdf-qualification-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sdf-vendor-result.jsonl
+            ${{ runner.temp }}/sdf-qualification.txt
+          if-no-files-found: error
+          retention-days: 90
