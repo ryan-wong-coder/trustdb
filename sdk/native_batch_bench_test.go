@@ -23,12 +23,7 @@ func benchmarkNativeLogBatch256(b *testing.B, concurrency int) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	identity := Identity{
-		TenantID:   "tenant-benchmark",
-		ClientID:   "client-benchmark",
-		KeyID:      "key-benchmark",
-		PrivateKey: privateKey,
-	}
+	identity := mustINTLV1Identity(b, "tenant-benchmark", "client-benchmark", "key-benchmark", privateKey)
 	entries := make([]LogEntry, 256)
 	for index := range entries {
 		entries[index] = LogEntry{

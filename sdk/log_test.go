@@ -25,12 +25,8 @@ func TestBuildSignedLogClaimDefaultsTraceAndVerifies(t *testing.T) {
 	}
 	parents := []string{"tr1parent"}
 	custom := map[string]string{"tenant_stream": "billing"}
-	signed, err := BuildSignedLogClaimBytes([]byte(`{"level":"info","msg":"paid"}`), Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogClaimOptions{
+	identity := mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv)
+	signed, err := BuildSignedLogClaimBytes([]byte(`{"level":"info","msg":"paid"}`), identity, LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
 		Nonce:          bytes.Repeat([]byte{0x24}, 16),
 		IdempotencyKey: "idem-log-1",
@@ -45,7 +41,7 @@ func TestBuildSignedLogClaimDefaultsTraceAndVerifies(t *testing.T) {
 	parents[0] = "mutated"
 	custom["tenant_stream"] = "mutated"
 
-	recordID, err := VerifySignedClaim(signed, pub)
+	recordID, err := VerifySignedClaim(signed, mustINTLV1PublicKey(t, "client-key-1", pub))
 	if err != nil {
 		t.Fatalf("VerifySignedClaim: %v", err)
 	}
@@ -77,7 +73,7 @@ func TestBuildSignedLogClaimBytesMatchesReaderPath(t *testing.T) {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
 	raw := []byte(`{"level":"info","msg":"equivalent"}`)
-	id := Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey}
+	id := mustINTLV1Identity(t, "tenant-1", "client-1", "key-1", privateKey)
 	opts := LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
 		Nonce:          bytes.Repeat([]byte{0x24}, 16),
@@ -124,7 +120,7 @@ func TestMergedLogClaimOptionsBuildOwnsCallerData(t *testing.T) {
 	}
 	signed, err := BuildSignedLogClaimBytes(
 		[]byte(`{"level":"info"}`),
-		Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey},
+		mustINTLV1Identity(t, "tenant-1", "client-1", "key-1", privateKey),
 		mergeLogClaimOptions(defaults, override),
 	)
 	if err != nil {
@@ -158,7 +154,7 @@ func TestBuildSignedLogClaimDefaultCustomMetadataRemainsNonNil(t *testing.T) {
 	}
 	signed, err := BuildSignedLogClaimBytes(
 		[]byte(`{"level":"info"}`),
-		Identity{TenantID: "tenant-1", ClientID: "client-1", KeyID: "key-1", PrivateKey: privateKey},
+		mustINTLV1Identity(t, "tenant-1", "client-1", "key-1", privateKey),
 		LogClaimOptions{
 			ProducedAt:     time.Unix(20, 0),
 			Nonce:          bytes.Repeat([]byte{0x24}, 16),
@@ -178,12 +174,7 @@ func BenchmarkBuildSignedLogClaimBytesDefault(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	id := Identity{
-		TenantID:   "tenant-benchmark",
-		ClientID:   "client-benchmark",
-		KeyID:      "key-benchmark",
-		PrivateKey: privateKey,
-	}
+	id := mustINTLV1Identity(b, "tenant-benchmark", "client-benchmark", "key-benchmark", privateKey)
 	opts := LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
 		Nonce:          bytes.Repeat([]byte{0x24}, 16),
@@ -205,12 +196,7 @@ func BenchmarkBuildMergedSignedLogClaimBytesDefault(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	id := Identity{
-		TenantID:   "tenant-benchmark",
-		ClientID:   "client-benchmark",
-		KeyID:      "key-benchmark",
-		PrivateKey: privateKey,
-	}
+	id := mustINTLV1Identity(b, "tenant-benchmark", "client-benchmark", "key-benchmark", privateKey)
 	defaults := LogClaimOptions{EventType: "payment.audit", Source: "billing-api"}
 	override := LogClaimOptions{
 		ProducedAt:     time.Unix(20, 0),
@@ -312,15 +298,14 @@ func TestClientSubmitLogBatchPreservesOrder(t *testing.T) {
 		{Body: []byte(`{"n":2}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "two"}}},
 		{Body: []byte(`{"n":3}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "three"}}},
 	}
-	result, err := client.SubmitLogBatch(context.Background(), entries, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogSubmitOptions{
-		Claim:       LogClaimOptions{EventType: "payment.audit", Source: "billing-api"},
-		Concurrency: 2,
-	})
+	result, err := client.SubmitLogBatch(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv),
+		LogSubmitOptions{
+			Claim:       LogClaimOptions{EventType: "payment.audit", Source: "billing-api"},
+			Concurrency: 2,
+		})
 	if err != nil {
 		t.Fatalf("SubmitLogBatch: %v", err)
 	}
@@ -379,12 +364,7 @@ func TestClientSubmitLogBatchReportsPartialFailure(t *testing.T) {
 	result, err := client.SubmitLogBatch(context.Background(), []LogEntry{
 		{Body: []byte(`{"n":1}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "ok"}}},
 		{Body: []byte(`{"n":2}`), Options: LogClaimOptions{CustomMetadata: map[string]string{"log_id": "bad"}}},
-	}, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogSubmitOptions{Concurrency: 2})
+	}, mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv), LogSubmitOptions{Concurrency: 2})
 
 	var batchErr *LogBatchError
 	if !errors.As(err, &batchErr) {
@@ -427,16 +407,15 @@ func TestClientSubmitLogStream(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	entries := make(chan LogEntry)
-	out, err := client.SubmitLogStream(context.Background(), entries, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogStreamOptions{
-		Claim:       LogClaimOptions{Source: "stream-test"},
-		Concurrency: 2,
-		QueueSize:   2,
-	})
+	out, err := client.SubmitLogStream(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv),
+		LogStreamOptions{
+			Claim:       LogClaimOptions{Source: "stream-test"},
+			Concurrency: 2,
+			QueueSize:   2,
+		})
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}
@@ -492,12 +471,12 @@ func TestClientSubmitLogStreamNilContextDoesNotPanic(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	entries := make(chan LogEntry, 1)
-	out, err := client.SubmitLogStream(nil, entries, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogStreamOptions{Concurrency: 1, QueueSize: 1})
+	out, err := client.SubmitLogStream(
+		nil,
+		entries,
+		mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv),
+		LogStreamOptions{Concurrency: 1, QueueSize: 1},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}
@@ -624,12 +603,12 @@ func TestSubmitLogBatchFallbackTransportPreservesResults(t *testing.T) {
 			},
 		}
 	}
-	result, err := client.SubmitLogBatch(context.Background(), entries, Identity{
-		TenantID:   "tenant-test",
-		ClientID:   "client-test",
-		KeyID:      "key-test",
-		PrivateKey: privateKey,
-	}, LogSubmitOptions{Concurrency: 2})
+	result, err := client.SubmitLogBatch(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-test", "client-test", "key-test", privateKey),
+		LogSubmitOptions{Concurrency: 2},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogBatch: %v", err)
 	}

@@ -25,6 +25,7 @@ func TestDecodeAndVerifyStatusRefreshJSON(t *testing.T) {
 	}
 	notification := model.StatusRefresh{
 		SchemaVersion:   model.SchemaStatusRefresh,
+		CryptoSuite:     cryptosuite.INTLV1,
 		SubscriptionID:  "tss1subscription",
 		TenantID:        "tenant",
 		ClientID:        "client",
@@ -48,7 +49,7 @@ func TestDecodeAndVerifyStatusRefreshJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := DecodeAndVerifyStatusRefreshJSON(bytes.NewReader(body), publicKey)
+	decoded, err := DecodeAndVerifyStatusRefreshJSON(bytes.NewReader(body), mustINTLV1PublicKey(t, "server-key", publicKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestDecodeAndVerifyStatusRefreshJSON(t *testing.T) {
 
 	notification.Version++
 	tampered, _ := json.Marshal(notification)
-	if _, err := DecodeAndVerifyStatusRefreshJSON(bytes.NewReader(tampered), publicKey); err == nil {
+	if _, err := DecodeAndVerifyStatusRefreshJSON(bytes.NewReader(tampered), mustINTLV1PublicKey(t, "server-key", publicKey)); err == nil {
 		t.Fatal("tampered notification verified")
 	}
 }
@@ -98,11 +99,12 @@ func TestSubscribeNATSStatusRefreshSharesOneQueueGroupAcrossReplicas(t *testing.
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	eventsA, errorsA, err := SubscribeNATSStatusRefresh(ctx, consumerA, "trustdb.status.upstream", "trustdb-status-upstream", serverPublicKey)
+	descriptor := mustINTLV1PublicKey(t, "server-key", serverPublicKey)
+	eventsA, errorsA, err := SubscribeNATSStatusRefresh(ctx, consumerA, "trustdb.status.upstream", "trustdb-status-upstream", descriptor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventsB, errorsB, err := SubscribeNATSStatusRefresh(ctx, consumerB, "trustdb.status.upstream", "trustdb-status-upstream", serverPublicKey)
+	eventsB, errorsB, err := SubscribeNATSStatusRefresh(ctx, consumerB, "trustdb.status.upstream", "trustdb-status-upstream", descriptor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +148,8 @@ func TestSubscribeNATSStatusRefreshSharesOneQueueGroupAcrossReplicas(t *testing.
 func signedStatusRefreshCBOR(t *testing.T, privateKey ed25519.PrivateKey, version uint64) []byte {
 	t.Helper()
 	notification := model.StatusRefresh{
-		SchemaVersion: model.SchemaStatusRefresh, SubscriptionID: "tss1queue", TenantID: "tenant", ClientID: "client",
+		SchemaVersion: model.SchemaStatusRefresh, CryptoSuite: cryptosuite.INTLV1,
+		SubscriptionID: "tss1queue", TenantID: "tenant", ClientID: "client",
 		Version: version, RefreshRequired: true, EmittedAtUnixN: time.Now().UTC().UnixNano(),
 	}
 	payload, err := cborx.Marshal(notification)

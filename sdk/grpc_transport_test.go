@@ -164,12 +164,12 @@ func TestGRPCTransportSubmitLogStream(t *testing.T) {
 	client := newBufconnClient(t, grpcapi.NewServer(ingestSvc, grpcTestBatch{}, nil, nil, nil))
 
 	entries := make(chan LogEntry)
-	out, err := client.SubmitLogStream(context.Background(), entries, Identity{
-		TenantID:   "tenant-1",
-		ClientID:   "client-1",
-		KeyID:      "client-key-1",
-		PrivateKey: priv,
-	}, LogStreamOptions{QueueSize: 2})
+	out, err := client.SubmitLogStream(
+		context.Background(),
+		entries,
+		mustINTLV1Identity(t, "tenant-1", "client-1", "client-key-1", priv),
+		LogStreamOptions{QueueSize: 2},
+	)
 	if err != nil {
 		t.Fatalf("SubmitLogStream: %v", err)
 	}

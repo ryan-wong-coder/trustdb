@@ -143,8 +143,8 @@ func TestRuntimeGatesRejectReservedFormatsAndSuites(t *testing.T) {
 	if _, _, err := RequireWritable(SDKV2, cryptosuite.INTLV1); err != nil {
 		t.Fatalf("RequireWritable(SDK v2 INTL_V1) error = %v", err)
 	}
-	if _, _, err := RequireWritable(SDKV2, cryptosuite.CNSMV1); !errors.Is(err, ErrSuiteNotAllowed) {
-		t.Fatalf("RequireWritable(SDK v2 CN_SM_V1) error = %v, want ErrSuiteNotAllowed", err)
+	if _, _, err := RequireWritable(SDKV2, cryptosuite.CNSMV1); err != nil {
+		t.Fatalf("RequireWritable(SDK v2 CN_SM_V1) error = %v", err)
 	}
 	if err := RequireSuite(ModelV2, cryptosuite.CNSMV1); err != nil {
 		t.Fatalf("RequireSuite(reserved planned combination) error = %v", err)

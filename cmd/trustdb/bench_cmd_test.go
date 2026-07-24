@@ -72,7 +72,7 @@ func TestRunBenchIngest(t *testing.T) {
 	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
 		Endpoint:      "bench://fake",
 		Transport:     "http",
-		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Identity:      mustSDKINTLV1Identity(t, "tenant-bench", "client-bench", "key-bench", priv),
 		Count:         4,
 		Concurrency:   2,
 		PayloadBytes:  128,
@@ -122,7 +122,7 @@ func TestRunBenchIngestSplitsImmediateAndPostProofQueries(t *testing.T) {
 	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
 		Endpoint:      "bench://fake",
 		Transport:     "http",
-		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Identity:      mustSDKINTLV1Identity(t, "tenant-bench", "client-bench", "key-bench", priv),
 		Count:         1,
 		Concurrency:   1,
 		PayloadBytes:  128,
@@ -166,7 +166,7 @@ func TestRunBenchIngestSeparatesDisabledProofLevel(t *testing.T) {
 	result, err := runBenchIngest(context.Background(), &runtimeConfig{logger: silentLogger()}, client, benchIngestConfig{
 		Endpoint:      "bench://fake",
 		Transport:     "http",
-		Identity:      sdk.Identity{TenantID: "tenant-bench", ClientID: "client-bench", KeyID: "key-bench", PrivateKey: priv},
+		Identity:      mustSDKINTLV1Identity(t, "tenant-bench", "client-bench", "key-bench", priv),
 		Count:         1,
 		Concurrency:   1,
 		PayloadBytes:  128,
@@ -429,7 +429,7 @@ func TestBenchClientUsesSuppliedPrivateKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKey() error = %v", err)
 	}
-	identity := sdk.Identity{TenantID: "tenant", ClientID: "client", KeyID: "key", PrivateKey: priv}
+	identity := mustSDKINTLV1Identity(t, "tenant", "client", "key", priv)
 	client, err := sdk.NewClientWithTransport(&fakeBenchTransport{})
 	if err != nil {
 		t.Fatalf("NewClientWithTransport() error = %v", err)
@@ -449,4 +449,17 @@ func TestBenchClientUsesSuppliedPrivateKey(t *testing.T) {
 	if len(pub) != ed25519.PublicKeySize {
 		t.Fatalf("public key length = %d", len(pub))
 	}
+}
+
+func mustSDKINTLV1Identity(
+	t testing.TB,
+	tenantID, clientID, keyID string,
+	privateKey ed25519.PrivateKey,
+) sdk.Identity {
+	t.Helper()
+	identity, err := sdk.NewINTLV1Identity(tenantID, clientID, keyID, privateKey)
+	if err != nil {
+		t.Fatalf("NewINTLV1Identity() error = %v", err)
+	}
+	return identity
 }

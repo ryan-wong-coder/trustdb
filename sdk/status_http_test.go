@@ -62,7 +62,10 @@ func TestHTTPStatusSubscriptionSDK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	subscription, err := client.CreateStatusSubscription(ctx, CreateStatusSubscriptionOptions{Identity: Identity{TenantID: "tenant", ClientID: "client", KeyID: "key", PrivateKey: privateKey}, RecordIDs: []string{"tr1"}})
+	subscription, err := client.CreateStatusSubscription(ctx, CreateStatusSubscriptionOptions{
+		Identity:  mustINTLV1Identity(t, "tenant", "client", "key", privateKey),
+		RecordIDs: []string{"tr1"},
+	})
 	if err != nil || subscription.ID != "tss1sdk" {
 		t.Fatalf("CreateStatusSubscription() = %+v err=%v", subscription, err)
 	}

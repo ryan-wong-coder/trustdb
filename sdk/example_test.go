@@ -33,12 +33,11 @@ func ExampleClient_ExportSingleProof() {
 
 func ExampleBuildSignedFileClaim() {
 	_, privateKey, _ := ed25519.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{1}, 64)))
-	signed, err := sdk.BuildSignedFileClaim(bytes.NewReader([]byte("hello")), sdk.Identity{
-		TenantID:   "tenant",
-		ClientID:   "client",
-		KeyID:      "client-key",
-		PrivateKey: privateKey,
-	}, sdk.FileClaimOptions{
+	identity, err := sdk.NewINTLV1Identity("tenant", "client", "client-key", privateKey)
+	if err != nil {
+		panic(err)
+	}
+	signed, err := sdk.BuildSignedFileClaim(bytes.NewReader([]byte("hello")), identity, sdk.FileClaimOptions{
 		IdempotencyKey: "demo-idempotency-key",
 		Nonce:          bytes.Repeat([]byte{2}, 16),
 		EventType:      "file.snapshot",
@@ -52,15 +51,14 @@ func ExampleBuildSignedFileClaim() {
 
 func ExampleBuildSignedJSONLogClaim() {
 	_, privateKey, _ := ed25519.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{1}, 64)))
+	identity, err := sdk.NewINTLV1Identity("tenant", "client", "client-key", privateKey)
+	if err != nil {
+		panic(err)
+	}
 	signed, err := sdk.BuildSignedJSONLogClaim(map[string]any{
 		"level": "info",
 		"msg":   "payment accepted",
-	}, sdk.Identity{
-		TenantID:   "tenant",
-		ClientID:   "client",
-		KeyID:      "client-key",
-		PrivateKey: privateKey,
-	}, sdk.LogClaimOptions{
+	}, identity, sdk.LogClaimOptions{
 		IdempotencyKey: "demo-log-idempotency-key",
 		Nonce:          bytes.Repeat([]byte{3}, 16),
 		Source:         "billing-api",
@@ -78,12 +76,11 @@ func ExampleNATSIngressClient_SubmitSignedClaim() {
 	// signing identity. This deterministic key is used only to keep the checked
 	// documentation example self-contained.
 	_, privateKey, _ := ed25519.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{4}, 64)))
-	signed, err := sdk.BuildSignedFileClaim(bytes.NewReader([]byte("hello")), sdk.Identity{
-		TenantID:   "tenant",
-		ClientID:   "client",
-		KeyID:      "client-key",
-		PrivateKey: privateKey,
-	}, sdk.FileClaimOptions{})
+	identity, err := sdk.NewINTLV1Identity("tenant", "client", "client-key", privateKey)
+	if err != nil {
+		panic(err)
+	}
+	signed, err := sdk.BuildSignedFileClaim(bytes.NewReader([]byte("hello")), identity, sdk.FileClaimOptions{})
 	if err != nil {
 		panic(err)
 	}
@@ -118,12 +115,11 @@ func ExampleNATSIngressClient_PublishSignedClaim() {
 	// PublishSignedClaim and WaitResult may be separated by caller-controlled
 	// work or a process restart. Persist both fields of NATSSubmission together.
 	_, privateKey, _ := ed25519.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{5}, 64)))
-	signed, err := sdk.BuildSignedFileClaim(bytes.NewReader([]byte("hello")), sdk.Identity{
-		TenantID:   "tenant",
-		ClientID:   "client",
-		KeyID:      "client-key",
-		PrivateKey: privateKey,
-	}, sdk.FileClaimOptions{})
+	identity, err := sdk.NewINTLV1Identity("tenant", "client", "client-key", privateKey)
+	if err != nil {
+		panic(err)
+	}
+	signed, err := sdk.BuildSignedFileClaim(bytes.NewReader([]byte("hello")), identity, sdk.FileClaimOptions{})
 	if err != nil {
 		panic(err)
 	}

@@ -39,7 +39,7 @@ func TestLoadBalancedNativeBatchUsesOneBatchRequest(t *testing.T) {
 	result, err := client.SubmitLogBatch(context.Background(), []LogEntry{
 		{Body: []byte(`{"index":0}`)},
 		{Body: []byte(`{"index":1}`)},
-	}, Identity{TenantID: "tenant", ClientID: "client", KeyID: "key", PrivateKey: privateKey}, LogSubmitOptions{})
+	}, mustINTLV1Identity(t, "tenant", "client", "key", privateKey), LogSubmitOptions{})
 	var batchErr *LogBatchError
 	if !errors.As(err, &batchErr) {
 		t.Fatalf("SubmitLogBatch() error = %v, want LogBatchError", err)

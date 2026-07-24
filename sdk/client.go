@@ -269,7 +269,7 @@ func (c *Client) CheckHealth(ctx context.Context) HealthStatus {
 }
 
 func (c *Client) SubmitFile(ctx context.Context, raw io.Reader, id Identity, opts FileClaimOptions) (SubmitResult, error) {
-	signed, err := BuildSignedFileClaim(raw, id, opts)
+	signed, err := BuildSignedFileClaimContext(ctx, raw, id, opts)
 	if err != nil {
 		return SubmitResult{}, err
 	}

@@ -55,11 +55,11 @@ func run(args []string) error {
 	if clientSignerDescriptor.KeyID != opts.keyID {
 		return fmt.Errorf("client signer descriptor key_id %q does not match --key-id %q", clientSignerDescriptor.KeyID, opts.keyID)
 	}
-	clientPublicKey, err := readPublicKey(opts.clientPublicKey)
+	clientTrust, err := readPublicKey(opts.clientPublicKey)
 	if err != nil {
 		return err
 	}
-	serverPublicKey, err := readPublicKey(opts.serverPublicKey)
+	serverTrust, err := readPublicKey(opts.serverPublicKey)
 	if err != nil {
 		return err
 	}
@@ -67,7 +67,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read client signer public key: %w", err)
 	}
-	if !bytes.Equal(resolvedClientPublic.Bytes, clientPublicKey) {
+	if !bytes.Equal(resolvedClientPublic.Bytes, clientTrust.PublicKey) {
 		return errors.New("client signer and verifier descriptors do not identify the same Ed25519 key")
 	}
 
@@ -112,8 +112,8 @@ func run(args []string) error {
 		return fmt.Errorf("reopen original file: %w", err)
 	}
 	verified, verifyErr := sdk.VerifySingleProof(original, writtenProof, sdk.TrustedKeys{
-		ClientPublicKey: clientPublicKey,
-		ServerPublicKey: serverPublicKey,
+		ClientPublicKey: clientTrust,
+		ServerPublicKey: serverTrust,
 	}, sdk.VerifyOptions{})
 	closeErr := original.Close()
 	if verifyErr != nil {
@@ -250,14 +250,30 @@ func waitForGlobalProof(ctx context.Context, client *sdk.Client, recordID string
 	}
 }
 
-func readPublicKey(path string) (ed25519.PublicKey, error) {
+func readPublicKey(path string) (sdk.KeyDescriptor, error) {
 	descriptor, err := keydescriptor.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return sdk.KeyDescriptor{}, err
 	}
 	if descriptor.Kind != keydescriptor.KindVerifier || descriptor.Provider != keydescriptor.ProviderPublic ||
 		descriptor.CryptoSuite != cryptosuite.INTLV1 || descriptor.Algorithm != cryptosuite.SignatureEd25519 {
-		return nil, fmt.Errorf("public key descriptor %s is not an INTL_V1 Ed25519 verifier", path)
+		return sdk.KeyDescriptor{}, fmt.Errorf("public key descriptor %s is not an INTL_V1 Ed25519 verifier", path)
 	}
-	return ed25519.PublicKey(append([]byte(nil), descriptor.PublicKey.Bytes...)), nil
+	publicKey, err := sdk.NewINTLV1PublicKey(descriptor.KeyID, ed25519.PublicKey(descriptor.PublicKey.Bytes))
+	if err != nil {
+		return sdk.KeyDescriptor{}, fmt.Errorf("convert public key descriptor %s: %w", path, err)
+	}
+	publicKey.CertificateChain = cloneByteSlices(descriptor.CertificateChain)
+	if err := publicKey.Validate(); err != nil {
+		return sdk.KeyDescriptor{}, fmt.Errorf("validate public key descriptor %s: %w", path, err)
+	}
+	return publicKey, nil
+}
+
+func cloneByteSlices(in [][]byte) [][]byte {
+	out := make([][]byte, len(in))
+	for index := range in {
+		out[index] = append([]byte(nil), in[index]...)
+	}
+	return out
 }

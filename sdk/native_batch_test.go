@@ -109,12 +109,7 @@ func testLogIdentity(t *testing.T) Identity {
 	if err != nil {
 		t.Fatalf("GenerateEd25519Key: %v", err)
 	}
-	return Identity{
-		TenantID:   "tenant-test",
-		ClientID:   "client-test",
-		KeyID:      "key-test",
-		PrivateKey: privateKey,
-	}
+	return mustINTLV1Identity(t, "tenant-test", "client-test", "key-test", privateKey)
 }
 
 func fixedLogClaimOptions(idempotencyKey string, nonce byte) LogClaimOptions {
