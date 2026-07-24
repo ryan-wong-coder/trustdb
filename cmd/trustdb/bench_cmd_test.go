@@ -295,8 +295,17 @@ func (f *fakeBenchTransport) SubmitSignedClaim(_ context.Context, signed sdk.Sig
 		ProofLevel:    sdk.ProofLevelL2,
 		BatchEnqueued: true,
 		ServerRecord: model.ServerRecord{
-			RecordID: recordID,
+			SchemaVersion: model.SchemaServerRecord,
+			CryptoSuite:   cryptosuite.INTLV1,
+			RecordID:      recordID,
 		},
+		AcceptedReceipt: model.AcceptedReceipt{
+			SchemaVersion: model.SchemaAcceptedReceipt,
+			CryptoSuite:   cryptosuite.INTLV1,
+			RecordID:      recordID,
+			Status:        model.RecordStatusAccepted,
+		},
+		SignedClaim: signed,
 	}, nil
 }
 
