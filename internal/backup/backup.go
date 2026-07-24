@@ -23,6 +23,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/anchorschedule"
 	"github.com/wowtrust/trustdb/internal/cborx"
 	"github.com/wowtrust/trustdb/internal/cryptosuite"
+	"github.com/wowtrust/trustdb/internal/formatregistry"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
 	"github.com/wowtrust/trustdb/internal/trusterr"
@@ -101,6 +102,9 @@ func Create(ctx context.Context, store proofstore.Store, path string, opts Optio
 	suiteID, err := proofstore.BoundCryptoSuite(store)
 	if err != nil {
 		return Manifest{}, err
+	}
+	if _, _, err := formatregistry.RequireWritable(formatregistry.BackupV4, suiteID); err != nil {
+		return Manifest{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "backup v4 is not writable for this cryptographic suite", err)
 	}
 	resultLister, ok := store.(proofstore.STHAnchorResultLister)
 	if !ok {
@@ -436,6 +440,9 @@ func Verify(ctx context.Context, path string) (Manifest, error) {
 	}
 	if archiveSuite == "" {
 		return Manifest{}, trusterr.New(trusterr.CodeFailedPrecondition, "backup has no proofstore cryptographic suite binding")
+	}
+	if _, _, err := formatregistry.RequireWritable(formatregistry.BackupV4, archiveSuite); err != nil {
+		return Manifest{}, trusterr.Wrap(trusterr.CodeFailedPrecondition, "backup v4 is not supported for this cryptographic suite", err)
 	}
 	if start.BackupID == "" || manifest.BackupID == "" || start.BackupID != manifest.BackupID {
 		return Manifest{}, trusterr.New(trusterr.CodeDataLoss, "backup manifest and summary identifiers do not match")
