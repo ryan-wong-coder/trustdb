@@ -168,10 +168,21 @@ type BlockHeader struct {
 	Observation BlockRPCObservation
 }
 
+// ConsensusFinalityObservation contains only values bound to the requested
+// historical block. FISCO BCOS exposes the current PBFT view through a
+// separate latest-state RPC; it is not a historical block-header field.
+// Nil View and Round values explicitly record that the pinned standard SDK
+// cannot recover those historical values without inventing a binding.
+type ConsensusFinalityObservation struct {
+	View       *uint64           `cbor:"view" json:"view"`
+	Round      *uint64           `cbor:"round" json:"round"`
+	Signatures []CommitSignature `cbor:"signatures" json:"signatures"`
+}
+
 type ConsensusSnapshot struct {
-	BlockNumber uint64           `cbor:"block_number" json:"block_number"`
-	BlockHash   []byte           `cbor:"block_hash" json:"block_hash"`
-	Finality    FinalityEvidence `cbor:"finality" json:"finality"`
+	BlockNumber uint64                       `cbor:"block_number" json:"block_number"`
+	BlockHash   []byte                       `cbor:"block_hash" json:"block_hash"`
+	Finality    ConsensusFinalityObservation `cbor:"finality" json:"finality"`
 }
 
 // Driver is the complete network boundary used by the standard-crypto sink.

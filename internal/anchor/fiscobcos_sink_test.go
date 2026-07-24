@@ -120,7 +120,7 @@ func (d *fakeBCOSDriver) GetBlockHeader(context.Context, uint64) (fiscobcos.Bloc
 func (d *fakeBCOSDriver) GetConsensusSnapshot(context.Context, uint64) (fiscobcos.ConsensusSnapshot, error) {
 	return fiscobcos.ConsensusSnapshot{
 		BlockNumber: 500, BlockHash: bytes.Repeat([]byte{0x71}, 32),
-		Finality: fiscobcos.FinalityEvidence{View: 9, Round: 2, Signatures: []fiscobcos.CommitSignature{
+		Finality: fiscobcos.ConsensusFinalityObservation{Signatures: []fiscobcos.CommitSignature{
 			{ValidatorNodeID: "validator-a", Signature: bytes.Repeat([]byte{0x81}, 64)},
 			{ValidatorNodeID: "validator-b", Signature: bytes.Repeat([]byte{0x82}, 64)},
 			{ValidatorNodeID: "validator-c", Signature: bytes.Repeat([]byte{0x83}, 64)},
@@ -317,6 +317,56 @@ func TestFISCOBCOSStandardSinkDoesNotMaskConfiguredEndpointReadDisagreement(t *t
 	defer base.state.mu.Unlock()
 	if base.state.submitCalls != 1 {
 		t.Fatalf("submit calls=%d, want one side effect before readback disagreement", base.state.submitCalls)
+	}
+}
+
+type currentViewDriver struct {
+	*fakeBCOSDriver
+	currentView uint64
+	exposeView  bool
+}
+
+func (d *currentViewDriver) GetConsensusSnapshot(ctx context.Context, blockNumber uint64) (fiscobcos.ConsensusSnapshot, error) {
+	snapshot, err := d.fakeBCOSDriver.GetConsensusSnapshot(ctx, blockNumber)
+	if err == nil && d.exposeView {
+		view := d.currentView
+		snapshot.Finality.View = &view
+	}
+	return snapshot, err
+}
+
+func TestFISCOBCOSStandardSinkDoesNotBindAdvancingLiveViewToHistoricalBlock(t *testing.T) {
+	trust, drivers := fakeBCOSFixture(t)
+	for index, driver := range drivers {
+		drivers[index] = &currentViewDriver{
+			fakeBCOSDriver: driver.(*fakeBCOSDriver),
+			currentView:    uint64(100 + index),
+		}
+	}
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.Publish(context.Background(), testSTH(testScheduleKey(fiscobcos.SinkName), 12, 0x1c)); err != nil {
+		t.Fatalf("different current endpoint views affected historical block evidence: %v", err)
+	}
+}
+
+func TestFISCOBCOSStandardSinkRejectsUnboundLiveViewObservation(t *testing.T) {
+	trust, drivers := fakeBCOSFixture(t)
+	for index, driver := range drivers {
+		drivers[index] = &currentViewDriver{
+			fakeBCOSDriver: driver.(*fakeBCOSDriver),
+			currentView:    uint64(100 + index),
+			exposeView:     true,
+		}
+	}
+	sink, err := NewFISCOBCOSStandardSink(FISCOBCOSStandardSinkConfig{TrustConfig: trust, Drivers: drivers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.Publish(context.Background(), testSTH(testScheduleKey(fiscobcos.SinkName), 13, 0x1d)); err == nil {
+		t.Fatal("accepted a latest PBFT view as historical block evidence")
 	}
 }
 

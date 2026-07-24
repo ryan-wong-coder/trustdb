@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -375,17 +374,14 @@ func (d *nativeDriver) GetConsensusSnapshot(ctx context.Context, blockNumber uin
 		})
 	}
 	sort.Slice(signatures, func(i, j int) bool { return signatures[i].ValidatorNodeID < signatures[j].ValidatorNodeID })
-	viewBytes, err := d.client.GetPBFTView(ctx)
-	if err != nil {
-		return fiscobcos.ConsensusSnapshot{}, err
-	}
-	view, err := parseRPCUint(viewBytes)
-	if err != nil {
-		return fiscobcos.ConsensusSnapshot{}, fmt.Errorf("parse PBFT view: %w", err)
-	}
 	return fiscobcos.ConsensusSnapshot{
 		BlockNumber: blockNumber, BlockHash: hash,
-		Finality: fiscobcos.FinalityEvidence{View: view, Round: 0, Signatures: signatures},
+		Finality: fiscobcos.ConsensusFinalityObservation{
+			// getPbftView reports the endpoint's latest live consensus view and
+			// cannot be queried at blockNumber. Recording it here would falsely
+			// bind live state to this historical block.
+			View: nil, Round: nil, Signatures: signatures,
+		},
 	}, nil
 }
 
@@ -858,24 +854,6 @@ func legacyKeccak(data []byte) []byte {
 func accountAddress(publicKey []byte) []byte {
 	digest := legacyKeccak(publicKey[1:])
 	return append([]byte(nil), digest[len(digest)-20:]...)
-}
-
-func parseRPCUint(data []byte) (uint64, error) {
-	var value any
-	if err := json.Unmarshal(data, &value); err != nil {
-		return 0, err
-	}
-	switch item := value.(type) {
-	case string:
-		return strconv.ParseUint(strings.TrimPrefix(item, "0x"), 16, 64)
-	case float64:
-		if item < 0 || item != float64(uint64(item)) {
-			return 0, errors.New("RPC integer is not an unsigned integer")
-		}
-		return uint64(item), nil
-	default:
-		return 0, errors.New("RPC integer has an unsupported type")
-	}
 }
 
 func bytesToUint64(data []byte) uint64 {

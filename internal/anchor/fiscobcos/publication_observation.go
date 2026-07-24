@@ -106,8 +106,10 @@ func ValidatePublicationObservation(observation PublicationObservation) error {
 		return err
 	}
 	if len(observation.Consensus.Finality.Signatures) == 0 ||
-		len(observation.Consensus.Finality.Signatures) > maxCommitSignatures {
-		return fmt.Errorf("%w: invalid consensus signature count", ErrDriverInvalid)
+		len(observation.Consensus.Finality.Signatures) > maxCommitSignatures ||
+		observation.Consensus.Finality.View != nil ||
+		observation.Consensus.Finality.Round != nil {
+		return fmt.Errorf("%w: invalid or non-historical consensus observation", ErrDriverInvalid)
 	}
 	for _, signature := range observation.Consensus.Finality.Signatures {
 		if len(signature.ValidatorNodeID) == 0 || len(signature.ValidatorNodeID) > maxConfigString ||

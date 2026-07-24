@@ -531,7 +531,8 @@ func sameBlockHeader(left, right fiscobcos.BlockHeader) bool {
 
 func sameConsensusSnapshot(left, right fiscobcos.ConsensusSnapshot) bool {
 	if left.BlockNumber != right.BlockNumber || !bytes.Equal(left.BlockHash, right.BlockHash) ||
-		left.Finality.View != right.Finality.View || left.Finality.Round != right.Finality.Round ||
+		!sameOptionalUint64(left.Finality.View, right.Finality.View) ||
+		!sameOptionalUint64(left.Finality.Round, right.Finality.Round) ||
 		len(left.Finality.Signatures) != len(right.Finality.Signatures) {
 		return false
 	}
@@ -542,6 +543,11 @@ func sameConsensusSnapshot(left, right fiscobcos.ConsensusSnapshot) bool {
 		}
 	}
 	return true
+}
+
+func sameOptionalUint64(left, right *uint64) bool {
+	return left == nil && right == nil ||
+		left != nil && right != nil && *left == *right
 }
 
 func permanentDriverFailure(operation, endpoint string, kind error) error {
