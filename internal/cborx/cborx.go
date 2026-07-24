@@ -32,20 +32,24 @@ func init() {
 		panic(fmt.Sprintf("trustdb cbor enc mode: %v", err))
 	}
 
-	decOpts := cbor.DecOptions{
+	decOpts := strictDecOptions(defaultMaxArrayElems, defaultMaxMapPairs)
+	decMode, err = decOpts.DecMode()
+	if err != nil {
+		panic(fmt.Sprintf("trustdb cbor dec mode: %v", err))
+	}
+}
+
+func strictDecOptions(maxArrayElements, maxMapPairs int) cbor.DecOptions {
+	return cbor.DecOptions{
 		DupMapKey:         cbor.DupMapKeyEnforcedAPF,
 		IndefLength:       cbor.IndefLengthForbidden,
 		TagsMd:            cbor.TagsForbidden,
 		MaxNestedLevels:   defaultMaxNestedLevels,
-		MaxArrayElements:  defaultMaxArrayElems,
-		MaxMapPairs:       defaultMaxMapPairs,
+		MaxArrayElements:  maxArrayElements,
+		MaxMapPairs:       maxMapPairs,
 		ExtraReturnErrors: cbor.ExtraDecErrorUnknownField,
 		NaN:               cbor.NaNDecodeForbidden,
 		Inf:               cbor.InfDecodeForbidden,
-	}
-	decMode, err = decOpts.DecMode()
-	if err != nil {
-		panic(fmt.Sprintf("trustdb cbor dec mode: %v", err))
 	}
 }
 
@@ -90,6 +94,36 @@ func UnmarshalLimit(data []byte, v any, maxBytes int) error {
 		return errors.New("cborx: empty payload")
 	}
 	if err := decMode.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("cborx: unmarshal: %w", err)
+	}
+	return nil
+}
+
+// UnmarshalLimits applies a format-specific collection bound during decoding,
+// before arrays or maps are allocated. Duplicate/unknown map keys, tags,
+// indefinite values, NaN, Inf, and excessive nesting retain the same strict
+// rejection policy as UnmarshalLimit.
+func UnmarshalLimits(data []byte, v any, maxBytes, maxArrayElements, maxMapPairs int) error {
+	if maxBytes <= 0 {
+		return errors.New("cborx: max bytes must be positive")
+	}
+	if maxArrayElements <= 0 {
+		return errors.New("cborx: max array elements must be positive")
+	}
+	if maxMapPairs <= 0 {
+		return errors.New("cborx: max map pairs must be positive")
+	}
+	if len(data) > maxBytes {
+		return fmt.Errorf("cborx: payload too large: %d > %d", len(data), maxBytes)
+	}
+	if len(data) == 0 {
+		return errors.New("cborx: empty payload")
+	}
+	mode, err := strictDecOptions(maxArrayElements, maxMapPairs).DecMode()
+	if err != nil {
+		return fmt.Errorf("cborx: decode limits: %w", err)
+	}
+	if err := mode.Unmarshal(data, v); err != nil {
 		return fmt.Errorf("cborx: unmarshal: %w", err)
 	}
 	return nil

@@ -108,6 +108,18 @@ func TestUnmarshalLimit(t *testing.T) {
 	}
 }
 
+func TestUnmarshalLimitsRejectsCollectionBeforeDecodingElements(t *testing.T) {
+	t.Parallel()
+
+	// A declared 1,048,576-element array with no body must be rejected by the
+	// format-specific 1,024-element bound before element allocation/decoding.
+	data := []byte{0x9a, 0x00, 0x10, 0x00, 0x00}
+	var got []any
+	if err := UnmarshalLimits(data, &got, len(data), 1024, 16); err == nil {
+		t.Fatal("UnmarshalLimits() accepted an oversized declared array")
+	}
+}
+
 func TestDecodeReaderLimitRejectsTrailingData(t *testing.T) {
 	t.Parallel()
 
