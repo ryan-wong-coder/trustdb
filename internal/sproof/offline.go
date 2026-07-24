@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/verify"
 )
@@ -96,7 +97,12 @@ func VerifyOffline(
 	if proof.AnchorResult != nil && !options.SkipAnchor {
 		verifyOptions = append(verifyOptions, verify.WithAnchor(*proof.AnchorResult))
 	}
-	verified, err := verify.ProofBundle(raw, proof.ProofBundle, trust.Proof, verifyOptions...)
+	proofTrust, err := bindEvidenceProofKeys(proof, trust.Proof)
+	if err != nil {
+		appendProofStages(&result, proof, options, verify.StageProofBundle, err)
+		return result, err
+	}
+	verified, err := verify.ProofBundle(raw, proof.ProofBundle, proofTrust, verifyOptions...)
 	if err != nil {
 		failed, ok := verify.FailedStage(err)
 		if !ok {
@@ -112,6 +118,40 @@ func VerifyOffline(
 	result.AnchorSink = verified.AnchorSink
 	result.AnchorID = verified.AnchorID
 	return result, nil
+}
+
+func bindEvidenceProofKeys(
+	proof model.SingleProof,
+	trust verify.TrustedKeys,
+) (verify.TrustedKeys, error) {
+	for index := range proof.IdentityEvidence {
+		evidence := proof.IdentityEvidence[index]
+		descriptor, err := keydescriptor.Unmarshal(evidence.KeyDescriptor)
+		if err != nil {
+			return verify.TrustedKeys{}, fmt.Errorf("sproof: identity_evidence[%d] descriptor: %w", index, err)
+		}
+		publicKey, err := descriptor.PublicKeyDescriptor()
+		if err != nil {
+			return verify.TrustedKeys{}, fmt.Errorf("sproof: identity_evidence[%d] public key: %w", index, err)
+		}
+		switch evidence.Role {
+		case model.ProofIdentityRoleClient:
+			if evidence.KeyID == proof.ProofBundle.SignedClaim.Signature.KeyID {
+				trust.ClientPublicKey = publicKey
+			}
+		case model.ProofIdentityRoleServer:
+			if evidence.KeyID == proof.ProofBundle.AcceptedReceipt.ServerSig.KeyID {
+				trust.AcceptedReceiptPublicKey = publicKey
+			}
+			if evidence.KeyID == proof.ProofBundle.CommittedReceipt.ServerSig.KeyID {
+				trust.CommittedReceiptPublicKey = publicKey
+			}
+			if proof.GlobalProof != nil && evidence.KeyID == proof.GlobalProof.STH.Signature.KeyID {
+				trust.SignedTreeHeadPublicKey = publicKey
+			}
+		}
+	}
+	return trust, nil
 }
 
 var orderedProofStages = []verify.Stage{

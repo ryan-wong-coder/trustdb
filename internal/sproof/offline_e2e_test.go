@@ -18,6 +18,7 @@ import (
 	"github.com/wowtrust/trustdb/internal/keydescriptor"
 	"github.com/wowtrust/trustdb/internal/model"
 	"github.com/wowtrust/trustdb/internal/proofstore"
+	"github.com/wowtrust/trustdb/internal/receipt"
 	"github.com/wowtrust/trustdb/internal/trustcrypto"
 	"github.com/wowtrust/trustdb/internal/verify"
 	"github.com/wowtrust/trustdb/internal/wal"
@@ -45,8 +46,8 @@ func TestOfflineV2EndToEndAcrossSuitesAndTampering(t *testing.T) {
 				result.ExternalNetworkAccess || result.ExternalProviderAccess {
 				t.Fatalf("VerifyOffline() result = %+v", result)
 			}
-			if result.Identity.EvidenceCount != 2 ||
-				result.Identity.PublicKeyBindingsVerified != 2 {
+			if result.Identity.EvidenceCount != 4 ||
+				result.Identity.PublicKeyBindingsVerified != 4 {
 				t.Fatalf("VerifyOffline() identity report = %+v", result.Identity)
 			}
 			for _, stage := range result.Stages {
@@ -163,7 +164,9 @@ func newOfflineE2EFixture(t *testing.T, suiteID cryptosuite.ID) offlineE2EFixtur
 		t.Fatal(err)
 	}
 	clientSigner, clientPublic := offlineE2EKey(t, suiteID, "client-key")
-	serverSigner, serverPublic := offlineE2EKey(t, suiteID, "server-key")
+	acceptedSigner, acceptedPublic := offlineE2EKey(t, suiteID, "server-accepted")
+	committedSigner, committedPublic := offlineE2EKey(t, suiteID, "server-committed")
+	sthSigner, sthPublic := offlineE2EKey(t, suiteID, "server-sth")
 	suite, err := cryptosuite.RequireAvailable(suiteID)
 	if err != nil {
 		t.Fatal(err)
@@ -220,9 +223,9 @@ func newOfflineE2EFixture(t *testing.T, suiteID cryptosuite.ID) offlineE2EFixtur
 	engine := app.LocalEngine{
 		ServerID:        "node-offline",
 		LogID:           "log-offline",
-		ServerKeyID:     "server-key",
+		ServerKeyID:     "server-accepted",
 		ClientPublicKey: clientPublic,
-		ServerSigner:    serverSigner,
+		ServerSigner:    acceptedSigner,
 		CryptoProvider:  provider,
 		WAL:             writer,
 		Now:             func() time.Time { return time.Unix(200, 0) },
@@ -247,6 +250,17 @@ func newOfflineE2EFixture(t *testing.T, suiteID cryptosuite.ID) offlineE2EFixtur
 	if err != nil {
 		t.Fatal(err)
 	}
+	for index := range commit.Bundles {
+		commit.Bundles[index].CommittedReceipt, err = receipt.SignCommittedWithProvider(
+			ctx,
+			provider,
+			commit.Bundles[index].CommittedReceipt,
+			committedSigner,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	store, err := proofstore.OpenLocalStore(
 		t.TempDir(),
@@ -263,7 +277,7 @@ func newOfflineE2EFixture(t *testing.T, suiteID cryptosuite.ID) offlineE2EFixtur
 		Store:          store,
 		NodeID:         "node-offline",
 		LogID:          "log-offline",
-		Signer:         serverSigner,
+		Signer:         sthSigner,
 		CryptoProvider: provider,
 		Clock:          func() time.Time { return time.Unix(400, 0) },
 	})
@@ -284,7 +298,9 @@ func newOfflineE2EFixture(t *testing.T, suiteID cryptosuite.ID) offlineE2EFixtur
 	}
 	identityEvidence := []model.ProofIdentityEvidence{
 		offlineE2EIdentity(t, suiteID, model.ProofIdentityRoleClient, clientPublic),
-		offlineE2EIdentity(t, suiteID, model.ProofIdentityRoleServer, serverPublic),
+		offlineE2EIdentity(t, suiteID, model.ProofIdentityRoleServer, acceptedPublic),
+		offlineE2EIdentity(t, suiteID, model.ProofIdentityRoleServer, committedPublic),
+		offlineE2EIdentity(t, suiteID, model.ProofIdentityRoleServer, sthPublic),
 	}
 	proof, err := New(commit.Bundles[0], Options{
 		GlobalProof:      &globalProof,
@@ -301,13 +317,17 @@ func newOfflineE2EFixture(t *testing.T, suiteID cryptosuite.ID) offlineE2EFixtur
 		trust: OfflineTrust{
 			Proof: verify.TrustedKeys{
 				ClientPublicKey: clientPublic,
-				ServerPublicKey: serverPublic,
+				ServerPublicKey: acceptedPublic,
 				CryptoProvider:  provider,
 			},
 			Identity: IdentityTrust{
 				ClientPublicKeys: []trustcrypto.PublicKeyDescriptor{clientPublic},
-				ServerPublicKeys: []trustcrypto.PublicKeyDescriptor{serverPublic},
-				RequireEvidence:  true,
+				ServerPublicKeys: []trustcrypto.PublicKeyDescriptor{
+					acceptedPublic,
+					committedPublic,
+					sthPublic,
+				},
+				RequireEvidence: true,
 			},
 		},
 	}

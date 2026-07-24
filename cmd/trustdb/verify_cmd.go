@@ -40,7 +40,7 @@ func newVerifyCommand(rt *runtimeConfig) *cobra.Command {
 		serverURL, recordID                                                   string
 		anchorPluginCommand, anchorPluginStartTimeout, anchorPluginRPCTimeout string
 		anchorPluginArgs                                                      []string
-		clientCARootPaths, serverCARootPaths                                  []string
+		clientCARootPaths, serverCARootPaths, additionalServerPubPaths        []string
 		skipAnchor                                                            bool
 		requireCertificateStatus                                              bool
 	)
@@ -76,6 +76,8 @@ L5 always verifies an STH/global-root anchor; local --anchor requires
 Local .sproof mode verifies every carried public descriptor, registry
 lifecycle, certificate chain, and CRL against independently supplied keys,
 registry keys, and --client-ca-certificate/--server-ca-certificate roots.
+Use repeatable --additional-server-public-key descriptors when accepted,
+committed, and STH signatures span a server-key rotation.
 It performs no network or external provider access and emits a structured
 result for every verification stage.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -147,6 +149,17 @@ result for every verification stage.`,
 			}
 			if clientPub.Suite != serverDescriptor.Suite {
 				return usageError("client and server key descriptors use different cryptographic suites")
+			}
+			serverTrustKeys := []trustcrypto.PublicKeyDescriptor{serverDescriptor}
+			for _, path := range additionalServerPubPaths {
+				additional, _, readErr := readPublicKeyDescriptor(path)
+				if readErr != nil {
+					return readErr
+				}
+				if additional.Suite != serverDescriptor.Suite {
+					return usageError("server trust key descriptors use different cryptographic suites")
+				}
+				serverTrustKeys = append(serverTrustKeys, additional)
 			}
 			provider, err := trustcrypto.ProviderForSuite(serverDescriptor.Suite)
 			if err != nil {
@@ -227,7 +240,7 @@ result for every verification stage.`,
 					Proof: proofTrust,
 					Identity: sproof.IdentityTrust{
 						ClientPublicKeys:         []trustcrypto.PublicKeyDescriptor{clientPub},
-						ServerPublicKeys:         []trustcrypto.PublicKeyDescriptor{serverDescriptor},
+						ServerPublicKeys:         serverTrustKeys,
 						ClientCertificateRoots:   clientCARoots,
 						ServerCertificateRoots:   serverCARoots,
 						RegistryPublicKey:        registryDescriptor,
@@ -279,6 +292,7 @@ result for every verification stage.`,
 	cmd.Flags().StringVar(&registryPath, "key-registry", "", "key registry path")
 	cmd.Flags().StringVar(&registryPubPath, "registry-public-key", "", "registry verifier descriptor")
 	cmd.Flags().StringVar(&serverPubPath, "server-public-key", "", "server verifier descriptor")
+	cmd.Flags().StringArrayVar(&additionalServerPubPaths, "additional-server-public-key", nil, "additional verifier-local server key for historical rotations (repeatable)")
 	cmd.Flags().StringArrayVar(&clientCARootPaths, "client-ca-certificate", nil, "verifier-local client CA certificate (DER or PEM; repeatable)")
 	cmd.Flags().StringArrayVar(&serverCARootPaths, "server-ca-certificate", nil, "verifier-local server CA certificate (DER or PEM; repeatable)")
 	cmd.Flags().BoolVar(&requireCertificateStatus, "require-certificate-status", false, "require complete signing-time CRL evidence for every carried certificate chain")

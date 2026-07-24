@@ -20,9 +20,12 @@ import (
 )
 
 type TrustedKeys struct {
-	ClientPublicKey trustcrypto.PublicKeyDescriptor
-	ServerPublicKey trustcrypto.PublicKeyDescriptor
-	CryptoProvider  trustcrypto.Provider
+	ClientPublicKey           trustcrypto.PublicKeyDescriptor
+	ServerPublicKey           trustcrypto.PublicKeyDescriptor
+	AcceptedReceiptPublicKey  trustcrypto.PublicKeyDescriptor
+	CommittedReceiptPublicKey trustcrypto.PublicKeyDescriptor
+	SignedTreeHeadPublicKey   trustcrypto.PublicKeyDescriptor
+	CryptoProvider            trustcrypto.Provider
 }
 
 // Result is the outcome of ProofBundle. ProofLevel follows the centralized
@@ -110,10 +113,20 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 	if err := validateBundleBindings(bundle, verified, provider); err != nil {
 		return Result{}, failStage(StageBundleBindings, err)
 	}
-	if err := receipt.VerifyAcceptedWithProvider(context.Background(), bundle.AcceptedReceipt, keys.ServerPublicKey, provider); err != nil {
+	if err := receipt.VerifyAcceptedWithProvider(
+		context.Background(),
+		bundle.AcceptedReceipt,
+		publicKeyOrFallback(keys.AcceptedReceiptPublicKey, keys.ServerPublicKey),
+		provider,
+	); err != nil {
 		return Result{}, failStage(StageAcceptedReceipt, err)
 	}
-	if err := receipt.VerifyCommittedWithProvider(context.Background(), bundle.CommittedReceipt, keys.ServerPublicKey, provider); err != nil {
+	if err := receipt.VerifyCommittedWithProvider(
+		context.Background(),
+		bundle.CommittedReceipt,
+		publicKeyOrFallback(keys.CommittedReceiptPublicKey, keys.ServerPublicKey),
+		provider,
+	); err != nil {
 		return Result{}, failStage(StageCommittedReceipt, err)
 	}
 	leaf, err := merkle.HashLeafForSuite(suite.ID, suite.Merkle.Algorithm, bundle.ServerRecord)
@@ -145,7 +158,12 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		ProofLevel: prooflevel.Evaluate(evidence).String(),
 	}
 	if o.global != nil {
-		if err := VerifyGlobalLogProof(bundle, *o.global, keys.ServerPublicKey, provider); err != nil {
+		if err := VerifyGlobalLogProof(
+			bundle,
+			*o.global,
+			publicKeyOrFallback(keys.SignedTreeHeadPublicKey, keys.ServerPublicKey),
+			provider,
+		); err != nil {
 			return Result{}, failStage(StageGlobalLog, err)
 		}
 		evidence.GlobalLogProof = true
@@ -164,6 +182,16 @@ func ProofBundle(raw io.Reader, bundle model.ProofBundle, keys TrustedKeys, opts
 		result.AnchorID = o.anchor.AnchorID
 	}
 	return result, nil
+}
+
+func publicKeyOrFallback(
+	specific trustcrypto.PublicKeyDescriptor,
+	fallback trustcrypto.PublicKeyDescriptor,
+) trustcrypto.PublicKeyDescriptor {
+	if len(specific.Bytes) == 0 {
+		return fallback
+	}
+	return specific
 }
 
 func validateBundleBindings(bundle model.ProofBundle, verified claim.Verified, provider trustcrypto.Provider) error {
