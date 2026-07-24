@@ -173,6 +173,103 @@ func TestLoadBalancedClientDoesNotFailOverAfterSuiteMismatch(t *testing.T) {
 	}
 }
 
+func TestCNSMV1LoadBalancedClientRetriesTransientEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var primaryHits atomic.Int32
+	var secondaryHits atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryHits.Add(1)
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	defer primary.Close()
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondaryHits.Add(1)
+		writeJSONForTest(t, w, http.StatusAccepted, submitClaimEnvelope{
+			RecordID: "tr1-cn-secondary",
+			ServerRecord: ServerRecord{
+				SchemaVersion: model.SchemaServerRecord,
+				CryptoSuite:   cryptosuite.CNSMV1,
+				RecordID:      "tr1-cn-secondary",
+			},
+		})
+	}))
+	defer secondary.Close()
+
+	_, privateKey, err := GenerateCNSMV1SoftwareKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewLoadBalancedClientForSuite(
+		[]string{primary.URL, secondary.URL},
+		CryptoSuiteCNSMV1,
+		LoadBalanceOptions{Mode: LoadBalanceFailover},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.SubmitFile(
+		context.Background(),
+		bytes.NewReader([]byte("retry")),
+		mustCNSMV1Identity(t, "tenant", "client", "sm2", privateKey),
+		FileClaimOptions{
+			Nonce:          bytes.Repeat([]byte{0x44}, 16),
+			IdempotencyKey: "cn-retry-1",
+			EventType:      "file.snapshot",
+		},
+	)
+	if err != nil {
+		t.Fatalf("SubmitFile: %v", err)
+	}
+	if result.RecordID != "tr1-cn-secondary" || primaryHits.Load() != 1 || secondaryHits.Load() != 1 {
+		t.Fatalf("result=%+v hits primary=%d secondary=%d", result, primaryHits.Load(), secondaryHits.Load())
+	}
+}
+
+func TestCNSMV1NativeLogStreamPreservesSuite(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := GenerateCNSMV1SoftwareKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &capturingSuiteStreamTransport{received: make(chan SignedClaim, 2)}
+	client, err := NewClientWithTransportForSuite(transport, CryptoSuiteCNSMV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make(chan LogEntry, 2)
+	entries <- LogEntry{Body: []byte(`{"index":0}`), Options: fixedLogClaimOptions("cn-stream-0", 1)}
+	entries <- LogEntry{Body: []byte(`{"index":1}`), Options: fixedLogClaimOptions("cn-stream-1", 2)}
+	close(entries)
+	results, err := client.SubmitLogStream(
+		context.Background(),
+		entries,
+		mustCNSMV1Identity(t, "tenant", "client", "sm2", privateKey),
+		LogStreamOptions{QueueSize: 2, Concurrency: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for result := range results {
+		if result.Err != nil {
+			t.Fatalf("stream result: %v", result.Err)
+		}
+		count++
+	}
+	if count != 2 {
+		t.Fatalf("stream results=%d, want 2", count)
+	}
+	for signed := range transport.received {
+		if signed.CryptoSuite != cryptosuite.CNSMV1 ||
+			signed.Claim.Content.HashAlg != cryptosuite.HashSM3 ||
+			signed.Signature.Alg != cryptosuite.SignatureSM2SM3 {
+			t.Fatalf("received non-CN stream claim: %+v", signed)
+		}
+	}
+}
+
 func TestCNSMV1GRPCSubmitPreservesSuite(t *testing.T) {
 	t.Parallel()
 
@@ -232,4 +329,28 @@ func TestCNSMV1GRPCSubmitPreservesSuite(t *testing.T) {
 	if received.Load() != 1 || result.ServerRecord.CryptoSuite != cryptosuite.CNSMV1 {
 		t.Fatalf("received=%d result=%+v", received.Load(), result)
 	}
+}
+
+type capturingSuiteStreamTransport struct {
+	stubTransport
+	received chan SignedClaim
+}
+
+func (t *capturingSuiteStreamTransport) SubmitSignedClaimStream(
+	_ context.Context,
+	input <-chan signedClaimStreamItem,
+) (<-chan signedClaimStreamItemResult, error) {
+	output := make(chan signedClaimStreamItemResult)
+	go func() {
+		defer close(output)
+		defer close(t.received)
+		for item := range input {
+			t.received <- item.SignedClaim
+			output <- signedClaimStreamItemResult{
+				Index:  item.Index,
+				Result: SubmitResult{SignedClaim: item.SignedClaim},
+			}
+		}
+	}()
+	return output, nil
 }
